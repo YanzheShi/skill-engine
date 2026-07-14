@@ -15,6 +15,7 @@ Runner — Skill 执行器，三路分流
 """
 
 import time
+import yaml
 from pathlib import Path
 from typing import Optional
 from langchain_core.tools import tool
@@ -63,7 +64,8 @@ class Runner:
         executor: Executor,
         llm_api_base: Optional[str] = None,
         llm_api_key: Optional[str] = None,
-        llm_model: str = "gpt-5.5",
+        llm_model: str = "",
+
     ):
         self.assembler = assembler
         self.executor = executor
@@ -176,6 +178,9 @@ class Runner:
             if "file_created" in result:
                 files_created.append(result["file_created"])
 
+            # 每步间隔 1 秒，防止触发 API RPM 限制
+            time.sleep(1)
+
         # 空 steps 列表返回空 output
         if not steps:
             return {
@@ -239,36 +244,33 @@ class Runner:
         template = self._resolve_template(
             step.template or "", prev_outputs, arguments
         )
-        model = step.model or self.llm_model
+        # step 不需要关心model
+        # model = step.model or self.llm_model
 
         # 使用 config.get_llm() 获取 LLM
         try:
             from skill_engine.config import get_llm
-            from langchain.agents import create_agent
 
-            llm = get_llm("agnes", temperature=0.7)
+            llm = get_llm(temperature=0.7)
 
-            agent = create_agent(
-                llm,
-                tools=[],
-                system_prompt=template,
-            )
-
-            result = agent.invoke({"messages": [("user", template)]})
-            last_msg = result["messages"][-1]
-            output = getattr(last_msg, "content", str(last_msg)) if hasattr(last_msg, "content") else str(last_msg)
+            # 直接调用 LLM，不使用 create_agent（避免额外依赖）
+            resp = llm.invoke(template)
+            if hasattr(resp, "content"):
+                output = resp.content if isinstance(resp.content, str) else str(resp.content)
+            else:
+                output = str(resp)
 
             return {
                 "name": step.name,
                 "type": "llm",
-                "model": model,
+                # "model": model,
                 "output": output,
             }
         except Exception as e:
             return {
                 "name": step.name,
                 "type": "llm",
-                "model": model,
+                # "model": model,
                 "error": str(e),
                 "output": f"[LLM 调用失败: {e}]",
             }
@@ -330,6 +332,58 @@ class Runner:
     # Phase 8: 档位 B — tool_dispatch loop
     # ================================================================
 
+    def _parse_steps_from_body(self, body: str) -> Optional[list[Step]]:
+        """从 SKILL.md body 中解析 ## Steps 部分的步骤定义。
+
+        返回 Step 列表如果找到 ## Steps 部分，否则返回 None。
+
+        解析格式（YAML-block 列表，每个 step 以 `- name:` 开头）：
+        ```
+        ## Steps
+
+        - name: fetch_problem
+          type: exec
+          command: python scripts/fetch_problem.py $0
+          timeout: 30
+
+        - name: save_solution
+          type: write
+          output_file: output/49_solution.md
+          template: |
+            # 题解 49
+        ```
+        """
+        import re
+
+        match = re.search(r'^## Steps\s*\n(.*?)(?=^## |\Z)', body, re.MULTILINE | re.DOTALL)
+        if not match:
+            return None
+
+        steps_text = match.group(1).strip()
+        if not steps_text:
+            return None
+
+        steps = []
+        # 分割每个 step block（以 "- name:" 开头）
+        step_blocks = re.split(r'\n(?=- name:)', steps_text)
+
+        for block in step_blocks:
+            block = block.strip()
+            if not block:
+                continue
+            # 移除开头的 "- name:" 标记，解析为 YAML
+            try:
+                step_dict = yaml.safe_load(block)
+                # YAML 看到 "- name:" 会解析为列表 [dict]，需要解包
+                if isinstance(step_dict, list) and len(step_dict) == 1:
+                    step_dict = step_dict[0]
+                if isinstance(step_dict, dict) and 'name' in step_dict:
+                    steps.append(Step(**step_dict))
+            except yaml.YAMLError:
+                continue
+
+        return steps if steps else None
+
     def run(
         self,
         match_result: MatchResult,
@@ -338,17 +392,23 @@ class Runner:
         tool_dispatch: Optional[object] = None,
         max_iterations: int = 10,
     ) -> dict:
-        """执行 skill — 四路分流
+        """执行 skill — 四路分流（含 Steps DSL 自动检测）
 
         Args:
             match_result: 匹配结果
             steps: 自定义 steps DSL（可选）
             llm: LLM 客户端（可选，档位 A）
-            tool_dispatch: LLM 客户端（可选，档位 B，接受 messages 返回列表）
+            tool_dispatch: LLM 客户端（可选，档位 B）
             max_iterations: 最大迭代次数（档位 B）
         """
         skill = match_result.skill
         arguments = match_result.arguments
+
+        # 路径 0: 自动检测 body 中的 steps（优先级最高）
+        if steps is None:
+            parsed = self._parse_steps_from_body(skill.body)
+            if parsed is not None:
+                steps = parsed
 
         # 路径 1: 显式传入 steps → 确定性执行
         if steps is not None:
@@ -915,65 +975,123 @@ class Runner:
             "stopped_by": "max_planning_steps",
         }
 
-    # ================================================================
-    # Phase 11+12: Skill 自动创建 + 验证
+    # Phase 11+12: Skill 自动创建 + 验证 + 热注册
     # ================================================================
 
     def create_skill(
         self,
-        name: str,
-        description: str,
+        # LLM 模式参数
+        intent: Optional[str] = None,
+        llm: Optional[object] = None,
+        # 通用参数
+        name: Optional[str] = None,
+        dry_run: bool = False,
+        # 直接模式参数（向后兼容）
+        description: Optional[str] = None,
         groups: Optional[list[str]] = None,
         when_to_use: str = "",
         argument_hint: str = "",
+        arguments: Optional[list[str]] = None,
         body_template: str = "",
         scripts: Optional[dict[str, str]] = None,
+        assets: Optional[dict[str, str]] = None,
+        steps: Optional[list] = None,
         skills_dir: str = "skills",
     ) -> dict:
-        """LLM 调用：自动生成 skill 目录结构 + 验证
+        """创建 skill — 双模式
 
-        工作流程：
-        1. SkillCreator 创建 SKILL.md + scripts/
-        2. SkillValidator 验证（compile + scripts 检查）
-        3. 返回结果
+        LLM 模式（Phase 11 主模式）：
+            传入 intent + llm → LLM 自动生成完整设计
+
+        直接模式（向后兼容）：
+            传入 name + description + ... → 直接调 Creator 写入
 
         Args:
-            name: skill 名称
-            description: 描述
-            groups: 分组标签
-            when_to_use: 适用场景
-            argument_hint: 参数提示
-            body_template: SKILL.md 正文
-            scripts: {文件名: 内容}
-            skills_dir: skill 存放目录
+            intent: 自然语言意图（LLM 模式）
+            llm: LLM 客户端（LLM 模式）
+            name: 可选，覆盖 LLM 生成的名称（LLM 模式）或必填（直接模式）
+            dry_run: 仅生成 design 不写入（LLM 模式）
+            description/groups/etc: 直接模式参数
 
         Returns:
-            {status, path, errors, validated, compile_result}
+            {name, path, status, valid, errors, ...}
         """
         from .creator import SkillCreator, SkillValidator
+        from .discovery import discover
+        from .registry import Registry
+
+        # LLM 模式
+        if intent is not None and llm is not None:
+            from .designer import SkillDesigner
+
+            designer = SkillDesigner()
+            design = designer.design(intent, llm)
+
+            if name:
+                design["name"] = name
+
+            if dry_run:
+                return {"valid": True, "design": design, "dry_run": True}
+
+            VALID_CREATE_KEYS = {
+                "name", "description", "groups", "when_to_use",
+                "argument_hint", "arguments", "body_template",
+                "scripts", "assets", "steps",
+            }
+            filtered = {k: v for k, v in design.items() if k in VALID_CREATE_KEYS}
+
+            creator = SkillCreator(base_dir=skills_dir)
+            result = creator.create(**filtered)
+            result["name"] = design["name"]
+
+            if result["status"] == "success":
+                index = discover(roots=[skills_dir])
+                registry = Registry(index)
+                skill = registry.load_skill(design["name"])
+                if skill:
+                    validator = SkillValidator(self.assembler, self.executor)
+                    validation = validator.full_validate(skill)
+                    result["validated"] = True
+                    result["compile_result"] = validation["compile"]
+                    result["scripts_result"] = validation["scripts"]
+                    result["valid"] = validation["valid"]
+                else:
+                    result["errors"].append("注册失败：无法加载新 skill")
+                    result["status"] = "failed"
+                    result["valid"] = False
+            else:
+                result["validated"] = False
+                result["valid"] = False
+
+            return result
+
+        # 直接模式（向后兼容）
+        assert name is not None, "直接模式需要提供 name 参数"
 
         creator = SkillCreator(base_dir=skills_dir)
+        bt = body_template
+        if not bt and (steps or arguments):
+            bt = ""  # 触发结构化 body
+        elif not bt:
+            bt = self._default_body_template(name, description or "")
+
         result = creator.create(
             name=name,
-            description=description,
+            description=description or "",
             groups=groups,
             when_to_use=when_to_use,
             argument_hint=argument_hint,
-            body_template=body_template or self._default_body_template(name, description),
+            arguments=arguments,
+            body_template=bt,
             scripts=scripts,
+            assets=assets,
+            steps=steps,
         )
 
         if result["status"] == "success":
-            # 验证
-            from .registry import Registry
-            from .discovery import discover
-            from .models import Skill
-
-            # 重新 discover 以发现新 skill
             index = discover(roots=[skills_dir])
             registry = Registry(index)
             skill = registry.load_skill(name)
-
             if skill:
                 validator = SkillValidator(self.assembler, self.executor)
                 validation = validator.full_validate(skill)

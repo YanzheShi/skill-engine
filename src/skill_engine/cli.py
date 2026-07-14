@@ -22,6 +22,9 @@ from typing import Optional
 if sys.platform == "win32":
     import locale
     locale.setlocale(locale.LC_ALL, "zh_CN.UTF-8")
+    # 重写 stdout/stderr 为 UTF-8，解决中文乱码
+    sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
+    sys.stderr = open(sys.stderr.fileno(), mode='w', encoding='utf-8', buffering=1)
 
 app = typer.Typer(
     name="skill-engine",
@@ -157,6 +160,7 @@ def run(
     method: str = typer.Option("keyword", "--method", help="匹配方法: name/keyword/llm"),
     llm: bool = typer.Option(False, "--llm", help="使用 LLM 单次调用（档位 A）"),
     tool_dispatch: bool = typer.Option(False, "--tool-dispatch", "-td", help="使用 tool_dispatch 循环（档位 B，CC 原生 skill 兼容）"),
+    steps: bool = typer.Option(False, "--steps", help="使用 Steps DSL 确定性执行（自动检测 body 中的 ## Steps）"),
     max_iterations: int = typer.Option(10, "--max-iter", help="档位 B 最大迭代次数"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只编译不执行（输出 prompt）"),
     args: str = typer.Option("", "--args", "-a", help="用户实际请求参数（当指定 skill name 时使用）"),
@@ -164,10 +168,11 @@ def run(
     """执行 skill
 
     执行模式（优先级从高到低）：
-    1. --dry-run: 只编译，输出 prompt
-    2. --tool-dispatch: 档位 B，tool_dispatch loop（CC 原生 skill）
-    3. --llm: 档位 A，单次 LLM 调用
-    4. 默认: 纯编译（pipe 模式）
+    1. --steps: Steps DSL 确定性执行（自动检测 body 中的 ## Steps）
+    2. --dry-run: 只编译，输出 prompt
+    3. --tool-dispatch: 档位 B，tool_dispatch loop（CC 原生 skill）
+    4. --llm: 档位 A，单次 LLM 调用
+    5. 默认: 纯编译（pipe 模式）
     """
     from .discovery import discover
     from .registry import Registry
@@ -235,6 +240,17 @@ def run(
             r.arguments["$ARGUMENTS"] = user_query
             r.arguments["$0"] = user_query
 
+            # 如果是 --steps 模式，尝试解析命名参数（key=value 格式）
+            if steps and "=" in user_query:
+                for kv in user_query.split():
+                    if "=" in kv:
+                        key, val = kv.split("=", 1)
+                        # 去掉可能的 $ 前缀
+                        key = key.lstrip("$")
+                        upper_key = key.upper()
+                        r.arguments[f"${key}"] = val       # $file_path
+                        r.arguments[f"${upper_key}"] = val  # $FILE_PATH
+
         if dry_run:
             # 只编译，输出 prompt
             prompt = assembler.assemble(r.skill, r.arguments)
@@ -272,8 +288,11 @@ def run(
             continue
 
         if llm:
-            # 档位 A：需要 mock LLM（生产环境替换为真实 LLM 客户端）
             result = runner.run(r, llm=_get_llm_client())
+        elif steps:
+            # Steps DSL 确定性执行：runner.run() 内部自动检测 body 中的 ## Steps
+            print(f"[INFO] 使用 Steps DSL 确定性执行模式")
+            result = runner.run(r)
         else:
             result = runner.run(r)
 
@@ -281,7 +300,26 @@ def run(
         print(f"Skill: {result['skill_name']}")
         print(f"分数: {result['score']:.2f}")
         if 'steps' in result and result['steps']:
-            print(f"步骤: {[s.get('name', '?') for s in result['steps']]}")
+            print(f"步骤:")
+            for s in result['steps']:
+                status = "OK" if s.get("exit_code", 0) == 0 or s.get("type") in ("llm", "write") else f"ERR(exit={s.get('exit_code')})"
+                print(f"  - {s.get('name')} ({s.get('type')}): {status}")
+                if 'output' in s and s['output']:
+                    out = str(s['output'])
+                    try:
+                        encoded = out.encode('utf-8', errors='replace').decode('utf-8')
+                        if len(encoded) > 200:
+                            encoded = encoded[:200] + "..."
+                        print(f"    输出: {encoded}")
+                    except Exception:
+                        print(f"    输出: [无法显示]")
+                if 'error' in s and s['error']:
+                    try:
+                        print(f"    错误: {str(s['error']).encode('utf-8', errors='replace').decode('utf-8')}")
+                    except Exception:
+                        print(f"    错误: [无法显示]")
+        if 'iterations' in result:
+            print(f"迭代: {result['iterations']} 次")
         print(f"{'='*60}")
         print(result["output"])
         if result["files_created"]:
@@ -466,3 +504,72 @@ def uninstall(
 
     shutil.rmtree(skill_dir)
     print(f"已卸载: {name}")
+
+
+@app.command()
+def create(
+    intent: str = typer.Argument(..., help="自然语言描述你想要创建的 skill"),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="指定 skill 名称（覆盖 LLM 自动生成的名称）"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="只打印生成的 design 不写入文件"),
+):
+    """通过自然语言创建 Skill（Phase 11: LLM-Native）
+
+    使用 LLM 生成完整的 skill 定义，包括 SKILL.md、scripts/、assets/。
+
+    使用示例：
+    \b
+      # 基本用法
+      skill-engine create "帮我写一个分析 Python 代码质量的 skill"
+
+      # 指定名称覆盖 LLM 自动生成的
+      skill-engine create "帮我写一个分析代码的 skill" --name code-analyzer
+
+      # 调试：只打印 design 不写文件
+      skill-engine create "帮我写一个分析代码的 skill" --dry-run
+    """
+    from .config import get_llm
+    from .runner import Runner
+    from .assembler import Assembler
+    from .executor import Executor
+
+    print("[INFO] 获取 LLM 客户端...")
+    llm = get_llm()
+    print("[INFO] LLM 客户端就绪")
+
+    executor = Executor(timeout=30, allow_all=True)
+    assembler = Assembler(executor=executor)
+    runner = Runner(assembler, executor)
+
+    print("[INFO] 正在调用 LLM 生成 skill 设计（可能需要 30-60 秒）...")
+    import sys
+    sys.stdout.flush()
+
+    result = runner.create_skill(
+        intent=intent,
+        llm=llm,
+        name=name,
+        dry_run=dry_run,
+    )
+
+    if dry_run:
+        print(json.dumps(result.get("design", {}), indent=2, ensure_ascii=False))
+        return
+
+    print(f"\n{'='*60}")
+    print(f"  Skill 创建结果")
+    print(f"{'='*60}")
+    print(f"  名称: {result.get('name', 'N/A')}")
+    print(f"  状态: {'✅ 成功' if result.get('valid') else '❌ 失败'}")
+    print(f"  路径: {result.get('path', 'N/A')}")
+
+    if result.get("errors"):
+        print(f"  错误:")
+        for err in result["errors"]:
+            print(f"    - {err}")
+
+    if not result.get("valid") and result.get("compile_result", {}).get("errors"):
+        print(f"  编译错误:")
+        for err in result["compile_result"]["errors"]:
+            print(f"    - {err}")
+
+    print(f"{'='*60}")
