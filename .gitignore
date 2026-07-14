@@ -47,6 +47,13 @@ Thumbs.db
 # uv lock file is auto-generated
 uv.lock
 
+# Generated / temp directories
+.ai/
+analysis_output/
+output/
+${ANALYSIS_OUTPUT_DIR}/
+fix_indent.py
+
 # .env files may contain API keys
 .env
 .env.*

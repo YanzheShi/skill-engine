@@ -1,0 +1,78 @@
+intention:
+- 生成诗歌
+- 创作诗歌
+- 写诗
+synonyms:
+  生成:
+    中文近义词:
+    - 产生
+    - 创建
+    英文对应词:
+    - generate
+    - create
+  诗歌:
+    中文近义词:
+    - 诗
+    - 诗篇
+    英文对应词:
+    - poem
+    - poetry
+  创作:
+    中文近义词:
+    - 撰写
+    - 编创
+    英文对应词:
+    - compose
+    - create
+  写:
+    中文近义词:
+    - 撰写
+    - 书写
+    英文对应词:
+    - write
+    - compose
+  诗:
+    中文近义词:
+    - 诗歌
+    - 诗篇
+    英文对应词:
+    - poem
+    - poetry
+purpose: 根据用户主题和情感生成各种形式的英文诗歌。
+keywords:
+  动词:
+  - 生成/generate
+  - 创建/create
+  - 写/write
+  - 分析/analyze
+  - 选择/choose
+  - 返回/return
+  - 适应/adapt
+  - 保持/maintain
+  - 注意/pay
+  - 使用/use
+  - 支持/support
+  名词:
+  - 主题/theme
+  - 情感/emotion
+  - 形式/form
+  - 诗/poem
+  - 十四行诗/sonnet
+  - 俳句/haiku
+  - 自由诗/free verse
+  - 打油诗/limerick
+  - 颂歌/ode
+  - 意象/imagery
+  - 节奏/rhythm
+  - 语调/tone
+  - 风格/style
+  - 意图/intent
+  - 音节/syllable
+  - 行/line
+  - 韵/rhyme
+  - 措辞/word choice
+  - 音乐性/musicality
+meta_version: 2
+source_hash: 95b09c920a3d0d10
+computed_at: '2026-07-14T09:26:37.696767+00:00'
+provider: llm

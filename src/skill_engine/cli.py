@@ -14,6 +14,7 @@ CLI — 命令行接口
 """
 
 import json
+import logging
 import sys
 import typer
 from typing import Optional
@@ -94,6 +95,7 @@ def info(
 def match(
     query: str = typer.Argument(..., help="用户输入/查询"),
     explain: bool = typer.Option(False, "--explain", "-e", help="显示每层匹配详情"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="显示路由详细日志"),
 ):
     """匹配 skills 到用户输入"""
     from pathlib import Path
@@ -105,7 +107,10 @@ def match(
     roots = [str(project_skills)] if project_skills.exists() else []
     index = discover(roots=roots)
     registry = Registry(index)
-    router = _create_router(registry)
+    if verbose:
+        logging.getLogger("skill_engine.router").setLevel(logging.INFO)
+        logging.basicConfig(format="%(message)s", level=logging.INFO)
+    router = _create_router(registry, verbose=verbose)
 
     llm = _get_llm_client()
     plan = router.match(query, llm=llm)
@@ -199,14 +204,15 @@ def clear_cache():
     print("缓存已清空")
 
 
-def _create_router(registry):
-    """创建 Router 实例，可选挂载 Preprocessor 实现 lazy 预处理
+def _create_router(registry, verbose: bool = False):
+    """创建 Router 实例
 
-    Preprocessor 只在有 LLM 配置时创建，不影响 Router 正常运行。
-    使用 lazy 创建：首次需要时才会调 get_llm()。
+    Args:
+        registry: Registry 实例
+        verbose: 是否启用 Router 详细日志
     """
     from .router import Router
-    return Router(registry, preprocessor=None)
+    return Router(registry, preprocessor=None, verbose=verbose)
 
 
 @app.command()

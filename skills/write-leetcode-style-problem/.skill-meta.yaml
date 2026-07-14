@@ -1,0 +1,56 @@
+intention:
+- 生成题目
+- 保存文件
+synonyms:
+  生成题目:
+    近义词:
+    - 创建题目
+    - 编写题目
+    - 生成算法题
+    英文: generate problem
+  保存文件:
+    近义词:
+    - 写入文件
+    - 存储到文件
+    - 输出文件
+    英文: save to file
+purpose: 根据主题和难度生成LeetCode风格算法题并保存到文件
+keywords:
+  动词:
+  - 中文: 生成
+    英文: generate
+  - 中文: 保存
+    英文: save
+  - 中文: 写入
+    英文: write
+  - 中文: 创建
+    英文: create
+  - 中文: 指定
+    英文: specify
+  - 中文: 输出
+    英文: output
+  名词:
+  - 中文: LeetCode
+    英文: LeetCode
+  - 中文: 算法
+    英文: algorithm
+  - 中文: 题目
+    英文: problem
+  - 中文: 主题
+    英文: topic
+  - 中文: 难度
+    英文: difficulty
+  - 中文: 文件
+    英文: file
+  - 中文: Markdown
+    英文: markdown
+  - 中文: 模板
+    英文: template
+  - 中文: 参数
+    英文: parameter
+  - 中文: 约束
+    英文: constraint
+meta_version: 2
+source_hash: efeac96c7ab4874f
+computed_at: '2026-07-14T09:28:12.785753+00:00'
+provider: llm

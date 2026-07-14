@@ -1,0 +1,46 @@
+intention:
+- 创建技能
+- 生成文档
+- 自动验证
+synonyms:
+  创建技能:
+  - 生成技能
+  - 建立技能
+  - create skill
+  生成文档:
+  - 创建文档
+  - 编写文档
+  - generate document
+  自动验证:
+  - 自动检查
+  - 自动校验
+  - auto verify
+purpose: 根据用户需求自动创建新skill并生成配套脚本
+keywords:
+  动词:
+  - 创建/create
+  - 生成/generate
+  - 分析/analyze
+  - 确定/determine
+  - 返回/return
+  - 使用/use
+  - 设置/set
+  - 验证/validate
+  名词:
+  - skill/skill
+  - SKILL.md/SKILL.md
+  - 脚本/script
+  - 名称/name
+  - 描述/description
+  - 组/groups
+  - frontmatter/frontmatter
+  - kebab-case/kebab-case
+  - 目录/catalog
+  - 需求/requirement
+  - 功能/function
+  - 结果/result
+  - 场景/scenario
+meta_version: 2
+source_hash: 09374823c2ee9854
+computed_at: '2026-07-14T09:27:42.577980+00:00'
+provider: llm
