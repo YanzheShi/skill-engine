@@ -93,8 +93,7 @@ def info(
 @app.command()
 def match(
     query: str = typer.Argument(..., help="用户输入/查询"),
-    top_k: int = typer.Option(5, "--top-k", "-k", help="返回前 K 个匹配结果"),
-    method: str = typer.Option("keyword", "--method", help="匹配方法: name/keyword/embedding"),
+    explain: bool = typer.Option(False, "--explain", "-e", help="显示每层匹配详情"),
 ):
     """匹配 skills 到用户输入"""
     from pathlib import Path
@@ -106,15 +105,62 @@ def match(
     roots = [str(project_skills)] if project_skills.exists() else []
     index = discover(roots=roots)
     registry = Registry(index)
-    router = Router(registry)
+    router = _create_router(registry)
 
-    results = router.match(query, method=method, top_k=top_k)
+    llm = _get_llm_client()
+    plan = router.match(query, llm=llm)
 
     print(f"\n匹配 '{query}' 的结果:\n")
-    for i, r in enumerate(results, 1):
-        print(f"  {i}. {r.skill.metadata.name} (分数: {r.score:.2f}, 方法: {r.method})")
-        print(f"     目录: {r.skill.directory}")
-        print()
+    if plan.primary:
+        print(f"  {plan.primary.name} (分数: {plan.score or 'N/A'}, 方法: {plan.method})")
+        if plan.uncertain:
+            print(f"  ⚠️ 匹配结果不确定")
+    elif plan.selections:
+        for i, s in enumerate(plan.selections, 1):
+            print(f"  {i}. {s.name} (角色: {s.role or '默认'})")
+        print(f"  模式: multi ({len(plan.selections)} 个 skill 协同)")
+    else:
+        print(f"  ❌ 未找到匹配的 skill")
+        if plan.reason:
+            print(f"  原因: {plan.reason}")
+
+    if explain:
+        print(f"\n  ── 匹配详情 ──")
+        print(f"  模式: {plan.mode}")
+        print(f"  方法: {plan.method}")
+        if plan.score is not None:
+            print(f"  分数: {plan.score:.4f}")
+        if plan.uncertain:
+            print(f"  不确定: True")
+        if plan.reason:
+            print(f"  说明: {plan.reason}")
+
+        if plan.method == "exact":
+            print(f"  精确命中: name/alias/shortcut 匹配")
+        elif plan.method == "keyword":
+            # 展示分词结果和 intention 命中情况
+            try:
+                from .tokenize import tokenize_query
+                qtokens = tokenize_query(query)
+                if qtokens.get("verbs_zh"):
+                    print(f"  中文动词: {', '.join(qtokens['verbs_zh'])}")
+                if qtokens.get("nouns_zh"):
+                    print(f"  中文名词: {', '.join(qtokens['nouns_zh'])}")
+                if qtokens.get("nouns_en"):
+                    print(f"  领域名词: {', '.join(qtokens['nouns_en'])}")
+            except Exception:
+                pass
+
+            if plan.primary:
+                meta = registry.load_meta(plan.primary.name)
+                if meta and meta.meta_cache:
+                    mc = meta.meta_cache
+                    if "intention" in mc:
+                        print(f"  命中 intention: {mc['intention']}")
+                    if "purpose" in mc:
+                        print(f"  目的: {mc['purpose']}")
+        elif plan.method == "llm" and plan.reason:
+            print(f"  LLM 判定: {plan.reason}")
 
 
 @app.command()
@@ -153,11 +199,19 @@ def clear_cache():
     print("缓存已清空")
 
 
+def _create_router(registry):
+    """创建 Router 实例，可选挂载 Preprocessor 实现 lazy 预处理
+
+    Preprocessor 只在有 LLM 配置时创建，不影响 Router 正常运行。
+    使用 lazy 创建：首次需要时才会调 get_llm()。
+    """
+    from .router import Router
+    return Router(registry, preprocessor=None)
+
+
 @app.command()
 def run(
     query_or_name: str = typer.Argument(..., help="skill 名称或用户输入"),
-    top_k: int = typer.Option(1, "--top-k", "-k", help="执行前 K 个匹配结果"),
-    method: str = typer.Option("keyword", "--method", help="匹配方法: name/keyword/llm"),
     llm: bool = typer.Option(False, "--llm", help="使用 LLM 单次调用（档位 A）"),
     tool_dispatch: bool = typer.Option(False, "--tool-dispatch", "-td", help="使用 tool_dispatch 循环（档位 B，CC 原生 skill 兼容）"),
     steps: bool = typer.Option(False, "--steps", help="使用 Steps DSL 确定性执行（自动检测 body 中的 ## Steps）"),
@@ -188,141 +242,98 @@ def run(
     index = discover(roots=roots)
     registry = Registry(index)
 
-    # 2. 匹配：按用户指定的 method 或 args 模式
-    router = Router(registry)
+    # 2. 匹配
+    router = _create_router(registry)
 
-    # 如果 args 不为空，说明 query_or_name 是 skill name，args 才是用户请求
-    user_query = args if args else query_or_name
-    print(f"[DEBUG cli] user_query='{user_query}', method='{method}', args='{args}'")
+    # --args 模式：query_or_name 是 skill 名，args 是用户请求
+    # 否则 query_or_name 是自然语言查询，走三步路由
+    match_query = args if args else query_or_name
+    llm = _get_llm_client()
+    plan = router.match(match_query, llm=llm)
 
-    if args:
-        # args 模式：query_or_name 是 skill 名，精确匹配 name
-        results = router.match(query_or_name, method="name", top_k=1)
-        print(f"[DEBUG cli] name match (via args): {[(r.skill.metadata.name, r.score) for r in results]}")
-
-    elif method:
-        # 按用户指定的 method 匹配（keyword / name / llm）
-        results = router.match(user_query, method=method, top_k=top_k)
-        print(f"[DEBUG cli] {method} match: {[(r.skill.metadata.name, r.score) for r in results]}")
-        # 匹配不到时兜底试 name 精确匹配（用户可能传了 skill 名）
-        if not results and method != "name":
-            results = router.match(user_query, method="name", top_k=1)
-            print(f"[DEBUG cli] name fallback: {[(r.skill.metadata.name, r.score) for r in results]}")
-            # name 还匹配不到，再试一次 keyword/llm fallback
-            if not results and method == "llm":
-                results = router.match(user_query, method="keyword", top_k=top_k)
-                print(f"[DEBUG cli] keyword fallback (from llm): {[(r.skill.metadata.name, r.score) for r in results]}")
-
-    else:
-        # 默认 fallback 链：name → keyword → llm
-        results = router.match(user_query, method="name", top_k=1)
-        print(f"[DEBUG cli] name match: {[(r.skill.metadata.name, r.score) for r in results]}")
-        if not results:
-            results = router.match(user_query, method="keyword", top_k=top_k)
-            print(f"[DEBUG cli] keyword match: {[(r.skill.metadata.name, r.score) for r in results]}")
-            if not results or (results and results[0].score < 0.5):
-                print(f"[DEBUG cli] keyword score too low ({results[0].score if results else 'N/A'}), fallback to LLM")
-                results = router.match(user_query, method="llm", top_k=top_k)
-                print(f"[DEBUG cli] LLM match: {[(r.skill.metadata.name, r.score) for r in results]}")
-
-    if not results:
+    if not plan.primary and not plan.selections:
         print(f"[ERROR] 未找到匹配的 skill: {query_or_name}")
+        if plan.reason:
+            print(f"  原因: {plan.reason}")
         raise typer.Exit(code=1)
 
+    if plan.uncertain:
+        print(f"[WARN] 匹配结果不确定（方法: {plan.method}）")
+
     # 3. 编译 + 执行
-    executor = Executor(timeout=30, allow_all=True)  # MVP 全允许
+    executor = Executor(timeout=30, allow_all=True)
     assembler = Assembler(executor=executor, command_timeout=30)
     runner = Runner(assembler, executor)
 
-    for r in results:
-        # 如果有用户请求，覆盖 arguments（优先用 args 的值）
-        if user_query:
-            r.arguments["$ARGUMENTS"] = user_query
-            r.arguments["$0"] = user_query
+    if dry_run:
+        # 只编译，不执行
+        if plan.primary:
+            skill = registry.load_skill(plan.primary.name)
+            if skill:
+                prompt = assembler.assemble(skill, {"$ARGUMENTS": match_query, "$0": match_query})
+                print(f"\n{'='*60}")
+                print(f"Skill: {skill.metadata.name}")
+                print(f"分数: {plan.score or 1.0:.2f}")
+                print(f"{'='*60}")
+                print(prompt)
+            else:
+                print(f"[ERROR] 无法加载 skill: {plan.primary.name}")
+        elif plan.selections:
+            for s in plan.selections:
+                skill = registry.load_skill(s.name)
+                if skill:
+                    prompt = assembler.assemble(skill, {"$ARGUMENTS": match_query, "$0": match_query})
+                    print(f"\n{'='*60}")
+                    print(f"Skill: {skill.metadata.name}")
+                    print(f"{'='*60}")
+                    print(prompt[:2000])
+        return
 
-            # 如果是 --steps 模式，尝试解析命名参数（key=value 格式）
-            if steps and "=" in user_query:
-                for kv in user_query.split():
-                    if "=" in kv:
-                        key, val = kv.split("=", 1)
-                        # 去掉可能的 $ 前缀
-                        key = key.lstrip("$")
-                        upper_key = key.upper()
-                        r.arguments[f"${key}"] = val       # $file_path
-                        r.arguments[f"${upper_key}"] = val  # $FILE_PATH
+    if tool_dispatch:
+        td_llm = _get_tool_llm_client()
+        if not td_llm:
+            print("[ERROR] --tool-dispatch 需要 LLM 配置")
+            print("  请设置环境变量: AGNES_MODEL, AGNES_BASE_URL, AGNES_API_KEY")
+            print("  或去掉 --tool-dispatch 使用纯编译模式")
+            raise typer.Exit(code=1)
+        print(f"[INFO] 使用 tool_dispatch 模式 (档位 B), 最大迭代 {max_iterations} 次")
+        result = runner.run_plan(plan, registry, query=match_query, tool_dispatch=td_llm, max_iterations=max_iterations)
+    elif llm:
+        llm_client = _get_llm_client()
+        result = runner.run_plan(plan, registry, query=match_query, llm=llm_client)
+    elif steps:
+        print(f"[INFO] 使用 Steps DSL 确定性执行模式")
+        result = runner.run_plan(plan, registry, query=match_query)
+    else:
+        result = runner.run_plan(plan, registry, query=match_query)
 
-        if dry_run:
-            # 只编译，输出 prompt
-            prompt = assembler.assemble(r.skill, r.arguments)
-            print(f"\n{'='*60}")
-            print(f"Skill: {r.skill.metadata.name}")
-            print(f"分数: {r.score:.2f}")
-            print(f"{'='*60}")
-            print(prompt)
-            continue
-
-        if tool_dispatch:
-            # 档位 B：tool_dispatch 循环
-            td_llm = _get_tool_llm_client()
-            if not td_llm:
-                print("[ERROR] --tool-dispatch 需要 LLM 配置")
-                print("  请设置环境变量: AGNES_MODEL, AGNES_BASE_URL, AGNES_API_KEY")
-                print("  或去掉 --tool-dispatch 使用纯编译模式")
-                raise typer.Exit(code=1)
-            print(f"[INFO] 使用 tool_dispatch 模式 (档位 B), 最大迭代 {max_iterations} 次")
-            result = runner.run(r, tool_dispatch=td_llm, max_iterations=max_iterations)
-            print(f"\n{'='*60}")
-            print(f"Skill: {result['skill_name']}")
-            print(f"分数: {result['score']:.2f}")
-            if 'steps' in result and result['steps']:
-                print(f"步骤: {[s.get('name', '?') for s in result['steps']]}")
-            if 'iterations' in result:
-                print(f"迭代: {result['iterations']} 次")
-            print(f"{'='*60}")
-            print(result["output"])
-            if result["files_created"]:
-                print(f"\n创建的文件:")
-                for f in result["files_created"]:
-                    print(f"  {f}")
-            print()
-            continue
-
-        if llm:
-            result = runner.run(r, llm=_get_llm_client())
-        elif steps:
-            # Steps DSL 确定性执行：runner.run() 内部自动检测 body 中的 ## Steps
-            print(f"[INFO] 使用 Steps DSL 确定性执行模式")
-            result = runner.run(r)
-        else:
-            result = runner.run(r)
-
-        print(f"\n{'='*60}")
+    # 输出结果（多 skill 时显示 all_outputs）
+    print(f"\n{'='*60}")
+    if "all_outputs" in result:
+        print(f"多 skill 协同执行结果:")
+        for i, r in enumerate(result["all_outputs"], 1):
+            print(f"  [{i}] {r.get('skill_name', '?')}")
+            if r.get('output'):
+                print(f"      输出: {str(r['output'])[:200]}")
+        print(f"{'='*60}")
+    else:
         print(f"Skill: {result['skill_name']}")
-        print(f"分数: {result['score']:.2f}")
+        print(f"分数: {result.get('score', 0):.2f}")
         if 'steps' in result and result['steps']:
             print(f"步骤:")
             for s in result['steps']:
                 status = "OK" if s.get("exit_code", 0) == 0 or s.get("type") in ("llm", "write") else f"ERR(exit={s.get('exit_code')})"
                 print(f"  - {s.get('name')} ({s.get('type')}): {status}")
                 if 'output' in s and s['output']:
-                    out = str(s['output'])
-                    try:
-                        encoded = out.encode('utf-8', errors='replace').decode('utf-8')
-                        if len(encoded) > 200:
-                            encoded = encoded[:200] + "..."
-                        print(f"    输出: {encoded}")
-                    except Exception:
-                        print(f"    输出: [无法显示]")
+                    out = str(s['output'])[:200]
+                    print(f"    输出: {out}")
                 if 'error' in s and s['error']:
-                    try:
-                        print(f"    错误: {str(s['error']).encode('utf-8', errors='replace').decode('utf-8')}")
-                    except Exception:
-                        print(f"    错误: [无法显示]")
+                    print(f"    错误: {str(s['error'])[:200]}")
         if 'iterations' in result:
             print(f"迭代: {result['iterations']} 次")
         print(f"{'='*60}")
-        print(result["output"])
-        if result["files_created"]:
+        print(result.get("output", ""))
+        if result.get("files_created"):
             print(f"\n创建的文件:")
             for f in result["files_created"]:
                 print(f"  {f}")
@@ -504,6 +515,107 @@ def uninstall(
 
     shutil.rmtree(skill_dir)
     print(f"已卸载: {name}")
+
+
+@app.command()
+def index(
+    build_meta: bool = typer.Option(False, "--build-meta", help="强制全量构建 .skill-meta.yaml（首次使用）"),
+    rebuild_meta: bool = typer.Option(False, "--rebuild-meta", help="强制全量重抽 .skill-meta.yaml（SKILL.md 大改后）"),
+):
+    """扫描 skills 并预处理元数据
+
+    默认增量模式：只有 SKILL.md 内容变更时才重新抽取 intention/synonyms。
+    首次使用建议加 --build-meta 强制全量构建。
+
+    使用示例：
+    \b
+      # 增量预处理
+      skill-engine index
+
+      # 首次：全量构建
+      skill-engine index --build-meta
+
+      # 强制重抽
+      skill-engine index --rebuild-meta
+    """
+    from pathlib import Path
+    from .discovery import discover
+    from .registry import Registry
+    from .config import get_llm
+    from .preprocessor import Preprocessor
+
+    # 1. 扫描
+    print("[INFO] 正在扫描 skills...")
+    project_skills = Path.cwd() / "skills"
+    roots = [str(project_skills)] if project_skills.exists() else []
+    index = discover(roots=roots)
+    registry = Registry(index)
+    active = registry.list_active()
+
+    if not active:
+        print("[WARN] 未发现任何 skill")
+        return
+
+    print(f"[INFO] 发现 {len(active)} 个 skills")
+
+    # 2. 获取 LLM
+    print("[INFO] 获取 LLM 客户端...")
+    try:
+        llm = get_llm()
+    except Exception as e:
+        print(f"[ERROR] 获取 LLM 配置失败: {e}")
+        print("  请设置环境变量: AGNES_MODEL, AGNES_BASE_URL, AGNES_API_KEY")
+        raise typer.Exit(code=1)
+
+    # 3. 预处理
+    preprocessor = Preprocessor(llm=llm)
+    force = build_meta or rebuild_meta
+
+    success = 0
+    skipped = 0
+    failed = 0
+
+    print(f"[INFO] 开始{'全量' if force else '增量'}预处理...")
+    for name in active:
+        skill = registry.load_skill(name)
+        if not skill:
+            print(f"  [WARN] 跳过 {name}：无法加载")
+            failed += 1
+            continue
+
+        skill_dir = Path(skill.directory)
+        meta_path = skill_dir / ".skill-meta.yaml"
+
+        if not force and meta_path.exists():
+            # 增量模式：检查 hash
+            from .preprocessor import Preprocessor as P
+            current_hash = P._hash_skill(skill)
+            try:
+                import yaml
+                old = yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
+                if old.get("source_hash") == current_hash:
+                    print(f"  [SKIP] {name}：未变更")
+                    skipped += 1
+                    continue
+            except Exception:
+                pass  # 文件损坏，重抽
+
+        if force:
+            print(f"  [BUILD] {name}：正在抽取 intention...", end=" ", flush=True)
+        else:
+            print(f"  [META] {name}：正在抽取 intention...", end=" ", flush=True)
+
+        try:
+            meta = preprocessor.ensure_meta(skill)
+            intention = meta.get("intention", [])
+            purpose = meta.get("purpose", "")
+            print(f"✅ intention={intention}, purpose={purpose}")
+            success += 1
+        except Exception as e:
+            print(f"❌ {e}")
+            failed += 1
+
+    print(f"\n[INFO] 完成: {success} 成功, {skipped} 跳过, {failed} 失败")
 
 
 @app.command()

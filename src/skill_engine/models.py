@@ -5,7 +5,7 @@ Skills Engine 数据模型
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, Dict
+from typing import Optional, Dict, Literal
 from enum import Enum
 from dataclasses import dataclass
 
@@ -51,6 +51,61 @@ class SkillMetadata(BaseModel):
     model: str = Field(default="inherit", description="模型覆盖")
     groups: list[str] = Field(default_factory=list, description="技能分组标签")
 
+    # ===== 引擎扩展字段（SKILL.md 里可写，也可由 .skill-local.yaml 覆写）=====
+    alias: Optional[list[str]] = Field(default=None, description="语义别名")
+    shortcuts: Optional[list[str]] = Field(default=None, description="命令行缩写")
+    intent_verbs: Optional[list[str]] = Field(default=None, description="作者手写意图动词")
+
+
+class MergedMeta(BaseModel):
+    """三层合并后的 Skill 元数据（SKILL.md + .skill-meta.yaml + .skill-local.yaml）
+
+    包含 SkillMetadata 所有字段 + _meta_cache 挂载预处理抽取结果。
+    """
+
+    name: str = Field(description="技能名称")
+    description: str = Field(default="", description="描述")
+    when_to_use: str = Field(default="", description="额外触发条件")
+    argument_hint: str = Field(default="", description="参数提示")
+    arguments: list[str] = Field(default_factory=list, description="命名参数定义")
+    disable_model_invocation: bool = Field(default=False)
+    user_invocable: bool = Field(default=True)
+    allowed_tools: list[str] = Field(default_factory=list)
+    disallowed_tools: list[str] = Field(default_factory=list)
+    context: SkillContext = Field(default=SkillContext.INLINE)
+    agent: str = Field(default="general-purpose")
+    paths: list[str] = Field(default_factory=list)
+    shell: str = Field(default="bash")
+    effort: str = Field(default="inherit")
+    model: str = Field(default="inherit")
+    groups: list[str] = Field(default_factory=list)
+    alias: Optional[list[str]] = Field(default=None)
+    shortcuts: Optional[list[str]] = Field(default=None)
+    intent_verbs: Optional[list[str]] = Field(default=None)
+
+    # 预处理缓存（.skill-meta.yaml 原始内容，score_keyword 用）
+    meta_cache: dict = Field(default_factory=dict, description="预处理缓存")
+
+    model_config = {"extra": "allow"}  # 允许 .skill-local.yaml 追加未知字段不炸
+
+
+class SelectedSkill(BaseModel):
+    """LLM 选定的一个 skill（多 skill 协同场景）"""
+    name: str = Field(description="skill 名称")
+    role: Optional[str] = Field(default=None, description="在该协同中的角色")
+    args_override: Optional[dict] = Field(default=None, description="参数覆盖")
+
+
+class MatchPlan(BaseModel):
+    """Router 最终输出"""
+    mode: Literal["single", "multi"] = "single"
+    primary: Optional[SelectedSkill] = Field(default=None, description="single 时直接取")
+    selections: list[SelectedSkill] = Field(default_factory=list, description="multi 时 ≥2")
+    method: str = Field(description="匹配方法: exact / keyword / llm")
+    score: Optional[float] = Field(default=None, description="single 时的置信度")
+    reason: Optional[str] = Field(default=None, description="LLM 给的协同理由")
+    uncertain: bool = Field(default=False, description="LLM 也没把握")
+
 
 class Skill(BaseModel):
     """完整的 Skill 对象（含 body）
@@ -65,9 +120,10 @@ class Skill(BaseModel):
 
 
 class MatchResult(BaseModel):
-    """匹配结果
+    """匹配结果（已弃用 — 请使用 MatchPlan + runner.run_plan() 替代）
 
-    包含匹配的 skill、分数、匹配方法和解析后的参数。
+    保留以兼容旧测试和 runner.run() 内部包装。
+    新代码请使用 MatchPlan / SelectedSkill 方案。
     """
     skill: Skill
     score: float = Field(description="匹配分数 0-1")

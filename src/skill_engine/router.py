@@ -1,423 +1,338 @@
-"""
-Router V0.2 — 加入 embedding 语义匹配
+"""Router V0.3 — 三步路由管线
 
-支持三种匹配策略：
-1. by_name: 精确匹配 skill 名称
-2. by_keyword: 关键词匹配 description + when_to_use
-3. by_embedding: V0.2 引入，语义匹配（可选依赖 sentence-transformers）
+匹配策略：
+1️⃣ name / alias / shortcut 精确（不挑语言）
+1.5️⃣ 纯英文 exact 没中 → 直接跳 LLM
+2️⃣ 结巴分词 + intention 权重打分 → 多候选?
+3️⃣ LLM 兜底（0 命中 / 多匹配）→ MatchPlan(single | multi)
 
 使用方式：
 >>> index = discover()
 >>> registry = Registry(index)
->>> router = Router(registry)
->>> results = router.match("帮我部署", method="keyword")
->>> results_emb = router.match("帮我部署", method="embedding")
+>>> router = Router(registry, preprocessor=preprocessor)
+>>> plan = router.match("出个 lc 题", llm=llm_client)
+>>> print(plan.mode)  # "single" / "multi"
 """
 
-from pathlib import Path
-from typing import Optional
+import json
 import re
-from .models import Skill, MatchResult, SkillMetadata
+from typing import Optional
+from .models import MatchPlan, SelectedSkill, MergedMeta
 from .registry import Registry
+from .scoring import score_keyword
+from .tokenize import tokenize_query, is_english, PROPER_EN
+
+THRESH_SINGLE = 0.7
 
 
 class Router:
-    """Skill 匹配器 / 路由器
+    """Skill 匹配器 V0.3（三步路由）
 
-    使用方式：
-    >>> router = Router(registry)
-    >>> results = router.match("帮我部署", method="keyword")
+    Args:
+        registry: Registry 实例
+        preprocessor: 可选，Preprocessor 实例（用于 lazy ensure_meta）
     """
 
     def __init__(
         self,
         registry: Registry,
-        embedding_model: Optional[str] = None,
-        embedding_dim: int = 768,
+        preprocessor: Optional[object] = None,
     ):
         self.registry = registry
-        self.embedding_model = embedding_model
-        self.embedding_dim = embedding_dim
-        self._embedding_cache: dict[str, list[float]] = {}
-        self._has_embedding = False
+        self.preprocessor = preprocessor
+        self._alias_index: dict[str, str] = {}  # "lc-sol" -> "leetcode-solve"
+        self._shortcut_index: dict[str, str] = {}
+        self._build_indices()
+
+    def _build_indices(self):
+            """把 alias / shortcut 摊平成一阶 map"""
+            for name in self.registry.list_active():
+                meta = self.registry.load_meta(name)
+                if not meta:
+                    continue
+                for a in (meta.alias or []):
+                    self._alias_index[a.lower()] = name
+                for s in (meta.shortcuts or []):
+                    self._shortcut_index[s.lower()] = name
+
+    def _load_meta(self, name: str) -> Optional[MergedMeta]:
+        """加载并缓存 MergedMeta，支持 Preprocessor lazy 补 meta"""
+        meta = self.registry.load_meta(name)
+        if meta is None:
+            return None
+        # 如果 meta_cache 为空且 Preprocessor 可用，lazy 补
+        if not meta.meta_cache:
+            pp = self._get_preprocessor()
+            if pp is not None:
+                skill = self.registry.load_skill(name)
+                if skill:
+                    try:
+                        pp.ensure_meta(skill)
+                        meta = self.registry.load_meta(name)  # 重新加载
+                    except Exception:
+                        pass  # 预处理失败不影响流程
+        return meta
+
+    def _get_preprocessor(self):
+            """懒加载 Preprocessor（仅首次需要时创建）"""
+            if self.preprocessor is not None:
+                return self.preprocessor
+            try:
+                from concurrent.futures import ThreadPoolExecutor, TimeoutError
+                from .config import get_llm
+                from .preprocessor import Preprocessor
+
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(get_llm)
+                    llm = future.result(timeout=5)  # 5 秒超时
+                self.preprocessor = Preprocessor(llm=llm)
+                return self.preprocessor
+            except TimeoutError:
+                return None  # 超时
+            except Exception:
+                return None
 
     def match(
         self,
         query: str,
-        method: str = "keyword",
-        top_k: int = 5,
-        min_score: float = 0.0,
-    ) -> list[MatchResult]:
-        """匹配 skills 到用户输入
+        *,
+        llm=None,
+        top_k: int = 3,
+    ) -> MatchPlan:
+        """三步路由
 
         Args:
             query: 用户输入
-            method: 匹配方法 (name/keyword/embedding/llm)
-            top_k: 返回前 K 个结果
-            min_score: 最低分数阈值
+            llm: LLM 客户端（兜底用）
+            top_k: keyword 阶段保留的候选数
 
         Returns:
-            匹配结果列表，按分数降序排列
+            MatchPlan
         """
-        names = self.registry.list_active()
+        # ──────────────────────────────────────────────
+        # 1️⃣ 精确：name / alias / shortcut
+        # ──────────────────────────────────────────────
+        exact = self._match_exact(query)
+        if exact:
+            return MatchPlan(
+                mode="single",
+                primary=SelectedSkill(name=exact),
+                method="exact",
+                score=1.0,
+            )
 
-        if method == "name":
-            return self._match_by_name(query, names)
-        elif method == "keyword":
-            return self._match_by_keyword(query, names)
-        elif method == "embedding":
-            return self._match_by_embedding(query, names)
-        elif method == "llm":
-            return self._match_by_llm(query, names)
-        else:
-            raise ValueError(f"Unknown method: {method}")
+        # 1.5️⃣ 纯英文 → 直接跳 LLM（keyword 对英文不准）
+        if is_english(query):
+            if llm:
+                plan = self._llm_fallback(query, self.registry.list_active()[:top_k], llm, kws=[])
+                if plan:
+                    return plan
+            return MatchPlan(
+                mode="single",
+                selections=[],
+                method="keyword",
+                reason="纯英文 query 无 exact 命中",
+                uncertain=True,
+            )
 
-    def _match_by_name(self, query: str, names: list[str]) -> list[MatchResult]:
-        """精确匹配 skill 名称（大小写不敏感）"""
-        query_lower = query.lower().strip()
-        results = []
+        # ──────────────────────────────────────────────
+        # 2️⃣ 关键词：结巴 + intention 权重
+        # ──────────────────────────────────────────────
+        qtokens = tokenize_query(query)
+        kws: list[tuple[float, str]] = []
 
-        for name in names:
-            if name.lower() == query_lower:
-                skill = self.registry.load_skill(name)
-                if skill:
-                    results.append(MatchResult(
-                        skill=skill,
-                        score=1.0,
-                        method="name",
-                        arguments={"$ARGUMENTS": query},
-                    ))
-                    break  # 精确匹配只有一个结果
-
-        return results
-
-    def _match_by_keyword(self, query: str, names: list[str]) -> list[MatchResult]:
-        """关键词匹配
-
-        评分规则：
-        - description 中包含关键词：+0.5/个
-        - when_to_use 中包含关键词：+0.3/个
-        - 完全匹配（整个 query 在 description 中）：+0.8
-
-        Args:
-            query: 用户输入
-            names: 活跃 skill 名称列表
-
-        Returns:
-            匹配结果列表
-        """
-        # 空查询直接返回
-        if not query or not query.strip():
-            return []
-
-        results = []
-
-        # 提取关键词（中英文）
-        keywords = self._extract_keywords(query)
-
-        # 没有有效关键词直接返回
-        if not keywords:
-            return []
-
-        for name in names:
-            skill = self.registry.load_skill(name)
-            if not skill:
+        for name in self.registry.list_active():
+            meta = self._load_meta(name)
+            if not meta:
                 continue
+            s = score_keyword(qtokens, meta)
+            if s > 0:
+                kws.append((s, name))
 
-            score = self._calculate_score(keywords, query, skill)
-            if score > 0:
-                args = self._parse_arguments(query, skill)
-                results.append(MatchResult(
-                    skill=skill,
-                    score=score,
-                    method="keyword",
-                    arguments=args,
-                ))
+        kws.sort(key=lambda x: x[0], reverse=True)
 
-        return results
+        # ──────────────────────────────────────────────
+        # 3️⃣ 决定要不要 LLM（三触发）
+        # ──────────────────────────────────────────────
+        should_llm, llm_candidates, reason = self._should_llm(query, kws, qtokens)
 
-    def _match_by_embedding(self, query: str, names: list[str]) -> list[MatchResult]:
-        """语义匹配（V0.2 引入，可选依赖）
+        if should_llm and llm:
+            plan = self._llm_fallback(query, llm_candidates, llm, kws)
+            if plan:
+                return plan
 
-        使用 sentence-transformers 计算 query 与 skill 描述的余弦相似度。
-        如果未安装 sentence-transformers，返回空列表。
+        # LLM 不可用 / LLM 没返回 → 退化
+        if not kws:
+            return MatchPlan(
+                mode="single",
+                selections=[],
+                method="keyword",
+                reason="无匹配 skill",
+                uncertain=True,
+            )
+
+        # 多候选退化：返 top1 但标 uncertain
+        return MatchPlan(
+            mode="single",
+            primary=SelectedSkill(name=kws[0][1]),
+            method="keyword",
+            score=kws[0][0],
+            uncertain=True,
+        )
+
+    # ================================================================
+    # 子方法
+    # ================================================================
+
+    def _match_exact(self, query: str) -> Optional[str]:
+        """精确匹配 name / alias / shortcut
+
+        Returns:
+            注册表中的原始 skill name，或 None
         """
-        # 空查询直接返回
-        if not query or not query.strip():
-            return []
+        q = query.strip().lower()
+        if not q:
+            return None
 
-        try:
-            from sentence_transformers import SentenceTransformer
-            import numpy as np
-        except ImportError:
-            return []
+        # name 精确匹配（返回注册表原始 name，不是用户输入）
+        for n in self.registry.list_active():
+            if n.lower() == q:
+                return n
 
-        # 初始化 embedding 模型（懒加载）
-        if not self._has_embedding:
-            try:
-                self._model = SentenceTransformer(self.embedding_model or "all-MiniLM-L6-v2")
-                self._has_embedding = True
-            except Exception:
-                return []
+        # alias 匹配
+        if q in self._alias_index:
+            return self._alias_index[q]
 
-        # 获取 query embedding（缓存）
-        query_lower = query.lower()
-        if query_lower in self._embedding_cache:
-            query_vec = self._embedding_cache[query_lower]
-        else:
-            query_vec = self._model.encode(query).tolist()
-            self._embedding_cache[query_lower] = query_vec
+        # shortcut 匹配
+        if q in self._shortcut_index:
+            return self._shortcut_index[q]
 
-        results = []
-        query_np = np.array(query_vec)
+        return None
 
-        for name in names:
-            skill = self.registry.load_skill(name)
-            if not skill:
+    def _should_llm(self, query: str, kws: list, qtokens: dict):
+        """三触发：决定是否进 LLM 兜底
+
+        Returns:
+            (should_llm: bool, candidate_names: list[str], reason: str)
+        """
+        active = self.registry.list_active()
+
+        if not kws:
+            return True, active, "0 命中"
+
+        if len(kws) == 1 and kws[0][0] >= THRESH_SINGLE:
+            return False, [], ""  # 单候选高分，直接返
+
+        # 多候选 / 单候选低分 → LLM 决定
+        candidates = [k[1] for k in kws[:10]]
+        if len(kws) == 1:
+            return True, candidates, f"单候选分低 {kws[0][0]}"
+        return True, candidates, "多候选，LLM 决定 single/multi"
+
+    def _llm_fallback(
+        self,
+        query: str,
+        candidate_names: list[str],
+        llm,
+        kws: list,
+    ) -> Optional[MatchPlan]:
+        """LLM 兜底，返回 MatchPlan（支持 single/multi）
+
+        Args:
+            query: 用户输入
+            candidate_names: 候选 skill 名称列表
+            llm: LLM 客户端
+            kws: keyword 阶段的 (score, name) 列表（可为空）
+
+        Returns:
+            MatchPlan 或 None（LLM 返回格式错误时）
+        """
+        # 构建候选列表文本
+        lines = []
+        for name in candidate_names[:10]:
+            meta = self._load_meta(name)
+            if not meta:
                 continue
+            mc = meta.meta_cache or {}
+            purpose = mc.get("purpose", meta.description or "")
+            intention = mc.get("intention", [])
+            lines.append(f"- {name}: purpose={purpose}, intention={intention}")
 
-            # 获取 skill embedding（缓存）
-            cache_key = f"{skill.metadata.name}:{skill.metadata.description}"
-            if cache_key in self._embedding_cache:
-                skill_vec = self._embedding_cache[cache_key]
-            else:
-                text = f"{skill.metadata.description} {skill.metadata.when_to_use}"
-                skill_vec = self._model.encode(text).tolist()
-                self._embedding_cache[cache_key] = skill_vec
+        skills_text = "\n".join(lines) if lines else "(无候选)"
 
-            # 计算余弦相似度
-            skill_np = np.array(skill_vec)
-            score = float(np.dot(query_np, skill_np) / (
-                np.linalg.norm(query_np) * np.linalg.norm(skill_np) + 1e-8
-            ))
+        prompt = f"""你是一个 Skill 路由助手。判断用户 query 是单 skill 能搞定，还是多 skill 协同。
 
-            if score > 0:
-                args = self._parse_arguments(query, skill)
-                results.append(MatchResult(
-                    skill=skill,
-                    score=round(score, 4),
-                    method="embedding",
-                    arguments=args,
-                ))
-
-        # 按分数降序
-        results.sort(key=lambda r: r.score, reverse=True)
-        return results[:5]
-
-    def _calculate_score(self, keywords: list[str], query: str, skill: Skill) -> float:
-        """计算关键词匹配分数
-
-        Args:
-            keywords: 提取的关键词列表
-            query: 原始查询
-            skill: Skill 对象
-
-        Returns:
-            匹配分数 (0.0 - 1.0)
-        """
-        score = 0.0
-
-        # 获取描述文本
-        desc = skill.metadata.description or ""
-        desc_lower = desc.lower()
-        when_to_use = skill.metadata.when_to_use or ""
-        when_lower = when_to_use.lower()
-
-        # 完全匹配（整个 query 在 description 中）
-        cleaned = re.sub(r"[^\w\s]", " ", query).strip()
-        if cleaned and cleaned.lower() in desc_lower:
-            score += 0.8
-
-        # 关键词匹配
-        for kw in keywords:
-            kw_lower = kw.lower()
-            if kw_lower in desc_lower:
-                score += 0.5
-            if kw_lower in when_lower:
-                score += 0.3
-
-        # 分数上限 1.0（单个 skill 的 keyword 分数不超过 name 精确匹配）
-        score = min(score, 1.0)
-
-        return round(score, 4)
-
-    def _extract_keywords(self, query: str) -> list[str]:
-        """提取中英文关键词
-
-        策略：
-        - 英文：按空格分割，过滤停用词
-        - 中文：按字符分割（简单实现，后续可用 jieba）
-
-        Args:
-            query: 用户输入
-
-        Returns:
-            关键词列表
-        """
-        if not query or not query.strip():
-            return []
-
-        # 简单停用词
-        stop_words = {"the", "a", "an", "is", "are", "was", "were", "be",
-                      "been", "being", "have", "has", "had", "do", "does",
-                      "did", "will", "would", "could", "should", "may",
-                      "might", "must", "shall", "can", "need", "dare",
-                      "ought", "used", "to", "of", "in", "for", "on",
-                      "with", "at", "by", "from", "as", "into", "through",
-                      "during", "before", "after", "and", "but", "or",
-                      "nor", "not", "so", "yet", "both", "either",
-                      "neither", "each", "every", "all", "any", "few",
-                      "more", "most", "other", "some", "such", "no",
-                      "only", "same", "than", "too", "very", "just",
-                      "也", "和", "与", "及", "等", "这个", "那个", "什么",
-                      "怎么", "如何", "哪里", "何时", "为什么", "因为",
-                      "所以", "但是", "然而", "如果", "虽然", "尽管"}
-
-        keywords = []
-
-        # 英文关键词
-        en_parts = query.split()
-        for part in en_parts:
-            if part.lower() not in stop_words and len(part) > 1:
-                keywords.append(part)
-
-        # 中文关键词（按字符分割，过滤单字停用词）
-        for char in query:
-            if '\u4e00' <= char <= '\u9fff' and char not in stop_words:
-                keywords.append(char)
-
-        return keywords
-
-    def _parse_arguments(self, query: str, skill: Skill) -> dict:
-        """解析用户输入中的参数
-
-        策略：
-        - 将 query 按空格分割
-        - 第一个词作为 $0
-        - 剩余词作为 $1, $2, ...
-        - 所有词作为 $ARGUMENTS
-
-        Args:
-            query: 用户输入
-            skill: Skill 对象
-
-        Returns:
-            参数字典
-        """
-        parts = query.strip().split()
-        args = {"$ARGUMENTS": query}
-
-        for i, part in enumerate(parts):
-            args[f"${i}"] = part
-
-        return args
-
-    def _match_by_llm(self, query: str, names: list[str]) -> list[MatchResult]:
-        """LLM 语义匹配 — 让 LLM 判断用户意图与 skill 的匹配度
-
-        流程：
-        1. 收集所有 skill 的 name + description + when_to_use
-        2. 构造 prompt 让 LLM 打分
-        3. 解析 JSON 返回结果
-
-        Args:
-            query: 用户输入
-            names: 活跃 skill 名称列表
-
-        Returns:
-            匹配结果列表，按分数降序
-        """
-        print(f"[DEBUG router] _match_by_llm called, query='{query}', names={names}")
-        try:
-            from skill_engine.config import get_llm
-        except ImportError:
-            print(f"[DEBUG router] ImportError: config not available")
-            return []
-
-        # 构建 skill 列表文本
-        skill_list = []
-        for name in names:
-            skill = self.registry.load_skill(name)
-            if not skill:
-                continue
-            desc = skill.metadata.description or ""
-            when = skill.metadata.when_to_use or ""
-            groups = ", ".join(skill.metadata.groups) if skill.metadata.groups else "none"
-            skill_list.append(f"- {name}: {desc} [groups: {groups}]")
-
-        skills_text = "\n".join(skill_list)
-
-        prompt = f"""你是一个技能匹配助手。你需要根据用户的输入，从以下可用技能中选择最相关的 N 个，并给出匹配分数。
-
-## 可用技能列表
-
-{skills_text}
-
-## 用户输入
-
+## 用户 query
 {query}
 
-## 任务
+## 候选 skill（≤10）
+{skills_text}
 
-1. 理解用户的真实意图
-2. 从可用技能中选择最相关的技能（最多 5 个）
-3. 为每个选中的技能打分（0.0-1.0，越相关分数越高）
-4. 解释选择理由
+返回 JSON（不要包含任何解释文字）：
+- 单 skill：{{"mode":"single","name":"skill_name","reason":"..."}}
+- 多 skill：{{"mode":"multi","selections":[{{"name":"x","role":"出题"}},{{"name":"y","role":"解题"}}],"reason":"..."}}
+- 无匹配：{{"mode":"none","reason":"..."}}"""
 
-请以 JSON 格式返回：
-{{
-  "matches": [
-    {{
-      "skill": "skill名称",
-      "score": 0.9,
-      "reason": "为什么匹配",
-      "arguments": {{}}
-    }}
-  ],
-  "overall_reasoning": "整体匹配理由"
-}}
-
-如果没有匹配的技能，返回：
-{{
-  "matches": [],
-  "overall_reasoning": "没有匹配的技能"
-}}"""
-
-        llm = get_llm()
-        print(f"[DEBUG router] LLM instance created, invoking...")
-        resp = llm.invoke([{"role": "user", "content": prompt}])
-        content = resp.content if hasattr(resp, "content") else str(resp)
-        print(f"[DEBUG router] LLM response (first 300 chars): {content[:300]}")
+        resp = llm.invoke(prompt)
+        raw_text = ""
+        if hasattr(resp, "content"):
+            raw_text = resp.content if isinstance(resp.content, str) else str(resp.content)
+        else:
+            raw_text = str(resp)
 
         # 提取 JSON（可能在 markdown code block 中）
-        import json
-        import re
-        json_match = re.search(r'\{[\s\S]*"matches"\s*:[\s\S]*\}', content)
+        json_match = re.search(r"\{[\s\S]*\}", raw_text)
         if not json_match:
-            return []
+            return None
 
         try:
             data = json.loads(json_match.group())
         except json.JSONDecodeError:
-            return []
+            return None
 
-        results = []
-        for match in data.get("matches", []):
-            skill_name = match.get("skill", "")
-            score = match.get("score", 0.0)
-            if score <= 0:
-                continue
+        mode = data.get("mode", "none")
 
-            skill = self.registry.load_skill(skill_name)
-            if not skill:
-                continue
-
-            results.append(MatchResult(
-                skill=skill,
-                score=round(float(score), 4),
+        if mode == "single":
+            name = data.get("name", "")
+            if not name or not self.registry.load_skill(name):
+                return None
+            return MatchPlan(
+                mode="single",
+                primary=SelectedSkill(name=name),
                 method="llm",
-                arguments=match.get("arguments", {}),
-            ))
+                reason=data.get("reason"),
+            )
 
-        results.sort(key=lambda r: r.score, reverse=True)
-        return results[:5]
+        elif mode == "multi":
+            selections_data = data.get("selections", [])
+            if not selections_data:
+                return None
+            selections = []
+            for s in selections_data:
+                name = s.get("name", "")
+                if not name or not self.registry.load_skill(name):
+                    continue
+                selections.append(SelectedSkill(
+                    name=name,
+                    role=s.get("role"),
+                ))
+            if not selections:
+                return None
+            # 从 keyword 分数推断 primary
+            primary_score = 0.0
+            primary_name = selections[0].name
+            for score, name in kws:
+                if name == selections[0].name:
+                    primary_score = score
+                    break
+            return MatchPlan(
+                mode="multi",
+                primary=selections[0],
+                selections=selections,
+                method="llm",
+                score=primary_score if primary_score > 0 else None,
+                reason=data.get("reason"),
+            )
+
+        # mode == "none"
+        return None

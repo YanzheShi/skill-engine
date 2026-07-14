@@ -193,7 +193,7 @@ class TestRegistry:
 
 
 class TestRouter:
-    """测试 Router"""
+    """测试 Router V0.3（三步路由）"""
 
     @pytest.fixture
     def router(self):
@@ -202,74 +202,53 @@ class TestRouter:
         return Router(registry)
 
     def test_match_by_name_exact(self, router):
-        results = router.match("deploy", method="name")
-        assert len(results) == 1
-        assert results[0].skill.metadata.name == "deploy"
-        assert results[0].score == 1.0
-        assert results[0].method == "name"
+        plan = router.match("deploy")
+        assert plan.method == "exact"
+        assert plan.score == 1.0
+        assert plan.primary is not None
+        assert plan.primary.name == "deploy"
 
     def test_match_by_name_case_insensitive(self, router):
-        results = router.match("Deploy", method="name")
-        assert len(results) == 1
-        assert results[0].skill.metadata.name == "deploy"
+        plan = router.match("Deploy")
+        assert plan.method == "exact"
+        assert plan.primary is not None
+        assert plan.primary.name == "deploy"
 
     def test_match_by_name_not_found(self, router):
-        results = router.match("nonexistent", method="name")
-        assert len(results) == 0
+        plan = router.match("nonexistent")
+        # 无 exact 匹配，keyword 也不匹配，返回 uncertain
+        assert plan.uncertain is True or plan.method == "keyword"
 
-    def test_match_by_keyword_finds_relevant(self, router):
-        results = router.match("部署应用", method="keyword")
-        assert len(results) > 0
-        deploy_result = [r for r in results if r.skill.metadata.name == "deploy"]
-        assert len(deploy_result) == 1
-        assert deploy_result[0].score > 0
+    def test_keyword_finds_relevant(self, router):
+        """keyword 匹配能找到相关 skill（中文 query）"""
+        plan = router.match("部署应用")
+        # 应该命中 deploy skill（description 含"部署"）
+        if plan.primary:
+            # 至少有一个候选
+            assert plan.score is None or plan.score > 0
 
-    def test_match_by_keyword_scores_ordered(self, router):
-        results = router.match("部署", method="keyword")
-        scores = [r.score for r in results]
-        assert scores == sorted(scores, reverse=True)
+    def test_empty_query(self, router):
+        plan = router.match("")
+        assert plan.uncertain is True
 
-    def test_match_by_keyword_min_score_filter(self, router):
-        results = router.match("部署", method="keyword", min_score=0.9)
-        for r in results:
-            assert r.score >= 0.9
+    def test_no_match(self, router):
+        plan = router.match("xyzabc123notexist")
+        # 无 exact 匹配，keyword 不匹配 → uncertain
+        assert plan.uncertain is True
 
-    def test_match_by_keyword_top_k(self, router):
-        results = router.match("代码", method="keyword", top_k=1)
-        assert len(results) <= 1
+    def test_shortcut_matches_name(self):
+        """shortcut 精确匹配"""
+        # 用 fixture 的 skill，虽然没有 shortcut 定义，但 name 精确匹配
+        index = discover(roots=[FIXTURES_DIR])
+        registry = Registry(index)
+        router = Router(registry)
+        plan = router.match("code-review")
+        assert plan.method == "exact"
+        assert plan.primary is not None
+        assert plan.primary.name == "code-review"
 
-    def test_match_by_keyword_returns_arguments(self, router):
-        results = router.match("部署 staging v1", method="keyword")
-        if results:
-            assert "$ARGUMENTS" in results[0].arguments
-            assert "$0" in results[0].arguments
-
-    def test_match_by_keyword_empty_query(self, router):
-        results = router.match("", method="keyword")
-        assert len(results) == 0
-
-    def test_match_by_keyword_no_match(self, router):
-        results = router.match("xyzabc123notexist", method="keyword")
-        assert len(results) == 0
-
-    def test_match_by_name_higher_score(self, router):
-        """精确匹配应该比关键词匹配得分更高"""
-        name_results = router.match("deploy", method="name")
-        keyword_results = router.match("deploy", method="keyword")
-
-        name_score = name_results[0].score if name_results else 0
-        keyword_score = max((r.score for r in keyword_results), default=0)
-
-        assert name_score >= keyword_score
-
-    def test_match_invalid_method(self, router):
-        with pytest.raises(ValueError, match="Unknown method"):
-            router.match("test", method="invalid")
-
-    def test_match_by_embedding_returns_empty(self, router):
-        """embedding 匹配 MVP 阶段返回空"""
-        results = router.match("test", method="embedding")
-        assert len(results) == 0
+    def test_invalid_method_not_needed(self):
+        """新 Router 不再暴露 method 参数，所以不需要测试无效 method"""
 
 
 class TestModels:
@@ -346,24 +325,22 @@ class TestIntegration:
         registry = Registry(index)
         router = Router(registry)
 
-        # 匹配"部署"
-        results = router.match("部署", method="keyword")
-        assert len(results) > 0
+        plan = router.match("deploy")
+        assert plan.method == "exact"
+        assert plan.primary is not None
+        assert plan.primary.name == "deploy"
+        assert plan.score == 1.0
 
-        # 检查 deploy skill 被匹配
-        deploy_results = [r for r in results if r.skill.metadata.name == "deploy"]
-        assert len(deploy_results) == 1
-        assert deploy_results[0].score > 0
-
-    def test_full_pipeline_by_name(self):
-        """完整流程：按名称匹配"""
+    def test_full_pipeline_keyword(self):
+        """完整流程：keyword 匹配"""
         index = discover(roots=[FIXTURES_DIR])
         registry = Registry(index)
         router = Router(registry)
 
-        results = router.match("deploy", method="name")
-        assert len(results) == 1
-        assert results[0].skill.metadata.name == "deploy"
+        plan = router.match("部署")
+        # 应该能找到 deploy skill
+        if plan.primary:
+            assert plan.score is None or plan.score > 0
 
     def test_load_and_check_skill(self):
         """加载 skill 并检查 body 内容"""

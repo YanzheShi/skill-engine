@@ -369,11 +369,12 @@ class TestIntegration:
         executor = Executor(timeout=10)
         assembler = Assembler(executor=executor)
 
-        results = router.match("部署", method="keyword")
-        assert len(results) > 0
+        plan = router.match("deploy")
+        assert plan.primary is not None
+        assert plan.primary.name == "deploy"
 
-        result = results[0]
-        prompt = assembler.assemble(result.skill, result.arguments)
+        skill = registry.load_skill(plan.primary.name)
+        prompt = assembler.assemble(skill, {})
         assert "[SKILL: deploy]" in prompt
 
     def test_full_pipeline_档位A(self):
@@ -394,11 +395,15 @@ class TestIntegration:
         assembler = Assembler(executor=executor)
         runner = Runner(assembler, executor)
 
-        results = router.match("部署", method="keyword")
-        assert len(results) > 0
+        plan = router.match("deploy")
+        assert plan.primary is not None
+
+        skill = registry.load_skill(plan.primary.name)
+        from skill_engine.models import MatchResult
+        match_result = MatchResult(skill=skill, score=plan.score or 1.0, method=plan.method, arguments={})
 
         mock_llm = MockLLM(response="LLM 输出题解")
-        result = runner.run(results[0], llm=mock_llm)
+        result = runner.run(match_result, llm=mock_llm)
         assert "LLM 输出题解" in result["output"]
 
     def test_executor_is_only_spawn(self):
