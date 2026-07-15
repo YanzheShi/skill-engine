@@ -178,6 +178,17 @@ class Router:
         should_llm, llm_candidates, reason = self._should_llm(query, kws, qtokens)
 
         if should_llm and llm:
+            # 裁断：top1 领先 top2 超过 0.5 时直接定 single，不走 LLM
+            if len(kws) >= 2 and kws[0][0] - kws[1][0] > 0.5:
+                if self.verbose:
+                    logger.info(f"  → {kws[0][1]} ({kws[0][0]:.3f}) 领先 {kws[1][1]} ({kws[1][0]:.3f}) >0.5，直接定 single")
+                return MatchPlan(
+                    mode="single",
+                    primary=SelectedSkill(name=kws[0][1]),
+                    method="keyword",
+                    score=kws[0][0],
+                )
+
             if self.verbose:
                 logger.info(f"  触发 LLM 兜底: {reason}")
             plan = self._llm_fallback(query, llm_candidates, llm, kws)
