@@ -205,13 +205,15 @@ def clear_cache():
 
 
 def _create_router(registry, verbose: bool = False):
-    """创建 Router 实例
+    """创建 Router 实例，自动注册领域词到 jieba
 
     Args:
         registry: Registry 实例
         verbose: 是否启用 Router 详细日志
     """
     from .router import Router
+    from .domain_words import register_domain_words
+    register_domain_words(registry)
     return Router(registry, preprocessor=None, verbose=verbose)
 
 

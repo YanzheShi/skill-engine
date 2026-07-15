@@ -49,6 +49,9 @@ def _get_engine(roots: Optional[list[Path]] = None):
     index = discover(roots=roots)
     registry = Registry(index)
 
+    from skill_engine.domain_words import register_domain_words
+    register_domain_words(registry)
+
     preprocessor = None
     try:
         from skill_engine.config import get_llm
