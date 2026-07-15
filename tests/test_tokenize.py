@@ -80,7 +80,7 @@ class TestTokenizeQuery:
 
     def test_empty_query(self):
         result = tokenize_query("")
-        assert result == {"verbs_zh": [], "nouns_zh": [], "nouns_en": []}
+        assert result == {"verbs_zh": [], "nouns_zh": [], "nouns_en": [], "raw": ""}
 
     def test_pure_english_query(self):
         """纯英文 query 的专有名词提取"""

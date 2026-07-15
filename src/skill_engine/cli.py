@@ -606,6 +606,12 @@ def index(
             except Exception:
                 pass  # 文件损坏，重抽
 
+        if rebuild_meta:
+            # 强制重抽：删旧文件，不走 hash 缓存
+            meta_path = skill_dir / ".skill-meta.yaml"
+            if meta_path.exists():
+                meta_path.unlink()
+
         if force:
             print(f"  [BUILD] {name}：正在抽取 intention...", end=" ", flush=True)
         else:

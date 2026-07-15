@@ -1,59 +1,50 @@
 intention:
-- 分析代码
-- 评估质量
-- 查找缺陷
-- 提供建议
+- 分析
+- 评估
+- 查找
+- 检查
 synonyms:
   分析:
-    近义词:
-    - 解析
-    - 剖析
-    英文: analyze
+  - 剖析
+  - 审查
+  - 审阅
   评估:
-    近义词:
-    - 评价
-    - 评定
-    英文: evaluate
+  - 评价
+  - 评定
+  - 打分
   查找:
-    近义词:
-    - 寻找
-    - 定位
-    英文: find
-  缺陷:
-    近义词:
-    - 漏洞
-    - 问题
-    英文: bug or defect
-  提供:
-    近义词:
-    - 给出
-    - 提出
-    英文: provide
-  建议:
-    近义词:
-    - 意见
-    - 方案
-    英文: suggestion
-purpose: 分析Python/JS/Java代码的质量、复杂度、缺陷和改进建议
+  - 寻找
+  - 定位
+  - 发现
+  检查:
+  - 检测
+  - 审查
+  - 核对
+purpose: 分析Python/JS/Java代码质量、复杂度、bug和改进建议
 keywords:
   动词:
-  - 分析 (analyze)
-  - 评估 (evaluate)
-  - 查找 (find)
-  - 提供 (provide)
-  - 检查 (check)
-  - 生成 (generate)
+  - 分析
+  - 评估
+  - 查找
+  - 检查
+  - 改进
+  - 读取
+  - 生成
+  - 创建
+  - 保存
   名词:
-  - 代码 (code)
-  - 质量 (quality)
-  - 复杂度 (complexity)
-  - bug (bug)
-  - 改进建议 (improvement suggestion)
-  - 安全漏洞 (security vulnerability)
-  - 风险 (risk)
-  - 可读性 (readability)
-  - 报告 (report)
+  - 代码
+  - 质量
+  - 复杂度
+  - bug
+  - 改进建议
+  - 安全漏洞
+  - 报告
+  - 文件
+  - 路径
+  - 语言
+  - 分析重点
 meta_version: 2
 source_hash: c9ca08a111b59cfe
-computed_at: '2026-07-14T09:00:42.433558+00:00'
+computed_at: '2026-07-14T21:13:09.401178+00:00'
 provider: llm

@@ -1,69 +1,36 @@
 intention:
-- 生成题解
-- 记录思考
-- 提取思路
+- 写
+- 生成
 synonyms:
-  生成题解:
-    近义词:
-    - 创建文档
-    - 撰写解答
-    英文:
-    - generate solution
-    - write solution
-  记录思考:
-    近义词:
-    - 记载思路
-    - 保存过程
-    英文:
-    - record thoughts
-    - document process
-  提取思路:
-    近义词:
-    - 抽取想法
-    - 归纳方法
-    英文:
-    - extract ideas
-    - summarize approaches
-purpose: 生成 LeetCode 题解文档并记录完整思考历程
+  写:
+  - 编写
+  - 撰写
+  - 书写
+  生成:
+  - 产生
+  - 创建
+  - 制作
+purpose: 创建LeetCode题解文档并保存到指定目录
 keywords:
   动词:
-  - 生成(generate)
-  - 创建(create)
-  - 记录(record)
-  - 提取(extract)
-  - 获取(fetch)
-  - 搜索(search)
-  - 调用(call)
-  - 排序(sort)
-  - 使用(use)
-  - 判断(judge)
-  - 迭代(iterate)
-  - 填充(fill)
-  - 写入(write)
-  - 读取(read)
-  - 查找(find)
+  - 写
+  - 生成
+  - 创建
+  - 保存
+  - 获取
+  - 提取
+  - 填充
+  - 记录
   名词:
-  - LeetCode
-  - 题解(solution)
-  - 文档(document)
-  - 模板(template)
-  - 思路(idea)
-  - 代码(code)
-  - 复杂度(complexity)
-  - 哈希表(hash table)
-  - 排序(sort)
-  - 字符串(string)
-  - 数组(array)
-  - 算法(algorithm)
-  - 面试官(interviewer)
-  - 对话(conversation)
-  - 脚本(script)
-  - 目录(directory)
-  - 文件(file)
-  - 题型(problem)
-  - 标签(tag)
-  - 分组(group)
+  - 题解
+  - 目录
+  - 文件
+  - 模板
+  - 题目
+  - 代码
+  - 思路
+  - 算法
 meta_version: 2
 source_hash: 755c20bd70dc3c55
-computed_at: '2026-07-14T09:26:54.442202+00:00'
+computed_at: '2026-07-14T21:13:40.332143+00:00'
 provider: llm

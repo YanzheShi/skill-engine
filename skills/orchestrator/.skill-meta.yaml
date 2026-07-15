@@ -1,48 +1,38 @@
 intention:
-- 编排技能
-- 选择调用
-- 协同执行
+- 编排
+- 选择
+- 调用
 synonyms:
-  编排技能:
-    近义词:
-    - 组织技能
-    - 协调技能
-    英文: orchestrate skills
-  选择调用:
-    近义词:
-    - 选取调用
-    - 挑选启用
-    英文: select and invoke
-  协同执行:
-    近义词:
-    - 联合运行
-    - 协作处理
-    英文: collaborative execution
-purpose: 根据用户需求自动选择和调用多个技能协同工作
+  编排:
+  - 组织
+  - 安排
+  - 协调
+  选择:
+  - 选取
+  - 挑选
+  调用:
+  - 启用
+  - 召唤
+purpose: 根据用户需求自动编排技能并输出结果
 keywords:
   动词:
-  - 分析 analyze
-  - 识别 identify
-  - 选择 select
-  - 编排 orchestrate
-  - 调用 call
-  - 传递 pass
-  - 整合 integrate
-  - 返回 return
-  - 决定 decide
-  - 回答 answer
+  - 理解
+  - 分析
+  - 选择
+  - 调用
+  - 编排
+  - 传递
+  - 汇总
+  - 整合
   名词:
-  - 技能 skill
-  - 编排器 orchestrator
-  - 需求 requirement
-  - 依赖 dependency
-  - 结果 result
-  - 输出 output
-  - 输入 input
-  - 计划 plan
-  - 列表 list
-  - 顺序 order
+  - 需求
+  - 技能
+  - 顺序
+  - 结果
+  - 输出
+  - 计划
+  - 描述
 meta_version: 2
 source_hash: 93d01125d8df6b1d
-computed_at: '2026-07-14T09:27:04.435266+00:00'
+computed_at: '2026-07-14T21:13:57.806064+00:00'
 provider: llm

@@ -68,6 +68,7 @@ def tokenize_query(query: str, proper_en: Optional[set[str]] = None) -> dict:
         "verbs_zh": verbs_zh,
         "nouns_zh": nouns_zh,
         "nouns_en": nouns_en,
+        "raw": query,
     }
 
 

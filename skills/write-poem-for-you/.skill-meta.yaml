@@ -1,40 +1,25 @@
 intention:
-- 写古诗
-- 生成古诗
-- 创作诗歌
+- 写
+- 创建
 synonyms:
-  写古诗:
-    cn:
-    - 作诗
-    - 赋诗
-    en: write classical poetry
-  生成古诗:
-    cn:
-    - 产生古诗
-    - 创作古诗
-    en: generate classical poetry
-  创作诗歌:
-    cn:
-    - 撰写诗歌
-    - 写诗
-    en: create poetry
+  写:
+  - 作诗
+  - 赋诗
+  - 写诗
+  创建:
+  - 建立
+  - 生成
+  - 制作
 purpose: 写中国古诗并保存到指定目录
 keywords:
   动词:
-  - 创建/create
-  - 写/write
-  - 理解/understand
-  - 执行/execute
-  - 返回/return
+  - 写
+  - 创建
   名词:
-  - 中国古诗/Chinese classical poetry
-  - 目录/directory
-  - skill
-  - 需求/requirement
-  - 结果/result
-  - 格式/format
-  - 设计规范/design specification
+  - 诗
+  - 古诗
+  - 目录
 meta_version: 2
 source_hash: 328ce6753d40848f
-computed_at: '2026-07-14T09:28:55.938031+00:00'
+computed_at: '2026-07-14T21:14:38.869982+00:00'
 provider: llm
