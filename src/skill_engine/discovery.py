@@ -2,20 +2,22 @@
 Discovery — 扫描多根目录，建立 skill 索引
 
 职责：
-- 扫描 ~/.skill-engine/skills/（用户级）
-- 扫描 .skill-engine/skills/（项目级）
 - 扫描自定义根目录（roots 参数）
+- 可选：扫描 ~/.agents/skills/、~/.claude/skills/、~/.skill-engine/skills/ 等外部路径
 - 建立 {name: SkillMeta} 索引
 - 应用 priority 覆盖（高 priority 覆盖低 priority）
 - 应用 skillOverrides 状态
 
-|扫描顺序（优先级从低到高，同优先级后者覆盖前者）：
-|0. 用户级: ~/.agents/skills/          (priority=10)
-|1. 用户级: ~/.claude/skills/          (priority=10)
-|2. 用户级: ~/.skill-engine/skills/    (priority=10)
-|3. 项目级: .claude/skills/            (priority=20)
-|4. 项目级: .skill-engine/skills/      (priority=20)
-|5. 自定义根: roots 参数传入            (priority=30)
+默认只加载 roots 指定的项目级技能。
+通过 extend_skills=True 额外加载外部技能。
+
+扫描顺序（优先级从低到高，同优先级后者覆盖前者）：
+0. 用户级: ~/.agents/skills/          (priority=10)
+1. 用户级: ~/.claude/skills/          (priority=10)
+2. 用户级: ~/.skill-engine/skills/    (priority=10)
+3. 项目级: .claude/skills/            (priority=20)
+4. 项目级: .skill-engine/skills/      (priority=20)
+5. 自定义根: roots 参数传入            (priority=30)
 """
 
 from pathlib import Path
@@ -86,6 +88,7 @@ def discover(
     roots: Optional[list[Path]] = None,
     overrides: Optional[dict[str, str]] = None,
     skip_defaults: bool = False,
+    extend_skills: bool = False,
 ) -> dict[str, SkillMeta]:
     """扫描多根目录，建立 skill 索引。
 
@@ -96,8 +99,10 @@ def discover(
     Args:
         roots: 额外的扫描根目录
         overrides: {skill_name: state} 覆盖配置
-        skip_defaults: 如果为 True，跳过默认的 ~/.agents/skills/、~/.claude/skills/、
-                      ~/.skill-engine/skills/ 等标准路径（测试隔离用）
+        skip_defaults: 兼容参数（已弃用），等价于 extend_skills=False
+        extend_skills: 如果为 True，额外加载 ~/.agents/skills/、~/.claude/skills/、
+                       ~/.skill-engine/skills/ 等外部技能路径。
+                       默认 False，只加载 roots 指定的项目级技能。
 
     Returns:
         {skill_name: SkillMeta} 索引
@@ -105,8 +110,11 @@ def discover(
     overrides = overrides or {}
     all_index: dict[str, SkillMeta] = {}
 
-    # 0. 用户级 — ~/.agents/skills/ 标准路径 (priority=10)
-    if not skip_defaults:
+    # 是否加载外部 skill（兼容旧参数 skip_defaults）
+    load_external = extend_skills and not skip_defaults
+
+    if load_external:
+        # 0. 用户级 — ~/.agents/skills/ 标准路径 (priority=10)
         agent_user_dir = Path.home() / ".agents" / "skills"
         agent_user_index = _discover_skill_dir(agent_user_dir, priority=10)
         for name, meta in agent_user_index.items():
@@ -114,8 +122,7 @@ def discover(
             if name not in all_index:
                 all_index[name] = meta
 
-    # 1. 用户级 — Claude Code 标准路径 (priority=10)
-    if not skip_defaults:
+        # 1. 用户级 — Claude Code 标准路径 (priority=10)
         cc_user_dir = Path.home() / ".claude" / "skills"
         cc_user_index = _discover_skill_dir(cc_user_dir, priority=10)
         for name, meta in cc_user_index.items():
@@ -123,8 +130,7 @@ def discover(
             if name not in all_index:
                 all_index[name] = meta
 
-    # 2. 用户级 — skill-engine 路径 (priority=10)
-    if not skip_defaults:
+        # 2. 用户级 — skill-engine 路径 (priority=10)
         user_dir = Path.home() / ".skill-engine" / "skills"
         user_index = _discover_skill_dir(user_dir, priority=10)
         for name, meta in user_index.items():
@@ -132,8 +138,7 @@ def discover(
             if name not in all_index:
                 all_index[name] = meta
 
-    # 3. 项目级 — Claude Code 标准路径 (priority=20)
-    if not skip_defaults:
+        # 3. 项目级 — Claude Code 标准路径 (priority=20)
         cc_project_dir = Path.cwd() / ".claude" / "skills"
         cc_project_index = _discover_skill_dir(cc_project_dir, priority=20)
         for name, meta in cc_project_index.items():
@@ -143,8 +148,7 @@ def discover(
             elif name not in all_index:
                 all_index[name] = meta
 
-    # 4. 项目级 — skill-engine 路径 (priority=20)
-    if not skip_defaults:
+        # 4. 项目级 — skill-engine 路径 (priority=20)
         project_dir = Path.cwd() / ".skill-engine" / "skills"
         project_index = _discover_skill_dir(project_dir, priority=20)
         for name, meta in project_index.items():
@@ -154,7 +158,7 @@ def discover(
             elif name not in all_index:
                 all_index[name] = meta
 
-    # 3. 自定义根 (priority=30)
+    # 5. 自定义根 (priority=30)
     if roots:
         for root in roots:
             root_path = Path(root) if isinstance(root, str) else root
@@ -166,7 +170,7 @@ def discover(
                 elif name not in all_index:
                     all_index[name] = meta
 
-    # 4. 应用 overrides 的 state 覆盖
+    # 应用 overrides 的 state 覆盖
     for name, state in overrides.items():
         if name in all_index:
             all_index[name].state = state

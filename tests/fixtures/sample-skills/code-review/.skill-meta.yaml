@@ -1,0 +1,32 @@
+intention:
+- 审查代码
+- 检查代码
+synonyms:
+  审查代码:
+  - 代码审查
+  - code review
+  检查代码:
+  - 代码检查
+  - code inspection
+purpose: 审查代码，检查风格、性能和潜在bug
+keywords:
+  动词:
+  - 审查
+  - review
+  - 检查
+  - check
+  名词:
+  - 代码
+  - code
+  - 风格
+  - style
+  - 性能
+  - performance
+  - 潜在bug
+  - potential bug
+  - 安全漏洞
+  - security vulnerability
+meta_version: 2
+source_hash: c4892b91ecfa7f68
+computed_at: '2026-07-14T09:08:10.054024+00:00'
+provider: llm

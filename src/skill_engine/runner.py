@@ -5,7 +5,7 @@ Runner — Skill 执行器，三路分流
 1. 接收匹配结果
 2. 三路分流：
    - 有 steps → _run_steps（确定性执行，Phase 3）
-   - 有 llm → _run_档位A（单次 LLM 调用，Phase 2 尾巴）
+   - 有 llm → _run_llm_once（单次 LLM 调用，Phase 2 尾巴）
    - 都没有 → 只编译不执行（纯编译器模式）
 
 使用方式：
@@ -73,50 +73,7 @@ class Runner:
         self.llm_api_key = llm_api_key
         self.llm_model = llm_model
 
-    def run(
-        self,
-        match_result: MatchResult,
-        steps: Optional[list[Step]] = None,
-        llm: Optional[object] = None,
-    ) -> dict:
-        """执行 skill — 三路分流
-
-        Args:
-            match_result: 匹配结果
-            steps: 自定义 steps DSL（可选，从 SKILL.md 解析）
-            llm: LLM 客户端（可选，档位 A 需要）
-
-        Returns:
-            {
-                "skill_name": str,
-                "score": float,
-                "steps": list[step_result],
-                "output": str,
-                "files_created": list[str],
-            }
-        """
-        skill = match_result.skill
-        arguments = match_result.arguments
-
-        # 路径 1: 显式传入 steps（即使是空列表）→ 确定性执行
-        if steps is not None:
-            return self._run_steps(steps, arguments, skill)
-
-        # 路径 2: 有 LLM → 档位 A 单次调用（Phase 2 尾巴）
-        if llm:
-            return self._run_档位A(skill, arguments, llm)
-
-        # 路径 3: 无 steps 无 LLM → 纯编译（pipe 给外部）
-        final_prompt = self.assembler.assemble(skill, arguments)
-        return {
-            "skill_name": skill.metadata.name,
-            "score": match_result.score,
-            "steps": [],
-            "output": final_prompt,
-            "files_created": [],
-        }
-
-    def _run_档位A(self, skill: Skill, arguments: dict, llm) -> dict:
+    def _run_llm_once(self, skill: Skill, arguments: dict, llm) -> dict:
         """档位 A：单次 LLM 调用（CC 原生 skill 兜底）
 
         工作流程：
@@ -178,8 +135,9 @@ class Runner:
             if "file_created" in result:
                 files_created.append(result["file_created"])
 
-            # 每步间隔 1 秒，防止触发 API RPM 限制
-            time.sleep(1)
+            # llm 步骤后间隔 1 秒，防止触发 API RPM 限制
+            if getattr(step, "type", None) == "llm":
+                time.sleep(1)
 
         # 空 steps 列表返回空 output
         if not steps:
@@ -420,7 +378,7 @@ class Runner:
 
         # 路径 3: 档位 A — 单次 LLM 调用
         if llm:
-            return self._run_档位A(skill, arguments, llm)
+            return self._run_llm_once(skill, arguments, llm)
 
         # 路径 4: 纯编译
         final_prompt = self.assembler.assemble(skill, arguments)
@@ -432,9 +390,78 @@ class Runner:
             "files_created": [],
             "iterations": 0,
             "stopped_by": "none",
-        }
+                    }
+
+    def run_plan(
+
+                    self,
+                    plan,
+                    registry: "Registry",
+                    query: str = "",
+                    llm: Optional[object] = None,
+                    tool_dispatch: Optional[object] = None,
+                    max_iterations: int = 10,
+                ) -> dict:
+                    """执行 MatchPlan（直接传入 MatchPlan，不经过 MatchResult 包装）
+
+                    Args:
+                        plan: MatchPlan 对象（含 primary/selections）
+                        registry: Registry（用于 load_skill）
+                        query: 用户原始输入
+                        llm: LLM 客户端（档位 A）
+                        tool_dispatch: LLM 客户端（档位 B）
+                        max_iterations: 档位 B 最大迭代次数
+
+                    Returns:
+                        与 run() 相同的 dict 格式。
+                        multi 模式时返回 all_outputs 列表。
+                    """
+                    from .models import MatchResult
+
+                    if plan.mode == "multi" and plan.selections:
+                        all_results = []
+                        for selected in plan.selections:
+                            skill = registry.load_skill(selected.name)
+                            if not skill:
+                                continue
+                            mr = MatchResult(
+                                skill=skill, score=selected.score or plan.score or 1.0,
+                                method=plan.method, arguments={"$ARGUMENTS": query, "$0": query},
+                            )
+                            result = self.run(
+                                mr, llm=llm, tool_dispatch=tool_dispatch, max_iterations=max_iterations
+                            )
+                            result["skill_name"] = selected.name
+                            all_results.append(result)
+                        return {
+                            "skill_name": plan.selections[0].name,
+                            "score": plan.score or 1.0,
+                            "all_outputs": all_results,
+                            "output": all_results[-1].get("output", "") if all_results else "",
+                            "files_created": [],
+                            "steps": [],
+                        }
+
+                    # single 模式
+                    if not plan.primary:
+                        return {"skill_name": "", "score": 0, "steps": [], "output": "", "files_created": []}
+
+                    skill = registry.load_skill(plan.primary.name)
+                    if not skill:
+                        return {
+                            "skill_name": plan.primary.name, "score": 0,
+                            "steps": [], "output": f"[ERROR] 无法加载 skill: {plan.primary.name}",
+                            "files_created": [],
+                        }
+
+                    mr = MatchResult(
+                        skill=skill, score=plan.score or 1.0,
+                        method=plan.method, arguments={"$ARGUMENTS": query, "$0": query},
+                    )
+                    return self.run(mr, llm=llm, tool_dispatch=tool_dispatch, max_iterations=max_iterations)
 
     def _run_tool_dispatch(
+
         self,
         match_result: MatchResult,
         llm,

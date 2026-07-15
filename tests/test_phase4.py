@@ -127,11 +127,11 @@ class TestContextForkPassthrough:
         # 这里验证 fork skill 能正常编译（不 crash）
 
 
-class TestEmbeddingFallback:
-    """测试 embedding 匹配的优雅降级"""
+class TestKeywordMatch:
+    """Test Router keyword matching (replaces old embedding tests for V0.3 router)"""
 
-    def test_embedding_returns_empty_without_package(self):
-        """未安装 sentence-transformers 时返回空"""
+    def test_exact_match_returns_plan(self):
+        """Exact name match returns MatchPlan with mode=single"""
         from skill_engine.discovery import discover
         from skill_engine.registry import Registry
         from skill_engine.router import Router
@@ -140,13 +140,14 @@ class TestEmbeddingFallback:
         registry = Registry(index)
         router = Router(registry)
 
-        results = router.match("测试", method="embedding")
-        assert len(results) == 0
+        plan = router.match("deploy")
+        assert plan.mode == "single"
+        assert plan.primary is not None
+        assert plan.primary.name == "deploy"
+        assert plan.method == "exact"
 
-    def test_embedding_with_mock_package(self, monkeypatch):
-        """mock sentence-transformers 时能工作"""
-        # 由于我们不在 CI 环境中，这个测试只做结构验证
-        # 实际 embedding 测试需要在有 sentence-transformers 的环境下运行
+    def test_keyword_match_returns_candidate(self):
+        """Keyword match returns a plan with primary"""
         from skill_engine.discovery import discover
         from skill_engine.registry import Registry
         from skill_engine.router import Router
@@ -155,9 +156,36 @@ class TestEmbeddingFallback:
         registry = Registry(index)
         router = Router(registry)
 
-        # 确认 router 有 embedding 相关属性
-        assert hasattr(router, '_embedding_cache')
-        assert hasattr(router, '_has_embedding')
+        plan = router.match("deploy")
+        assert plan.primary is not None, f"MatchPlan: {plan}"
+        assert plan.score == 1.0
+        assert plan.method == "exact"
+
+    def test_no_match_returns_uncertain_plan(self):
+        """No matching skill returns uncertain plan"""
+        from skill_engine.discovery import discover
+        from skill_engine.registry import Registry
+        from skill_engine.router import Router
+
+        index = discover(roots=[FIXTURES_DIR])
+        registry = Registry(index)
+        router = Router(registry)
+
+        plan = router.match("xyznonexistent12345")
+        assert plan.uncertain is True
+
+    def test_router_has_indices(self):
+        """Router has proper index attributes"""
+        from skill_engine.discovery import discover
+        from skill_engine.registry import Registry
+        from skill_engine.router import Router
+
+        index = discover(roots=[FIXTURES_DIR])
+        registry = Registry(index)
+        router = Router(registry)
+
+        assert hasattr(router, '_alias_index')
+        assert hasattr(router, '_shortcut_index')
 
 
 class TestEndToEndAllowlist:

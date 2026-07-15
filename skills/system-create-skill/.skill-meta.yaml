@@ -1,0 +1,31 @@
+intention:
+- 创建
+- 生成
+synonyms:
+  创建:
+  - 建立
+  - 制作
+  生成:
+  - 产生
+  - 产出
+purpose: 根据用户需求创建新skill并生成脚本
+keywords:
+  动词:
+  - 创建
+  - 生成
+  - 分析
+  - 确定
+  - 设置
+  - 返回
+  名词:
+  - skill
+  - SKILL.md
+  - 脚本
+  - 目录
+  - 需求
+  - 功能
+  - JSON
+meta_version: 2
+source_hash: 09374823c2ee9854
+computed_at: '2026-07-14T21:14:05.942372+00:00'
+provider: llm

@@ -1,0 +1,47 @@
+intention:
+- 生成题解
+- 创建文档
+synonyms:
+  生成:
+    近义词:
+    - 创建
+    - 产生
+    英文: generate
+  题解:
+    近义词:
+    - 解答
+    - 解析
+    英文: solution
+  创建:
+    近义词:
+    - 建立
+    - 生成
+    英文: create
+  文档:
+    近义词:
+    - 文件
+    英文: document
+purpose: 生成LeetCode题解文档
+keywords:
+  动词:
+  - 生成/generate
+  - 创建/create
+  - 填充/fill
+  - 获取/fetch
+  - 识别/identify
+  名词:
+  - leetcode/leetcode
+  - 题解/solution
+  - 文档/document
+  - 模板/template
+  - 题号/problem_id
+  - 目录/directory
+  - 脚本/script
+  - 文件/file
+  - 注释/comment
+  - 文件名/filename
+  - 正则/regex
+meta_version: 2
+source_hash: 564558374fe27c87
+computed_at: '2026-07-14T09:08:02.490134+00:00'
+provider: llm

@@ -1,0 +1,36 @@
+intention:
+- 写
+- 生成
+synonyms:
+  写:
+  - 编写
+  - 撰写
+  - 书写
+  生成:
+  - 产生
+  - 创建
+  - 制作
+purpose: 创建LeetCode题解文档并保存到指定目录
+keywords:
+  动词:
+  - 写
+  - 生成
+  - 创建
+  - 保存
+  - 获取
+  - 提取
+  - 填充
+  - 记录
+  名词:
+  - 题解
+  - 目录
+  - 文件
+  - 模板
+  - 题目
+  - 代码
+  - 思路
+  - 算法
+meta_version: 2
+source_hash: 755c20bd70dc3c55
+computed_at: '2026-07-14T21:13:40.332143+00:00'
+provider: llm

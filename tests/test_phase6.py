@@ -151,26 +151,34 @@ class TestRunnerIntegration:
 
     def test_run_real_skill(self, engine):
         """运行真实 skill"""
-        _, _, router, _, _, runner = engine
+        _, _reg, router, _, _, runner = engine
 
-        results = router.match("生成题解", method="keyword", top_k=5)
-        # 可能有多个匹配（包括 orchestrator），找 leetcode-solution-writer
-        lw_results = [r for r in results if r.skill.metadata.name == "leetcode-solution-writer"]
-        assert len(lw_results) >= 1
-        result = runner.run(lw_results[0])
+        plan = router.match("生成题解")
+        # 直接通过 name 加载 skill
+        from skill_engine.models import MatchResult
+        skill = _reg.load_skill("leetcode-solution-writer")
+        assert skill is not None, "leetcode-solution-writer should exist"
+        result = runner.run(MatchResult(
+            skill=skill, score=1.0, method="name",
+            arguments={"$ARGUMENTS": "生成题解", "$0": "生成题解"},
+        ))
         assert result["skill_name"] == "leetcode-solution-writer"
         assert len(result["output"]) > 5000
 
     def test_run_with_llm_mock(self, engine):
         """档位 A 执行（mock LLM）"""
-        _, _, router, _, _, runner = engine
+        _idx, _reg, _, _, _, runner = engine
 
         class MockLLM:
             def invoke(self, prompt):
                 return "LLM 生成的题解内容"
-
-        results = router.match("生成题解", method="keyword", top_k=1)
-        result = runner.run(results[0], llm=MockLLM())
+        from skill_engine.models import MatchResult
+        skill = _reg.load_skill("leetcode-solution-writer")
+        assert skill is not None
+        result = runner.run(MatchResult(
+            skill=skill, score=1.0, method="name",
+            arguments={"$ARGUMENTS": "生成题解", "$0": "生成题解"},
+        ), llm=MockLLM())
         assert result["skill_name"] == "leetcode-solution-writer"
         assert "LLM 生成的题解内容" in result["output"]
 
