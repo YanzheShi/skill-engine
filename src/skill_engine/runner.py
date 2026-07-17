@@ -14,6 +14,7 @@ Runner — Skill 执行器，三路分流
 >>> print(result["output"])
 """
 
+import re
 import time
 import yaml
 from pathlib import Path
@@ -47,6 +48,36 @@ def write_file(path: str, content: str) -> str:
 
 
 TOOL_DISPATCH_TOOLS = [bash, read_file, write_file]
+
+
+def _parse_named_params(query: str) -> dict:
+    """从 query 中提取 named params（key=value 或 key:value 对）
+
+    两种格式：
+    - key=value（key 不限字符集，支持中文）：topic=DP 或 主题=DP
+    - key:value（仅 ASCII 键，防中文冒号误伤）：topic:DP
+
+    Args:
+        query: 用户输入字符串
+
+    Returns:
+        {key: value, ...}，空 query 返回空 dict
+    """
+    if not query or not query.strip():
+        return {}
+    params = {}
+    # key=value 格式，key 不限字符集
+    for match in re.finditer(r'([^=\s]+)=(\S+)', query):
+        key = match.group(1).strip()
+        value = match.group(2).rstrip(',;')
+        params[key] = value
+    # key:value 格式，仅 ASCII 键（防中文冒号误伤）
+    for match in re.finditer(r'([a-zA-Z]\w*):\s*(\S+)', query):
+        key = match.group(1).lower()
+        value = match.group(2).rstrip(',;')
+        if key not in params:
+            params[key] = value
+    return params
 
 
 class Runner:
@@ -283,7 +314,10 @@ class Runner:
             else:
                 # 命名参数，匹配 $name
                 template = template.replace(f"${key}", str(value))
-
+        # 替换 {var} 语法（与 assembler._substitute_params 对齐）
+        for key, value in arguments.items():
+            key_clean = key.lstrip("$")
+            template = template.replace(f"{{{key_clean}}}", str(value))
         return template
 
     # ================================================================
@@ -426,7 +460,7 @@ class Runner:
                                 continue
                             mr = MatchResult(
                                 skill=skill, score=selected.score or plan.score or 1.0,
-                                method=plan.method, arguments={"$ARGUMENTS": query, "$0": query},
+                                method=plan.method, arguments={"$ARGUMENTS": query, "$0": query, **_parse_named_params(query)},
                             )
                             result = self.run(
                                 mr, llm=llm, tool_dispatch=tool_dispatch, max_iterations=max_iterations
@@ -456,7 +490,7 @@ class Runner:
 
                     mr = MatchResult(
                         skill=skill, score=plan.score or 1.0,
-                        method=plan.method, arguments={"$ARGUMENTS": query, "$0": query},
+                        method=plan.method, arguments={"$ARGUMENTS": query, "$0": query, **_parse_named_params(query)},
                     )
                     return self.run(mr, llm=llm, tool_dispatch=tool_dispatch, max_iterations=max_iterations)
 

@@ -253,11 +253,16 @@ def run(
     # 2. 匹配
     router = _create_router(registry)
 
-    # --args 模式：query_or_name 是 skill 名，args 是用户请求
+    # --args 模式：query_or_name 是 skill 名（精确匹配），args 是用户实际请求
     # 否则 query_or_name 是自然语言查询，走三步路由
-    match_query = args if args else query_or_name
     llm = _get_llm_client()
-    plan = router.match(match_query, llm=llm)
+    if args:
+        # 用 skill 名做匹配（精确命中 name exact 路由），用 args 做 $ARGUMENTS
+        plan = router.match(query_or_name, llm=llm)
+        match_query = args
+    else:
+        match_query = query_or_name
+        plan = router.match(match_query, llm=llm)
 
     if not plan.primary and not plan.selections:
         print(f"[ERROR] 未找到匹配的 skill: {query_or_name}")
@@ -278,7 +283,9 @@ def run(
         if plan.primary:
             skill = registry.load_skill(plan.primary.name)
             if skill:
-                prompt = assembler.assemble(skill, {"$ARGUMENTS": match_query, "$0": match_query})
+                from .runner import _parse_named_params
+                _args = {"$ARGUMENTS": match_query, "$0": match_query, **_parse_named_params(match_query)}
+                prompt = assembler.assemble(skill, _args)
                 print(f"\n{'='*60}")
                 print(f"Skill: {skill.metadata.name}")
                 print(f"分数: {plan.score or 1.0:.2f}")
@@ -290,7 +297,9 @@ def run(
             for s in plan.selections:
                 skill = registry.load_skill(s.name)
                 if skill:
-                    prompt = assembler.assemble(skill, {"$ARGUMENTS": match_query, "$0": match_query})
+                    from .runner import _parse_named_params
+                    _args = {"$ARGUMENTS": match_query, "$0": match_query, **_parse_named_params(match_query)}
+                    prompt = assembler.assemble(skill, _args)
                     print(f"\n{'='*60}")
                     print(f"Skill: {skill.metadata.name}")
                     print(f"{'='*60}")

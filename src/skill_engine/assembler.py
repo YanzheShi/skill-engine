@@ -136,7 +136,7 @@ class Assembler:
     def _substitute_params(self, body: str, arguments: dict) -> str:
         """参数替换
 
-        替换 $ARGUMENTS, $0, $1, $name 等变量。
+        替换 $ARGUMENTS, $0, $1, $name 等变量，以及 {var} 语法。
         """
         for key, value in arguments.items():
             if key.startswith("$"):
@@ -145,6 +145,10 @@ class Assembler:
             else:
                 # 替换命名参数
                 body = body.replace(f"${key}", str(value))
+        # 替换 {var} 语法（兼容 Steps DSL 风格的模板变量）
+        for key, value in arguments.items():
+            key_clean = key.lstrip("$")
+            body = body.replace(f"{{{key_clean}}}", str(value))
         return body
 
     def _inject_refs(self, body: str, skill_dir: Path) -> str:
