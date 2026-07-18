@@ -29,7 +29,7 @@ class TestSkillCreator:
 
     def test_create_basic_skill(self, tmp_dir):
         """创建基础 skill"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
 
         creator = SkillCreator(base_dir=tmp_dir)
         result = creator.create(
@@ -52,7 +52,7 @@ class TestSkillCreator:
 
     def test_create_skill_with_scripts(self, tmp_dir):
         """创建带脚本的 skill"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
 
         creator = SkillCreator(base_dir=tmp_dir)
         result = creator.create(
@@ -73,7 +73,7 @@ class TestSkillCreator:
 
     def test_create_skill_with_custom_body(self, tmp_dir):
         """创建带自定义 body 的 skill"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
 
         creator = SkillCreator(base_dir=tmp_dir)
         body = "# Custom Body\n\n这是自定义内容"
@@ -89,7 +89,7 @@ class TestSkillCreator:
 
     def test_create_skill_duplicate(self, tmp_dir):
         """重复创建同名 skill"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
 
         creator = SkillCreator(base_dir=tmp_dir)
         r1 = creator.create(name="dup", description="第一次")
@@ -101,7 +101,7 @@ class TestSkillCreator:
 
     def test_validate_missing_skill_md(self, tmp_dir):
         """验证缺少 SKILL.md"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
 
         creator = SkillCreator(base_dir=tmp_dir)
         skill_dir = Path(tmp_dir) / "no-skill-md"
@@ -112,7 +112,7 @@ class TestSkillCreator:
 
     def test_validate_missing_description(self, tmp_dir):
         """验证缺少 description"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
 
         creator = SkillCreator(base_dir=tmp_dir)
         skill_dir = Path(tmp_dir) / "bad-fm"
@@ -128,9 +128,9 @@ class TestSkillValidator:
 
     def test_validate_compile_success(self):
         """编译验证通过"""
-        from skill_engine.creator import SkillValidator
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.creator.creator import SkillValidator
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
         from skill_engine.models import Skill, SkillMetadata
 
         executor = Executor(timeout=10, allow_all=True)
@@ -149,9 +149,9 @@ class TestSkillValidator:
 
     def test_validate_compile_empty_body(self):
         """空 body 也能编译"""
-        from skill_engine.creator import SkillValidator
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.creator.creator import SkillValidator
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
         from skill_engine.models import Skill, SkillMetadata
 
         executor = Executor(timeout=10, allow_all=True)
@@ -169,9 +169,9 @@ class TestSkillValidator:
 
     def test_validate_scripts_missing(self, tmp_path):
         """脚本验证：引用的脚本不存在"""
-        from skill_engine.creator import SkillValidator
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.creator.creator import SkillValidator
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
         from skill_engine.models import Skill, SkillMetadata
 
         executor = Executor(timeout=10, allow_all=True)
@@ -192,9 +192,9 @@ class TestSkillValidator:
 
     def test_validate_scripts_present(self, tmp_path):
         """脚本验证：脚本存在"""
-        from skill_engine.creator import SkillValidator
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.creator.creator import SkillValidator
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
         from skill_engine.models import Skill, SkillMetadata
 
         executor = Executor(timeout=10, allow_all=True)
@@ -218,9 +218,9 @@ class TestSkillValidator:
 
     def test_full_validate(self, tmp_path):
         """完整验证"""
-        from skill_engine.creator import SkillValidator
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.creator.creator import SkillValidator
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
         from skill_engine.models import Skill, SkillMetadata
 
         executor = Executor(timeout=10, allow_all=True)
@@ -248,9 +248,9 @@ class TestRunnerCreateSkill:
 
     def test_end_to_end_create_and_validate(self, tmp_path):
         """创建 skill 并验证"""
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10, allow_all=True)
         assembler = Assembler(executor=executor)
@@ -277,9 +277,9 @@ class TestRunnerCreateSkill:
 
     def test_create_skill_with_script(self, tmp_path):
         """创建带脚本的 skill"""
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10, allow_all=True)
         assembler = Assembler(executor=executor)
@@ -301,9 +301,9 @@ class TestRunnerCreateSkill:
 
     def test_register_new_skill(self, tmp_path):
         """热注册新 skill"""
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10, allow_all=True)
         assembler = Assembler(executor=executor)
@@ -334,8 +334,8 @@ class TestSystemCreateSkill:
 
     def test_system_skill_discoverable(self):
         """system-create-skill 能被 discovery 发现"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         index = discover(roots=["skills"])
         registry = Registry(index)
@@ -343,8 +343,8 @@ class TestSystemCreateSkill:
 
     def test_system_skill_has_groups(self):
         """system-create-skill 有 groups"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         index = discover(roots=["skills"])
         registry = Registry(index)
@@ -365,7 +365,7 @@ class TestSkillCreatorEnhanced:
 
     def test_create_with_steps(self, tmp_dir):
         """创建带 steps 的 skill"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
         from skill_engine.models import Step
 
         creator = SkillCreator(base_dir=tmp_dir)
@@ -397,7 +397,7 @@ class TestSkillCreatorEnhanced:
 
     def test_create_with_arguments(self, tmp_dir):
         """创建带 arguments 的 skill"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
 
         creator = SkillCreator(base_dir=tmp_dir)
         result = creator.create(
@@ -416,7 +416,7 @@ class TestSkillCreatorEnhanced:
 
     def test_create_with_assets(self, tmp_dir):
         """创建带 assets 的 skill"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
 
         creator = SkillCreator(base_dir=tmp_dir)
         result = creator.create(
@@ -439,8 +439,8 @@ class TestSkillCreatorEnhanced:
 
     def test_create_with_script_templates(self, tmp_dir):
             """创建带脚本的 skill（引用内置脚本源码）"""
-            from skill_engine.creator import SkillCreator
-            from skill_engine.builtins import WRITE_TO_FILE_PY, READ_FILE_PY
+            from skill_engine.creator.creator import SkillCreator
+            from skill_engine.creator.builtins import WRITE_TO_FILE_PY, READ_FILE_PY
 
             creator = SkillCreator(base_dir=tmp_dir)
             result = creator.create(
@@ -467,7 +467,7 @@ class TestSkillCreatorEnhanced:
 
     def test_create_with_all_features(self, tmp_dir):
         """创建包含所有增强功能的 skill（端到端）"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
         from skill_engine.models import Step
 
         creator = SkillCreator(base_dir=tmp_dir)
@@ -509,7 +509,7 @@ class TestSkillCreatorEnhanced:
 
     def test_create_backward_compatible(self, tmp_dir):
         """验证向后兼容：不带新参数的创建仍然工作"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
 
         creator = SkillCreator(base_dir=tmp_dir)
 
@@ -528,7 +528,7 @@ class TestSkillCreatorEnhanced:
 
     def test_structured_body_without_steps(self, tmp_dir):
         """有 arguments 但无 steps 时，生成带 arguments 部分的 body"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
 
         creator = SkillCreator(base_dir=tmp_dir)
         result = creator.create(
@@ -544,7 +544,7 @@ class TestSkillCreatorEnhanced:
 
     def test_serialize_steps_preserves_order(self, tmp_dir):
         """验证步骤序列化保持顺序"""
-        from skill_engine.creator import SkillCreator
+        from skill_engine.creator.creator import SkillCreator
         from skill_engine.models import Step
 
         creator = SkillCreator(base_dir=tmp_dir)
@@ -575,10 +575,10 @@ class TestRunnerStepAutoDetection:
 
     def test_parse_steps_from_body(self, tmp_path):
         """从 body 中解析 steps"""
-        from skill_engine.creator import SkillCreator
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.creator.creator import SkillCreator
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
         from skill_engine.models import Step
 
         executor = Executor(timeout=10, allow_all=True)
@@ -621,9 +621,9 @@ Test description
 
     def test_parse_steps_from_body_no_steps(self, tmp_path):
         """没有 ## Steps 时返回 None"""
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10, allow_all=True)
         assembler = Assembler(executor=executor)
@@ -635,9 +635,9 @@ Test description
 
     def test_parse_steps_from_body_empty(self, tmp_path):
         """空 body 返回 None"""
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10, allow_all=True)
         assembler = Assembler(executor=executor)
@@ -648,9 +648,9 @@ Test description
 
     def test_parse_steps_from_body_with_extra_sections(self, tmp_path):
         """## Steps 后有 ## Notes 等其他 section 时正确截断"""
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10, allow_all=True)
         assembler = Assembler(executor=executor)
@@ -685,7 +685,7 @@ class TestDesignerExtractJson:
 
     def test_extract_json_direct(self):
         """直接合法 JSON"""
-        from skill_engine.designer import extract_json
+        from skill_engine.creator.designer import extract_json
         json_str = '{"name": "test-skill", "description": "a test skill", "steps": [{"name": "s1", "type": "exec", "command": "echo hi"}]}'
         result = extract_json(json_str)
         assert result is not None
@@ -694,7 +694,7 @@ class TestDesignerExtractJson:
 
     def test_extract_json_codeblock(self):
         """```json 代码块包裹"""
-        from skill_engine.designer import extract_json
+        from skill_engine.creator.designer import extract_json
         text = 'Some intro...\n```json\n{"name": "cb-skill", "description": "from codeblock", "steps": [{"name": "s1", "type": "exec", "command": "ls"}]}\n```\nSome outro...'
         result = extract_json(text)
         assert result is not None
@@ -702,7 +702,7 @@ class TestDesignerExtractJson:
 
     def test_extract_json_greedy(self):
         """有前后废话，贪婪提取"""
-        from skill_engine.designer import extract_json
+        from skill_engine.creator.designer import extract_json
         text = 'Here is the skill:\n{"name": "greedy-skill", "description": "extracted", "steps": [{"name": "s1", "type": "exec", "command": "echo ok"}]}\nHope this helps!'
         result = extract_json(text)
         assert result is not None
@@ -710,17 +710,17 @@ class TestDesignerExtractJson:
 
     def test_extract_json_invalid(self):
         """无合法 JSON 返回 None"""
-        from skill_engine.designer import extract_json
+        from skill_engine.creator.designer import extract_json
         assert extract_json("This is plain text.") is None
 
     def test_extract_json_empty_string(self):
         """空字符串返回 None"""
-        from skill_engine.designer import extract_json
+        from skill_engine.creator.designer import extract_json
         assert extract_json("") is None
 
     def test_extract_json_malformed(self):
         """不完整 JSON 返回 None"""
-        from skill_engine.designer import extract_json
+        from skill_engine.creator.designer import extract_json
         assert extract_json('{"name": "broken"') is None
 
 
@@ -729,7 +729,7 @@ class TestDesignerValidateDesign:
 
     def test_validate_design_ok(self):
         """合法 design 通过校验"""
-        from skill_engine.designer import validate_design
+        from skill_engine.creator.designer import validate_design
         errors = validate_design({
                     "name": "valid-skill", "description": "a valid skill",
                     "steps": [{"name": "s1", "type": "exec", "command": "echo hello"}],
@@ -738,7 +738,7 @@ class TestDesignerValidateDesign:
 
     def test_validate_design_missing_name(self):
         """缺少 name"""
-        from skill_engine.designer import validate_design
+        from skill_engine.creator.designer import validate_design
         errors = validate_design({
                     "description": "no name",
                     "steps": [{"name": "s1", "type": "exec", "command": "echo hi"}],
@@ -747,7 +747,7 @@ class TestDesignerValidateDesign:
 
     def test_validate_design_missing_description(self):
         """缺少 description"""
-        from skill_engine.designer import validate_design
+        from skill_engine.creator.designer import validate_design
         errors = validate_design({
                     "name": "no-desc",
                     "steps": [{"name": "s1", "type": "exec", "command": "echo hi"}],
@@ -756,13 +756,13 @@ class TestDesignerValidateDesign:
 
     def test_validate_design_missing_steps(self):
         """缺少 steps"""
-        from skill_engine.designer import validate_design
+        from skill_engine.creator.designer import validate_design
         errors = validate_design({"name": "no-steps", "description": "missing steps"})
         assert any("steps" in e for e in errors)
 
     def test_validate_design_steps_empty(self):
         """steps 为空列表"""
-        from skill_engine.designer import validate_design
+        from skill_engine.creator.designer import validate_design
         errors = validate_design({
                     "name": "empty-steps", "description": "empty", "steps": [],
         })
@@ -770,7 +770,7 @@ class TestDesignerValidateDesign:
 
     def test_validate_design_bad_step_type(self):
         """step type 非法"""
-        from skill_engine.designer import validate_design
+        from skill_engine.creator.designer import validate_design
         errors = validate_design({
                     "name": "bad-type", "description": "invalid type",
                     "steps": [{"name": "s1", "type": "fetch", "url": "http://x.com"}],
@@ -779,7 +779,7 @@ class TestDesignerValidateDesign:
 
     def test_validate_design_bad_name_format(self):
         """name 非 slug 格式"""
-        from skill_engine.designer import validate_design
+        from skill_engine.creator.designer import validate_design
         errors = validate_design({
                     "name": "Bad Name With Spaces", "description": "invalid",
                     "steps": [{"name": "s1", "type": "exec", "command": "echo hi"}],
@@ -788,7 +788,7 @@ class TestDesignerValidateDesign:
 
     def test_validate_design_step_missing_name(self):
         """step 缺少 name"""
-        from skill_engine.designer import validate_design
+        from skill_engine.creator.designer import validate_design
         errors = validate_design({
                     "name": "step-no-name", "description": "step missing name",
                     "steps": [{"type": "exec", "command": "echo hi"}],

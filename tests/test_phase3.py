@@ -12,9 +12,9 @@ Phase 3 测试套件
 import pytest
 from pathlib import Path
 from skill_engine.models import Step, Skill, SkillMetadata, MatchResult
-from skill_engine.executor import Executor
-from skill_engine.assembler import Assembler
-from skill_engine.runner import Runner
+from skill_engine.execution.executor import Executor
+from skill_engine.execution.assembler import Assembler
+from skill_engine.execution.runner import Runner
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "sample-skills"
@@ -370,12 +370,12 @@ arguments:
 
     def test_steps_deterministic_run(self, temp_skill_dir):
         """带 steps 的 skill 确定性执行"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.runner import Runner
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.runner import Runner
         from skill_engine.models import Step
 
         executor = Executor(timeout=30, allow_all=True)
@@ -420,9 +420,9 @@ arguments:
 
     def test_steps_with_chained_data(self, temp_skill_dir):
         """步骤间数据传递"""
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.runner import Runner
         from skill_engine.models import Step, Skill, SkillMetadata, MatchResult
 
         executor = Executor(timeout=30, allow_all=True)

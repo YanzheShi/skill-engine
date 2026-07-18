@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 import yaml
 import re
-from .models import SkillMeta
+from skill_engine.models import SkillMeta
 
 # ----- 来源标注（安全设计 v2，第 0 层）-----
 

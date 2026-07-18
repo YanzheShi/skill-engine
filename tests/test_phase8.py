@@ -43,9 +43,9 @@ class TestToolCallParsing:
     """测试 tool_call 解析"""
 
     def test_parse_bash_tool_call(self):
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10)
         assembler = Assembler(executor=executor)
@@ -64,9 +64,9 @@ class TestToolCallParsing:
         assert parsed[0]["input"] == {"command": "echo hello"}
 
     def test_parse_stop_tool_call(self):
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10)
         assembler = Assembler(executor=executor)
@@ -82,9 +82,9 @@ class TestToolCallParsing:
         assert parsed[0]["type"] == "stop"
 
     def test_parse_mixed_tool_calls(self):
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10)
         assembler = Assembler(executor=executor)
@@ -98,9 +98,9 @@ class TestToolCallParsing:
         assert len(parsed) == 2
 
     def test_parse_no_tool_calls(self):
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10)
         assembler = Assembler(executor=executor)
@@ -110,9 +110,9 @@ class TestToolCallParsing:
         assert len(parsed) == 0
 
     def test_parse_string_response(self):
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10)
         assembler = Assembler(executor=executor)
@@ -127,17 +127,17 @@ class TestToolDispatchLoop:
 
     @pytest.fixture
     def executor(self):
-        from skill_engine.executor import Executor
+        from skill_engine.execution.executor import Executor
         return Executor(timeout=10, allow_all=True)
 
     @pytest.fixture
     def assembler(self, executor):
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.assembler import Assembler
         return Assembler(executor=executor)
 
     @pytest.fixture
     def runner(self, assembler, executor):
-        from skill_engine.runner import Runner
+        from skill_engine.execution.runner import Runner
         return Runner(assembler, executor)
 
     def test_loop_bash_then_stop(self, runner):
@@ -317,9 +317,9 @@ class TestToolDispatchIntegration:
 
     @pytest.fixture
     def runner(self):
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.runner import Runner
         return Runner(
             Assembler(executor=Executor(timeout=10)),
             Executor(timeout=10)

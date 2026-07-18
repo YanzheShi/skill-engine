@@ -18,9 +18,9 @@ class TestRouterKeywordMatch:
 
     @pytest.fixture
     def router(self):
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
 
         project_skills = Path("skills")
         index = discover(roots=[str(project_skills)])
@@ -60,9 +60,9 @@ class TestRouterEmbeddingMatch:
 
     @pytest.fixture
     def router(self):
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
 
         project_skills = Path("skills")
         index = discover(roots=[str(project_skills)])
@@ -89,9 +89,9 @@ class TestRouterLLMMatch:
     @pytest.fixture
     def mock_llm_router(self, tmp_path):
         """带 MockLLM 的 router"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
 
         project_skills = Path("skills")
         index = discover(roots=[str(project_skills)])
@@ -174,9 +174,9 @@ class TestRouterComparison:
 
     @pytest.fixture
     def routers(self):
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
 
         project_skills = Path("skills")
         index = discover(roots=[str(project_skills)])

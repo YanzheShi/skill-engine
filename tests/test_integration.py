@@ -25,12 +25,12 @@ class TestScenarioSearchAndCompile:
     @pytest.fixture
     def runner(self, tmp_path):
         """构建 runner 实例"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.runner import Runner
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.runner import Runner
 
         project_skills = Path("/home/andre/Code/PycharmProjects/skill-engine/skills")
         if not project_skills.exists():
@@ -105,12 +105,12 @@ class TestScenarioOrchestration:
     @pytest.fixture
     def runner(self):
         """构建 runner 实例"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.runner import Runner
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.runner import Runner
 
         project_skills = Path("/home/andre/Code/PycharmProjects/skill-engine/skills")
         if not project_skills.exists():
@@ -149,9 +149,9 @@ class TestScenarioCreateSkill:
 
     def test_scenario_user_requests_new_skill(self, tmp_path):
         """用户：帮我创建一个 markdown 转 pdf 的 skill"""
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10, allow_all=True)
         assembler = Assembler(executor=executor)
@@ -180,9 +180,9 @@ class TestScenarioCreateSkill:
 
     def test_scenario_create_skill_with_dependency(self, tmp_path):
         """用户：创建一个带依赖脚本的 skill"""
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10, allow_all=True)
         assembler = Assembler(executor=executor)
@@ -218,8 +218,8 @@ class TestScenarioCLI:
 
     def test_cli_list_command(self, tmp_path):
         """CLI: skill-engine list — 通过 API 验证"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         # 在项目目录运行
         project_skills = Path("skills")
@@ -232,9 +232,9 @@ class TestScenarioCLI:
 
     def test_cli_match_command(self, tmp_path):
         """CLI: skill-engine match — 通过 API 验证"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
 
         project_skills = Path("skills")
         index = discover(roots=[str(project_skills)])
@@ -247,7 +247,7 @@ class TestScenarioCLI:
 
     def test_cli_scan_command(self, tmp_path):
         """CLI: skill-engine scan — 通过 API 验证"""
-        from skill_engine.discovery import discover
+        from skill_engine.routing.discovery import discover
 
         project_skills = Path("skills")
         index = discover(roots=[str(project_skills)])
@@ -255,8 +255,8 @@ class TestScenarioCLI:
 
     def test_cli_info_command(self, tmp_path):
         """CLI: skill-engine info — 通过 API 验证"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         project_skills = Path("skills")
         index = discover(roots=[str(project_skills)])
@@ -268,11 +268,11 @@ class TestScenarioCLI:
 
     def test_cli_dry_run_command(self, tmp_path):
         """CLI: skill-engine run --dry-run — 通过 API 验证"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         project_skills = Path("skills")
         index = discover(roots=[str(project_skills)])
@@ -296,12 +296,12 @@ class TestScenarioNewSkillImmediatelyUsable:
 
     def test_new_skill_is_discoverable(self, tmp_path):
         """创建 skill 后立即可被 discover 发现"""
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
 
         executor = Executor(timeout=10, allow_all=True)
         assembler = Assembler(executor=executor)
@@ -344,9 +344,9 @@ class TestScenarioCombinedWorkflow:
 
     def test_orchestrator_can_direct_create(self, tmp_path):
         """编排器可以指示创建新 skill"""
-        from skill_engine.runner import Runner
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
 
         executor = Executor(timeout=10, allow_all=True)
         assembler = Assembler(executor=executor)
@@ -367,8 +367,8 @@ class TestScenarioCombinedWorkflow:
         assert result["status"] == "success"
 
         # 验证新 skill 可以被编排
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         index = discover(roots=[skills_dir])
         registry = Registry(index)

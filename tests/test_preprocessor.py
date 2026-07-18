@@ -5,7 +5,7 @@
 import json
 import pytest
 from pathlib import Path
-from skill_engine.preprocessor import Preprocessor, extract_json, PROMPT_EXTRACT
+from skill_engine.creator.preprocessor import Preprocessor, extract_json, PROMPT_EXTRACT
 from skill_engine.models import Skill, SkillMetadata
 
 

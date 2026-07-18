@@ -24,8 +24,8 @@ Assembler — Skill 编译器
 from pathlib import Path
 from typing import Optional
 import re
-from .models import Skill
-from .executor import Executor
+from skill_engine.models import Skill
+from skill_engine.execution.executor import Executor
 
 
 class Assembler:

@@ -10,7 +10,7 @@
 """
 
 import pytest
-from skill_engine.scoring import score_keyword, phrase_soft_in, _phrase_bonus, _normalize_keywords
+from skill_engine.routing.scoring import score_keyword, phrase_soft_in, _phrase_bonus, _normalize_keywords
 from skill_engine.models import MergedMeta
 
 

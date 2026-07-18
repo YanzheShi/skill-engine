@@ -24,27 +24,27 @@ class TestBuiltInTools:
 
     def test_tools_module_level_import(self):
         """TOOL_DISPATCH_TOOLS 可从 runner 模块导入"""
-        from skill_engine.runner import TOOL_DISPATCH_TOOLS
+        from skill_engine.execution.runner import TOOL_DISPATCH_TOOLS
 
         assert len(TOOL_DISPATCH_TOOLS) == 3
 
     def test_bash_tool_schema(self):
         """bash 工具有正确的 schema"""
-        from skill_engine.runner import bash
+        from skill_engine.execution.runner import bash
 
         assert bash.name == "bash"
         assert "command" in bash.args_schema.model_fields
 
     def test_read_file_tool_schema(self):
         """read_file 工具有正确的 schema"""
-        from skill_engine.runner import read_file
+        from skill_engine.execution.runner import read_file
 
         assert read_file.name == "read_file"
         assert "path" in read_file.args_schema.model_fields
 
     def test_write_file_tool_schema(self):
         """write_file 工具有正确的 schema"""
-        from skill_engine.runner import write_file
+        from skill_engine.execution.runner import write_file
 
         assert write_file.name == "write_file"
         assert "path" in write_file.args_schema.model_fields
@@ -52,7 +52,7 @@ class TestBuiltInTools:
 
     def test_tools_have_descriptions(self):
         """所有工具有非空描述"""
-        from skill_engine.runner import TOOL_DISPATCH_TOOLS
+        from skill_engine.execution.runner import TOOL_DISPATCH_TOOLS
 
         for t in TOOL_DISPATCH_TOOLS:
             assert t.name
@@ -71,7 +71,7 @@ class TestBindTools:
         from skill_engine.config import get_llm
 
         llm = get_llm()
-        from skill_engine.runner import TOOL_DISPATCH_TOOLS
+        from skill_engine.execution.runner import TOOL_DISPATCH_TOOLS
         bound = llm.bind_tools(TOOL_DISPATCH_TOOLS)
 
         # bound 有 invoke 方法
@@ -84,7 +84,7 @@ class TestBindTools:
         from skill_engine.config import get_llm
 
         llm = get_llm()
-        from skill_engine.runner import TOOL_DISPATCH_TOOLS
+        from skill_engine.execution.runner import TOOL_DISPATCH_TOOLS
         bound = llm.bind_tools(TOOL_DISPATCH_TOOLS)
 
         # 不需要真的调用 API，只要确保方法签名正确
@@ -123,9 +123,9 @@ class TestToolDispatchWithMock:
 
     @pytest.fixture
     def runner(self):
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.runner import Runner
         return Runner(
             Assembler(executor=Executor(timeout=10)),
             Executor(timeout=10),
@@ -357,9 +357,9 @@ class TestLLMModeUnaffected:
 
     @pytest.fixture
     def runner(self):
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.runner import Runner
         return Runner(
             Assembler(executor=Executor(timeout=10)),
             Executor(timeout=10),
@@ -493,9 +493,9 @@ class TestEndToEndMultiStep:
 
     @pytest.fixture
     def runner(self):
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.runner import Runner
         return Runner(
             Assembler(executor=Executor(timeout=10)),
             Executor(timeout=10),

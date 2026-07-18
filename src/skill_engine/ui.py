@@ -35,12 +35,12 @@ def _get_project_skills_dir() -> Optional[Path]:
 
 def _get_engine(roots: Optional[list[Path]] = None):
     """懒加载 engine 组件"""
-    from skill_engine.discovery import discover
-    from skill_engine.registry import Registry
-    from skill_engine.router import Router
-    from skill_engine.executor import Executor
-    from skill_engine.assembler import Assembler
-    from skill_engine.runner import Runner
+    from skill_engine.routing.discovery import discover
+    from skill_engine.routing.registry import Registry
+    from skill_engine.routing.router import Router
+    from skill_engine.execution.executor import Executor
+    from skill_engine.execution.assembler import Assembler
+    from skill_engine.execution.runner import Runner
 
     if roots is None:
         skills_dir = _get_project_skills_dir()
@@ -49,13 +49,13 @@ def _get_engine(roots: Optional[list[Path]] = None):
     index = discover(roots=roots)
     registry = Registry(index)
 
-    from skill_engine.domain_words import register_domain_words
+    from skill_engine.routing.domain_words import register_domain_words
     register_domain_words(registry)
 
     preprocessor = None
     try:
         from skill_engine.config import get_llm
-        from skill_engine.preprocessor import Preprocessor
+        from skill_engine.creator.preprocessor import Preprocessor
         llm = get_llm()
         preprocessor = Preprocessor(llm=llm)
     except Exception:
@@ -230,11 +230,11 @@ def scan_approval_needs(skill_name: str, query: str):
     if not skills_dir:
         return [], "未找到 skills 目录"
 
-    from skill_engine.discovery import discover
-    from skill_engine.registry import Registry
-    from skill_engine.runner import Runner
-    from skill_engine.executor import Executor
-    from skill_engine.assembler import Assembler
+    from skill_engine.routing.discovery import discover
+    from skill_engine.routing.registry import Registry
+    from skill_engine.execution.runner import Runner
+    from skill_engine.execution.executor import Executor
+    from skill_engine.execution.assembler import Assembler
 
     index = discover(roots=[skills_dir])
     registry = Registry(index)
@@ -252,7 +252,7 @@ def scan_approval_needs(skill_name: str, query: str):
 
     arguments = {"$ARGUMENTS": query, "$0": query}
 
-    from skill_engine.scanner import should_approve
+    from skill_engine.security.scanner import should_approve
 
     pending = []
     for step in steps:

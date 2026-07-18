@@ -95,15 +95,15 @@ class TestAssemblerCompile:
 
     @pytest.fixture
     def assembler(self):
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
         executor = Executor(timeout=30, allow_all=True)
         return Assembler(executor=executor, command_timeout=30)
 
     def test_assemble_real_skill(self, assembler):
         """编译真实 skill"""
-        from skill_engine.registry import Registry
-        from skill_engine.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.discovery import discover
 
         index = discover(roots=[str(REAL_SKILLS_DIR)])
         registry = Registry(index)
@@ -117,8 +117,8 @@ class TestAssemblerCompile:
 
     def test_assemble_injects_paths(self, assembler):
         """编译时注入路径变量"""
-        from skill_engine.registry import Registry
-        from skill_engine.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.discovery import discover
 
         index = discover(roots=[str(REAL_SKILLS_DIR)])
         registry = Registry(index)
@@ -134,12 +134,12 @@ class TestRunnerIntegration:
 
     @pytest.fixture
     def engine(self):
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.runner import Runner
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.runner import Runner
 
         index = discover(roots=[str(REAL_SKILLS_DIR)])
         registry = Registry(index)

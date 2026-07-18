@@ -11,8 +11,8 @@ Registry — Skill 注册表
 from pathlib import Path
 from typing import Optional
 import yaml
-from .models import Skill, SkillMetadata, SkillMeta, MergedMeta
-from .discovery import _parse_frontmatter
+from skill_engine.models import Skill, SkillMetadata, SkillMeta, MergedMeta
+from skill_engine.routing.discovery import _parse_frontmatter
 
 
 class Registry:

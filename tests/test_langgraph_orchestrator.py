@@ -16,9 +16,9 @@ class TestLangGraphOrchestrator:
     @pytest.fixture
     def orchestrator(self, tmp_path):
         """构建 orchestrator 实例"""
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.orchestrator import Orchestrator
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.orchestrator import Orchestrator
 
         executor = Executor(timeout=10, allow_all=True)
         assembler = Assembler(executor=executor)
@@ -60,8 +60,8 @@ class TestLangGraphOrchestrator:
     
     def test_orchestrator_catalog_format(self, orchestrator):
         """验证 catalog 格式（LangGraph 版本）"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         project_skills = Path("skills")
         index = discover(roots=[str(project_skills)])
@@ -83,7 +83,7 @@ class TestLangGraphOrchestrator:
 
     def test_langgraph_plan_node(self, orchestrator):
         """测试 plan 节点"""
-        from skill_engine.orchestrator import plan_node
+        from skill_engine.execution.orchestrator import plan_node
 
         state = {
             "planning_messages": [{"role": "user", "content": "测试"}],
@@ -100,9 +100,9 @@ class TestLangGraphOrchestrator:
 
     def test_langgraph_execute_chain_node(self, orchestrator):
         """测试 execute_chain 节点"""
-        from skill_engine.orchestrator import execute_chain_node
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.execution.orchestrator import execute_chain_node
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         project_skills = Path("skills")
         index = discover(roots=[str(project_skills)])
@@ -120,7 +120,7 @@ class TestLangGraphOrchestrator:
 
     def test_langgraph_should_continue(self):
         """测试条件路由"""
-        from skill_engine.orchestrator import should_continue_node
+        from skill_engine.execution.orchestrator import should_continue_node
 
         # 空 plan → direct_answer
         state = {"plan": [], "planning_iterations": 0}
@@ -136,7 +136,7 @@ class TestLangGraphOrchestrator:
 
     def test_langgraph_format_result(self):
         """测试结果格式化"""
-        from skill_engine.orchestrator import format_result_node
+        from skill_engine.execution.orchestrator import format_result_node
 
         # 空 plan → direct_answer
         state = {"plan": [], "reasoning": "不需要 skill"}
@@ -159,8 +159,8 @@ class TestLangGraphOrchestrator:
 
     def test_full_langgraph_pipeline(self, orchestrator, mock_llm):
         """完整 LangGraph 管道测试"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         project_skills = Path("skills")
         index = discover(roots=[str(project_skills)])
@@ -192,12 +192,12 @@ class TestLangGraphVsWhileLoop:
 
     def test_behavior_consistency(self, tmp_path):
         """LangGraph 编排结果应与 while 循环一致"""
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.runner import Runner
-        from skill_engine.orchestrator import Orchestrator
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.orchestrator import Orchestrator
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
         import json
 
         executor = Executor(timeout=10, allow_all=True)

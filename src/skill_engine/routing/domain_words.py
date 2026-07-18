@@ -10,13 +10,13 @@
   注册后 jieba 正确识别，自然落入 nouns_zh/verbs_zh，与 keywords 正确匹配。
 
 使用方式：
-  >>> from .domain_words import register_domain_words
+  >>> from skill_engine.routing.domain_words import register_domain_words
   >>> register_domain_words(registry)
 """
 
 import logging
 
-from .registry import Registry
+from skill_engine.routing.registry import Registry
 
 logger = logging.getLogger("skill_engine.domain_words")
 

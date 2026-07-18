@@ -20,11 +20,11 @@ import yaml
 from pathlib import Path
 from typing import Optional
 from langchain_core.tools import tool
-from .models import Skill, MatchResult, Step
-from .assembler import Assembler
-from .scanner import should_approve, _is_approved, _is_blocked, _save_approval, _save_blocklist
-from .scanner import should_approve, _is_approved, _is_blocked, _save_approval, _save_blocklist
-from .executor import Executor
+from skill_engine.models import Skill, MatchResult, Step
+from skill_engine.execution.assembler import Assembler
+from skill_engine.security.scanner import should_approve, _is_approved, _is_blocked, _save_approval, _save_blocklist
+from skill_engine.security.scanner import should_approve, _is_approved, _is_blocked, _save_approval, _save_blocklist
+from skill_engine.execution.executor import Executor
 
 
 # ================================================================
@@ -565,7 +565,7 @@ class Runner:
                         与 run() 相同的 dict 格式。
                         multi 模式时返回 all_outputs 列表。
                     """
-                    from .models import MatchResult
+                    from skill_engine.models import MatchResult
 
                     if plan.mode == "multi" and plan.selections:
                         all_results = []
@@ -1198,13 +1198,13 @@ class Runner:
         Returns:
             {name, path, status, valid, errors, ...}
         """
-        from .creator import SkillCreator, SkillValidator
-        from .discovery import discover
-        from .registry import Registry
+        from skill_engine.creator.creator import SkillCreator, SkillValidator
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         # LLM 模式
         if intent is not None and llm is not None:
-            from .designer import SkillDesigner
+            from skill_engine.creator.designer import SkillDesigner
 
             designer = SkillDesigner()
             design = designer.design(intent, llm)
@@ -1321,8 +1321,8 @@ class Runner:
         Returns:
             skill name 或 None
         """
-        from .discovery import discover, _discover_skill_dir
-        from .registry import Registry
+        from skill_engine.routing.discovery import discover, _discover_skill_dir
+        from skill_engine.routing.registry import Registry
 
         full_dir = Path(skills_dir) / skill_dir
         if not full_dir.exists():

@@ -41,8 +41,8 @@ def list(
 ):
     """列出所有可用的 skills"""
     from pathlib import Path
-    from .discovery import discover
-    from .registry import Registry
+    from .routing.discovery import discover
+    from .routing.registry import Registry
 
     project_skills = Path.cwd() / "skills"
     roots = [str(project_skills)] if project_skills.exists() else []
@@ -70,8 +70,8 @@ def info(
 ):
     """查看 skill 的详细信息"""
     from pathlib import Path
-    from .discovery import discover
-    from .registry import Registry
+    from .routing.discovery import discover
+    from .routing.registry import Registry
 
     project_skills = Path.cwd() / "skills"
     roots = [str(project_skills)] if project_skills.exists() else []
@@ -100,9 +100,9 @@ def match(
 ):
     """匹配 skills 到用户输入"""
     from pathlib import Path
-    from .discovery import discover
-    from .registry import Registry
-    from .router import Router
+    from .routing.discovery import discover
+    from .routing.registry import Registry
+    from .routing.router import Router
 
     project_skills = Path.cwd() / "skills"
     roots = [str(project_skills)] if project_skills.exists() else []
@@ -146,7 +146,7 @@ def match(
         elif plan.method == "keyword":
             # 展示分词结果和 intention 命中情况
             try:
-                from .tokenize import tokenize_query
+                from .routing.tokenize import tokenize_query
                 qtokens = tokenize_query(query)
                 if qtokens.get("verbs_zh"):
                     print(f"  中文动词: {', '.join(qtokens['verbs_zh'])}")
@@ -175,7 +175,7 @@ def scan(
 ):
     """扫描并显示发现的 skills"""
     from pathlib import Path
-    from .discovery import discover
+    from .routing.discovery import discover
 
     roots = []
     if root:
@@ -194,8 +194,8 @@ def scan(
 def clear_cache():
     """清空 skill 编译缓存"""
     from pathlib import Path
-    from .registry import Registry
-    from .discovery import discover
+    from .routing.registry import Registry
+    from .routing.discovery import discover
 
     project_skills = Path.cwd() / "skills"
     roots = [str(project_skills)] if project_skills.exists() else []
@@ -212,8 +212,8 @@ def _create_router(registry, verbose: bool = False):
         registry: Registry 实例
         verbose: 是否启用 Router 详细日志
     """
-    from .router import Router
-    from .domain_words import register_domain_words
+    from .routing.router import Router
+    from .routing.domain_words import register_domain_words
     register_domain_words(registry)
     return Router(registry, preprocessor=None, verbose=verbose)
 
@@ -267,12 +267,12 @@ def run(
     4. --llm: 档位 A，单次 LLM 调用
     5. 默认: 纯编译（pipe 模式）
     """
-    from .discovery import discover
-    from .registry import Registry
-    from .router import Router
-    from .assembler import Assembler
-    from .executor import Executor
-    from .runner import Runner
+    from .routing.discovery import discover
+    from .routing.registry import Registry
+    from .routing.router import Router
+    from .execution.assembler import Assembler
+    from .execution.executor import Executor
+    from .execution.runner import Runner
 
     # 1. 发现 + 注册（默认扫描 skills/ 目录）
     from pathlib import Path
@@ -314,7 +314,7 @@ def run(
         if plan.primary:
             skill = registry.load_skill(plan.primary.name)
             if skill:
-                from .runner import _parse_named_params
+                from .execution.runner import _parse_named_params
                 _args = {"$ARGUMENTS": match_query, "$0": match_query, **_parse_named_params(match_query)}
                 prompt = assembler.assemble(skill, _args)
                 print(f"\n{'='*60}")
@@ -578,10 +578,10 @@ def index(
       skill-engine index --rebuild-meta
     """
     from pathlib import Path
-    from .discovery import discover
-    from .registry import Registry
+    from .routing.discovery import discover
+    from .routing.registry import Registry
     from .config import get_llm
-    from .preprocessor import Preprocessor
+    from .creator.preprocessor import Preprocessor
 
     # 1. 扫描
     print("[INFO] 正在扫描 skills...")
@@ -627,7 +627,7 @@ def index(
 
         if not force and meta_path.exists():
             # 增量模式：检查 hash
-            from .preprocessor import Preprocessor as P
+            from .creator.preprocessor import Preprocessor as P
             current_hash = P._hash_skill(skill)
             try:
                 import yaml
@@ -685,9 +685,9 @@ def create(
       skill-engine create "帮我写一个分析代码的 skill" --dry-run
     """
     from .config import get_llm
-    from .runner import Runner
-    from .assembler import Assembler
-    from .executor import Executor
+    from .execution.runner import Runner
+    from .execution.assembler import Assembler
+    from .execution.executor import Executor
 
     print("[INFO] 获取 LLM 客户端...")
     llm = get_llm()
@@ -743,9 +743,9 @@ def scan_security(
     使用 --deep 可额外使用 LLM 深度分析。
     """
     from pathlib import Path as _Path
-    from .discovery import discover
-    from .registry import Registry
-    from .scanner import scan_skill, scan_skill_deep, scan_all
+    from .routing.discovery import discover
+    from .routing.registry import Registry
+    from .security.scanner import scan_skill, scan_skill_deep, scan_all
 
     project_skills = _Path.cwd() / "skills"
     roots = [str(project_skills)] if project_skills.exists() else []

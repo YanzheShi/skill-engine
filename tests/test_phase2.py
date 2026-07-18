@@ -7,9 +7,9 @@ Phase 2 测试套件
 import pytest
 from pathlib import Path
 from skill_engine.models import Skill, SkillMetadata, MatchResult
-from skill_engine.executor import Executor
-from skill_engine.assembler import Assembler
-from skill_engine.runner import Runner
+from skill_engine.execution.executor import Executor
+from skill_engine.execution.assembler import Assembler
+from skill_engine.execution.runner import Runner
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "sample-skills"
@@ -357,11 +357,11 @@ class TestIntegration:
         """完整流程：discovery → registry → router → assembler → pure compile"""
         from pathlib import Path as P
         TEST_FIXTURES = P(__file__).parent / "fixtures" / "sample-skills"
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
-        from skill_engine.assembler import Assembler
-        from skill_engine.executor import Executor
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.executor import Executor
 
         index = discover(roots=[TEST_FIXTURES])
         registry = Registry(index)
@@ -381,12 +381,12 @@ class TestIntegration:
         """完整流程：discovery → registry → router → assembler → runner(档位A)"""
         from pathlib import Path as P
         TEST_FIXTURES = P(__file__).parent / "fixtures" / "sample-skills"
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.runner import Runner
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.runner import Runner
 
         index = discover(roots=[TEST_FIXTURES])
         registry = Registry(index)

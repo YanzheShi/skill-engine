@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from .models import Skill
+from skill_engine.models import Skill
 
 
 # ================================================================

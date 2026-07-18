@@ -13,7 +13,7 @@
 import re
 from pathlib import Path
 from typing import Literal, Optional
-from .models import Skill, SkillMeta
+from skill_engine.models import Skill, SkillMeta
 
 # ================================================================
 # 常量表

@@ -17,7 +17,7 @@
 
 from typing import Optional
 
-from .models import MergedMeta
+from skill_engine.models import MergedMeta
 
 VERB_SEEDS = {"生成", "保存", "写", "创建", "指定", "输出", "部署", "打包", "上传",
               "出", "改", "修", "删", "增", "查", "看", "读", "搜索", "找",

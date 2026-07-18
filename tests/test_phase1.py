@@ -10,9 +10,9 @@ from skill_engine.models import (
     SkillMeta, SkillMetadata, Skill, MatchResult,
     SkillContext, SkillOverride,
 )
-from skill_engine.discovery import discover, _parse_frontmatter, _discover_skill_dir
-from skill_engine.registry import Registry
-from skill_engine.router import Router
+from skill_engine.routing.discovery import discover, _parse_frontmatter, _discover_skill_dir
+from skill_engine.routing.registry import Registry
+from skill_engine.routing.router import Router
 
 
 # 测试 fixture 目录

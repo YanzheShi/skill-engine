@@ -7,9 +7,9 @@ Phase 4 测试套件
 import pytest
 from pathlib import Path
 from skill_engine.models import Skill, SkillMetadata, SkillContext, MatchResult, SkillOverride
-from skill_engine.executor import Executor
-from skill_engine.assembler import Assembler
-from skill_engine.runner import Runner
+from skill_engine.execution.executor import Executor
+from skill_engine.execution.assembler import Assembler
+from skill_engine.execution.runner import Runner
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "sample-skills"
@@ -132,9 +132,9 @@ class TestKeywordMatch:
 
     def test_exact_match_returns_plan(self):
         """Exact name match returns MatchPlan with mode=single"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
 
         index = discover(roots=[FIXTURES_DIR])
         registry = Registry(index)
@@ -148,9 +148,9 @@ class TestKeywordMatch:
 
     def test_keyword_match_returns_candidate(self):
         """Keyword match returns a plan with primary"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
 
         index = discover(roots=[FIXTURES_DIR])
         registry = Registry(index)
@@ -163,9 +163,9 @@ class TestKeywordMatch:
 
     def test_no_match_returns_uncertain_plan(self):
         """No matching skill returns uncertain plan"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
 
         index = discover(roots=[FIXTURES_DIR])
         registry = Registry(index)
@@ -176,9 +176,9 @@ class TestKeywordMatch:
 
     def test_router_has_indices(self):
         """Router has proper index attributes"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.router import Router
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.router import Router
 
         index = discover(roots=[FIXTURES_DIR])
         registry = Registry(index)

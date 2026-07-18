@@ -1,6 +1,6 @@
 """Phase AB: 中英文分词和专有名词提取测试"""
 import pytest
-from skill_engine.tokenize import (
+from skill_engine.routing.tokenize import (
     tokenize_query,
     extract_proper_en,
     is_english,

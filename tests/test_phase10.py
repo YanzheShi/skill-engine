@@ -52,11 +52,11 @@ class TestOrchestratorLogic:
 
     def test_build_skill_catalog(self):
         """构建 skill 目录 prompt"""
-        from skill_engine.runner import Runner
-        from skill_engine.assembler import Assembler
-        from skill_engine.executor import Executor
-        from skill_engine.registry import Registry
-        from skill_engine.discovery import discover
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.executor import Executor
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.discovery import discover
 
         index = discover(roots=["tests/fixtures/sample-skills"])
         registry = Registry(index)
@@ -72,11 +72,11 @@ class TestOrchestratorLogic:
 
     def test_catalog_with_groups(self):
         """catalog 按分组缩略展示"""
-        from skill_engine.runner import Runner
-        from skill_engine.assembler import Assembler
-        from skill_engine.executor import Executor
-        from skill_engine.registry import Registry
-        from skill_engine.discovery import discover
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.executor import Executor
+        from skill_engine.routing.registry import Registry
+        from skill_engine.routing.discovery import discover
 
         index = discover(roots=["skills"])
         registry = Registry(index)
@@ -92,8 +92,8 @@ class TestOrchestratorLogic:
 
     def test_info_full_skips_body(self):
         """info_full 只解析 frontmatter，不读 body"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         index = discover(roots=["skills"])
         registry = Registry(index)
@@ -107,8 +107,8 @@ class TestOrchestratorLogic:
 
     def test_get_groups(self):
         """get_groups 按 groups 字段分组"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         index = discover(roots=["skills"])
         registry = Registry(index)
@@ -122,9 +122,9 @@ class TestOrchestratorLogic:
 
     def test_parse_orchestration_plan(self):
         """解析编排计划"""
-        from skill_engine.runner import Runner
-        from skill_engine.assembler import Assembler
-        from skill_engine.executor import Executor
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.executor import Executor
 
         executor = Executor(timeout=10)
         assembler = Assembler(executor=executor)
@@ -146,9 +146,9 @@ class TestOrchestratorLogic:
 
     def test_parse_invalid_plan(self):
         """解析无效编排计划"""
-        from skill_engine.runner import Runner
-        from skill_engine.assembler import Assembler
-        from skill_engine.executor import Executor
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.executor import Executor
 
         executor = Executor(timeout=10)
         assembler = Assembler(executor=executor)
@@ -161,9 +161,9 @@ class TestOrchestratorLogic:
 
     def test_parse_empty_plan(self):
         """空编排计划"""
-        from skill_engine.runner import Runner
-        from skill_engine.assembler import Assembler
-        from skill_engine.executor import Executor
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.executor import Executor
 
         executor = Executor(timeout=10)
         assembler = Assembler(executor=executor)
@@ -178,11 +178,11 @@ class TestOrchestrationFlow:
 
     @pytest.fixture
     def engine(self):
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
-        from skill_engine.executor import Executor
-        from skill_engine.assembler import Assembler
-        from skill_engine.runner import Runner
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.execution.runner import Runner
 
         index = discover(roots=["tests/fixtures/sample-skills"])
         registry = Registry(index)
@@ -340,8 +340,8 @@ class TestOrchestratorSKILL:
 
     def test_orchestrator_can_be_discovered(self):
         """orchestrator 能被 discovery 发现"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         index = discover(roots=["skills"])
         registry = Registry(index)
@@ -349,8 +349,8 @@ class TestOrchestratorSKILL:
 
     def test_orchestrator_has_correct_metadata(self):
         """orchestrator 有正确的元数据"""
-        from skill_engine.discovery import discover
-        from skill_engine.registry import Registry
+        from skill_engine.routing.discovery import discover
+        from skill_engine.routing.registry import Registry
 
         index = discover(roots=["skills"])
         registry = Registry(index)
