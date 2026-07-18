@@ -116,7 +116,7 @@ def match_skills(query: str, explain: bool = False) -> str:
 
     _, _, router, *_ = _get_engine()
     llm = _get_llm_client()
-    plan = router.match(query, llm=llm)
+    plan = router.match(query)
 
     if not plan.primary and not plan.selections:
         result = f"未找到与 '{query}' 匹配的 skill。"
@@ -292,7 +292,7 @@ def run_skill_with_approval(skill_name: str, query: str, mode: str, choices_text
     index, registry, router, executor, assembler, runner = _get_engine()
 
     llm = _get_llm_client()
-    plan = router.match(skill_name, llm=llm)
+    plan = router.match(skill_name)
     if not plan.primary:
         return f"未找到 skill: {skill_name}"
 
@@ -328,7 +328,7 @@ def run_skill_direct(query: str, mode: str = "compile", progress: gr.Progress = 
     index, registry, router, executor, assembler, runner = _get_engine()
 
     llm = _get_llm_client()
-    plan = router.match(query, llm=llm)
+    plan = router.match(query)
     if not plan.primary:
         result = "未找到匹配的 skill。"
         if plan.reason:
@@ -351,7 +351,7 @@ def run_skill(skill_name: str, query: str, mode: str = "compile", progress: gr.P
     index, registry, router, executor, assembler, runner = _get_engine()
 
     llm = _get_llm_client()
-    plan = router.match(skill_name, llm=llm)
+    plan = router.match(skill_name)
     if not plan.primary:
         return f"未找到 skill: {skill_name}"
 
@@ -487,7 +487,7 @@ def create_demo() -> gr.Blocks:
 
                     index, registry, router, executor, assembler, runner = _get_engine()
                     llm = _get_llm_client()
-                    plan = router.match(query, llm=llm)
+                    plan = router.match(query)
                     if not plan or not plan.primary:
                         msg = "未找到匹配的 skill。"
                         if hasattr(plan, 'reason') and plan.reason:
@@ -659,7 +659,7 @@ def create_demo() -> gr.Blocks:
                     if mode != "steps":
                         index, registry, router, executor, assembler, runner = _get_engine()
                         llm = _get_llm_client()
-                        plan = router.match(skill_name, llm=llm)
+                        plan = router.match(skill_name)
                         if not plan.primary:
                             return f"未找到 skill: {skill_name}", step_state.value, \
                                    gr.update(visible=False), gr.update(visible=False)
@@ -670,7 +670,7 @@ def create_demo() -> gr.Blocks:
                     if not pending:
                         index, registry, router, executor, assembler, runner = _get_engine()
                         llm = _get_llm_client()
-                        plan = router.match(skill_name, llm=llm)
+                        plan = router.match(skill_name)
                         if not plan.primary:
                             return f"未找到 skill: {skill_name}", step_state.value, \
                                    gr.update(visible=False), gr.update(visible=False)

@@ -101,14 +101,12 @@ class Router:
         self,
         query: str,
         *,
-        llm=None,
         top_k: int = 3,
     ) -> MatchPlan:
         """三步路由
 
         Args:
             query: 用户输入
-            llm: LLM 客户端（兜底用）
             top_k: keyword 阶段保留的候选数
 
         Returns:
@@ -135,8 +133,12 @@ class Router:
         if is_english(query):
             if self.verbose:
                 logger.info("  纯英文 query → 跳 LLM 兜底")
-            if llm:
-                plan = self._llm_fallback(query, self.registry.list_active()[:top_k], llm, kws=[])
+            try:
+                _llm = get_llm(ROUTER_LLM)
+            except Exception:
+                _llm = None
+            if _llm:
+                plan = self._llm_fallback(query, self.registry.list_active()[:top_k], _llm, kws=[])
                 if plan:
                     return plan
             return MatchPlan(
@@ -177,23 +179,31 @@ class Router:
         # ──────────────────────────────────────────────
         should_llm, llm_candidates, reason = self._should_llm(query, kws, qtokens)
 
-        if should_llm and llm:
-            # 裁断：top1 领先 top2 超过 0.5 时直接定 single，不走 LLM
-            if len(kws) >= 2 and kws[0][0] - kws[1][0] > 0.5:
+        if should_llm:
+            try:
+                _llm = get_llm(ROUTER_LLM)
+            except Exception:
+                _llm = None
+            if not _llm:
                 if self.verbose:
-                    logger.info(f"  → {kws[0][1]} ({kws[0][0]:.3f}) 领先 {kws[1][1]} ({kws[1][0]:.3f}) >0.5，直接定 single")
-                return MatchPlan(
-                    mode="single",
-                    primary=SelectedSkill(name=kws[0][1]),
-                    method="keyword",
-                    score=kws[0][0],
-                )
+                    logger.info("  LLM 不可用，跳过兜底")
+            else:
+                # 裁断：top1 领先 top2 超过 0.5 时直接定 single，不走 LLM
+                if len(kws) >= 2 and kws[0][0] - kws[1][0] > 0.5:
+                    if self.verbose:
+                        logger.info(f"  → {kws[0][1]} ({kws[0][0]:.3f}) 领先 {kws[1][1]} ({kws[1][0]:.3f}) >0.5，直接定 single")
+                    return MatchPlan(
+                        mode="single",
+                        primary=SelectedSkill(name=kws[0][1]),
+                        method="keyword",
+                        score=kws[0][0],
+                    )
 
-            if self.verbose:
-                logger.info(f"  触发 LLM 兜底: {reason}")
-            plan = self._llm_fallback(query, llm_candidates, llm, kws)
-            if plan:
-                return plan
+                if self.verbose:
+                    logger.info(f"  触发 LLM 兜底: {reason}")
+                plan = self._llm_fallback(query, llm_candidates, _llm, kws)
+                if plan:
+                    return plan
 
         # LLM 不可用 / LLM 没返回 → 退化
         if not kws:

@@ -19,7 +19,9 @@ V0.2 改为 allow_all=False，DEFAULT_ALLOWLIST 生效。
 """
 
 import subprocess
+import sys
 import os
+import locale
 import shlex
 from pathlib import Path
 from typing import Optional
@@ -122,26 +124,33 @@ class Executor:
                 full_cmd = f'cmd /c "{command}"'
             else:
                 full_cmd = f"{self.shell} -c {shell_quote(command)}"
-            result = subprocess.run(
+            # 先以二进制获取输出（不指定编码）
+            proc = subprocess.run(
                 full_cmd,
                 shell=True,
                 capture_output=True,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
+                text=False,  # 不自动解码，我们手动处理
                 timeout=effective_timeout,
                 cwd=str(cwd),
                 env=env,
             )
 
-            # 输出大小限制
-            stdout = result.stdout[:self.max_output]
-            stderr = result.stderr[:self.max_output]
+            # 手动解码：先试 UTF-8，失败回退到系统编码
+            raw_stdout = proc.stdout[:self.max_output] if proc.stdout else b""
+            raw_stderr = proc.stderr[:self.max_output] if proc.stderr else b""
+            try:
+                stdout = raw_stdout.decode("utf-8")
+            except UnicodeDecodeError:
+                stdout = raw_stdout.decode(locale.getpreferredencoding(), errors="replace")
+            try:
+                stderr = raw_stderr.decode("utf-8")
+            except UnicodeDecodeError:
+                stderr = raw_stderr.decode(locale.getpreferredencoding(), errors="replace")
 
             return {
                 "stdout": stdout,
                 "stderr": stderr,
-                "exit_code": result.returncode,
+                "exit_code": proc.returncode,
                 "timed_out": False,
             }
         except subprocess.TimeoutExpired:
@@ -177,6 +186,8 @@ class Executor:
         """构建沙箱环境变量"""
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["LANG"] = "C.UTF-8"
         env["HOME"] = str(cwd)
         sep = ";" if os.name == "nt" else ":"
         env["PATH"] = f"{cwd}/scripts{sep}{cwd}{sep}{env.get('PATH', '/usr/bin:/bin')}"
