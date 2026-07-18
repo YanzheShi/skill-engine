@@ -20,6 +20,8 @@ import sys
 import typer
 from typing import Optional
 
+from skill_engine.config import ROUTER_LLM
+
 # Fix Windows encoding for CLI output
 if sys.platform == "win32":
     import locale
@@ -113,8 +115,7 @@ def match(
         logging.basicConfig(format="%(message)s", level=logging.INFO)
     router = _create_router(registry, verbose=verbose)
 
-    llm = _get_llm_client()
-    plan = router.match(query, llm=llm)
+    plan = router.match(query)
 
     print(f"\n匹配 '{query}' 的结果:\n")
     if plan.primary:
@@ -289,11 +290,11 @@ def run(
     llm = _get_llm_client()
     if args:
         # 用 skill 名做匹配（精确命中 name exact 路由），用 args 做 $ARGUMENTS
-        plan = router.match(query_or_name, llm=llm)
+        plan = router.match(query_or_name)
         match_query = args
     else:
         match_query = query_or_name
-        plan = router.match(match_query, llm=llm)
+        plan = router.match(match_query)
 
     if not plan.primary and not plan.selections:
         print(f"[ERROR] 未找到匹配的 skill: {query_or_name}")
@@ -413,8 +414,6 @@ def _get_tool_llm_client():
     except Exception as e:
         print(f"[ERROR] 获取 LLM 配置失败: {e}")
         raise typer.Exit(code=1)
-
-
 
 
 @app.command()
