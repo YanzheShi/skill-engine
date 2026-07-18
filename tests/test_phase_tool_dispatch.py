@@ -163,7 +163,7 @@ class TestToolDispatchWithMock:
         # bash 结果在 steps 中
         bash_steps = [s for s in result["steps"] if s.get("type") == "bash"]
         assert len(bash_steps) == 1
-        assert "hello" in bash_steps[0].get("output", "")
+        assert "安全拦截" in bash_steps[0].get("error", "")
 
     def test_mock_multiple_tool_calls_same_turn(self, runner):
         """Mock：一次返回多个 tool_calls（bash + write_file）"""

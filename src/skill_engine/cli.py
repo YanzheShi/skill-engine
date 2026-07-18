@@ -11,6 +11,7 @@ CLI — 命令行接口
 - install <url>: 安装 skill
 - update <name>: 更新 skill
 - uninstall <name>: 卸载 skill
+- scan-security [name]: 安全扫描 skill
 """
 
 import json
@@ -217,6 +218,35 @@ def _create_router(registry, verbose: bool = False):
     return Router(registry, preprocessor=None, verbose=verbose)
 
 
+def _get_llm_client():
+    """获取 LLM 客户端（档位 A 用）"""
+    try:
+        from skill_engine.config import get_llm
+    except ImportError:
+        print("[ERROR] 无法导入 config 模块")
+        raise typer.Exit(code=1)
+    try:
+        return get_llm()
+    except Exception as e:
+        print(f"[ERROR] 获取 LLM 配置失败: {e}")
+        raise typer.Exit(code=1)
+
+
+def _get_tool_llm_client():
+    """获取带工具绑定的 LLM 客户端（档位 B tool_dispatch 用）"""
+    try:
+        from skill_engine.config import get_llm
+    except ImportError:
+        print("[ERROR] 无法导入 config 模块")
+        raise typer.Exit(code=1)
+    try:
+        llm = get_llm()
+        return llm
+    except Exception as e:
+        print(f"[ERROR] 获取 LLM 配置失败: {e}")
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def run(
     query_or_name: str = typer.Argument(..., help="skill 名称或用户输入"),
@@ -225,6 +255,7 @@ def run(
     steps: bool = typer.Option(False, "--steps", help="使用 Steps DSL 确定性执行（自动检测 body 中的 ## Steps）"),
     max_iterations: int = typer.Option(10, "--max-iter", help="档位 B 最大迭代次数"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只编译不执行（输出 prompt）"),
+    non_interactive: bool = typer.Option(False, "--non-interactive", help="非交互模式，ATTENTION→BLOCK"),
     args: str = typer.Option("", "--args", "-a", help="用户实际请求参数（当指定 skill name 时使用）"),
 ):
     """执行 skill
@@ -290,20 +321,9 @@ def run(
                 print(f"Skill: {skill.metadata.name}")
                 print(f"分数: {plan.score or 1.0:.2f}")
                 print(f"{'='*60}")
-                print(prompt)
-            else:
-                print(f"[ERROR] 无法加载 skill: {plan.primary.name}")
-        elif plan.selections:
-            for s in plan.selections:
-                skill = registry.load_skill(s.name)
-                if skill:
-                    from .runner import _parse_named_params
-                    _args = {"$ARGUMENTS": match_query, "$0": match_query, **_parse_named_params(match_query)}
-                    prompt = assembler.assemble(skill, _args)
-                    print(f"\n{'='*60}")
-                    print(f"Skill: {skill.metadata.name}")
-                    print(f"{'='*60}")
-                    print(prompt[:2000])
+                print(prompt[:2000])
+        return
+
         return
 
     if tool_dispatch:
@@ -393,6 +413,8 @@ def _get_tool_llm_client():
     except Exception as e:
         print(f"[ERROR] 获取 LLM 配置失败: {e}")
         raise typer.Exit(code=1)
+
+
 
 
 @app.command()
@@ -708,3 +730,73 @@ def create(
             print(f"    - {err}")
 
     print(f"{'='*60}")
+
+@app.command()
+def scan_security(
+    name: Optional[str] = typer.Argument(None, help="skill 名称（可选，不指定则扫全部）"),
+    deep: bool = typer.Option(False, "--deep", help="使用 LLM 深度分析"),
+    json_output: bool = typer.Option(False, "--json", help="JSON 格式输出"),
+):
+    """安全扫描 skill
+
+    正则扫描所有 active skill，分析安全性。只提醒，不阻止。
+    使用 --deep 可额外使用 LLM 深度分析。
+    """
+    from pathlib import Path as _Path
+    from .discovery import discover
+    from .registry import Registry
+    from .scanner import scan_skill, scan_skill_deep, scan_all
+
+    project_skills = _Path.cwd() / "skills"
+    roots = [str(project_skills)] if project_skills.exists() else []
+    index = discover(roots=roots)
+    registry = Registry(index)
+
+    if name:
+        skill = registry.load_skill(name)
+        if not skill:
+            print(f"[ERROR] 未找到 skill: {name}")
+            raise typer.Exit(code=1)
+        findings = scan_skill(skill)
+        results = {name: findings}
+    else:
+        results = scan_all(registry)
+
+    if json_output:
+        import json as _json
+        output = {}
+        for n, findings in results.items():
+            meta = registry.info(n)
+            output[n] = {
+                "findings": [f.to_dict() for f in findings],
+                "trust_tag": meta.trust_tag if meta else None,
+            }
+        print(_json.dumps(output, indent=2, ensure_ascii=False))
+        return
+
+    print(f"\n{'='*60}")
+    print(f"安全扫描结果")
+    print(f"{'='*60}")
+    for n, findings in results.items():
+        meta = registry.info(n)
+        trust = f" ({meta.trust_tag})" if meta and meta.trust_tag else ""
+        print(f"\n  {n}{trust}")
+        if not findings:
+            print(f"    ✅ 未发现风险")
+        for f in findings:
+            print(f"    {f}")
+
+    if deep:
+        print(f"\n{'='*60}")
+        print(f"LLM 深度分析")
+        print(f"{'='*60}")
+        from .config import get_llm
+        llm = get_llm()
+        targets = [name] if name else registry.list_active()
+        for n in targets:
+            skill = registry.load_skill(n)
+            if skill:
+                print(f"\n  {n}:")
+                print(f"    {scan_skill_deep(skill, llm)}")
+
+    print()

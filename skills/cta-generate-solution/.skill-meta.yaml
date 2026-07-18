@@ -1,0 +1,30 @@
+intention:
+- 生成
+synonyms:
+  生成:
+  - 产生
+  - 创建
+  - 编写
+  - 产出
+purpose: 生成编程题的暴力解与最优解
+keywords:
+  动词:
+  - 生成
+  - 输出
+  - 编写
+  - 补充
+  - 重算
+  名词:
+  - 编程题
+  - 暴力解
+  - 最优解
+  - 题解
+  - 代码
+  - 类
+  - 方法
+  - 函数
+  - 测试用例
+meta_version: 2
+source_hash: 2d5a0530e664e33d
+computed_at: '2026-07-17T12:28:43.100633+00:00'
+provider: llm

@@ -26,6 +26,66 @@ import yaml
 import re
 from .models import SkillMeta
 
+# ----- 来源标注（安全设计 v2，第 0 层）-----
+
+_SOURCES_CONFIG_PATH = Path.home() / ".skill-engine" / "sources.toml"
+_ALLOWED_ORIGINS: Optional[set[str]] = None
+
+
+def _load_allowed_origins() -> set[str]:
+    """加载 sources.toml 中的 allowed_origins"""
+    global _ALLOWED_ORIGINS
+    if _ALLOWED_ORIGINS is not None:
+        return _ALLOWED_ORIGINS
+    _ALLOWED_ORIGINS = set()
+    try:
+        if _SOURCES_CONFIG_PATH.exists():
+            import tomllib
+            data = tomllib.loads(_SOURCES_CONFIG_PATH.read_text(encoding="utf-8"))
+            origins = data.get("allowed_origins", {}).get("origins", [])
+            _ALLOWED_ORIGINS = set(origins)
+    except Exception:
+        pass
+    return _ALLOWED_ORIGINS
+
+
+def _get_git_remote(skill_dir: Path) -> Optional[str]:
+    """从 skill 目录的 .git/config 中读取 remote origin URL"""
+    git_config = skill_dir / ".git" / "config"
+    if not git_config.exists():
+        return None
+    try:
+        text = git_config.read_text(encoding="utf-8")
+        match = re.search(r'\[remote\s+"origin"\]\s*\n(?:\s*url\s*=\s*(\S+))', text)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def _origin_matches(remote: str, allowed: str) -> bool:
+    """检查 remote URL 是否匹配 allowed origin 模式"""
+    if allowed.startswith("github:"):
+        owner_repo = allowed[7:]
+        return f"github.com/{owner_repo}" in remote
+    return remote == allowed
+
+
+def _tag_trust(skill_dir: Path) -> Optional[str]:
+    """根据来源标注 trust_tag：trusted / untrusted"""
+    remote = _get_git_remote(skill_dir)
+    if remote is None:
+        return "trusted"  # 非 git 目录（本地创建），视为可信
+    allowed = _load_allowed_origins()
+    if not allowed:
+        return "untrusted"  # 未配 allowed_origins → 全标 untrusted
+    for a in allowed:
+        if _origin_matches(remote, a):
+            return "trusted"  # 远程 URL 在白名单内
+    print(f"  [untrusted] remote={remote} 不在 sources.toml allowed_origins 中")
+    return "untrusted"
+
 
 # 匹配 YAML frontmatter 的正则
 # 格式: ---\nYAML内容\n---\nMarkdown正文
@@ -75,11 +135,13 @@ def _discover_skill_dir(dir_path: Path, priority: int = 0) -> dict[str, SkillMet
             fm_dict, _ = _parse_frontmatter(content)
             name = fm_dict.get("name", item.name)
             description = fm_dict.get("description", "")
+            trust_tag = _tag_trust(item) if priority == 10 else "trusted"
             index[name] = SkillMeta(
                 name=name,
                 description=description,
                 directory=str(item),
                 priority=priority,
+                trust_tag=trust_tag,
             )
     return index
 

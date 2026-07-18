@@ -27,6 +27,7 @@ class SkillMeta:
     directory: str
     priority: int = 0  # 越高越优先
     state: str = "on"  # 受 skillOverrides 影响
+    trust_tag: Optional[str] = None  # trusted / untrusted / None（来源标注）
 
 
 class SkillMetadata(BaseModel):

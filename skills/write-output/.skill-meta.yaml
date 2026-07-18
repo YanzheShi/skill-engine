@@ -1,0 +1,29 @@
+intention:
+- 写
+- 生成
+synonyms:
+  写:
+  - 生成
+  - 创建
+  - 编写
+  生成:
+  - 产生
+  - 创建
+  - 输出
+purpose: 生成报告并写入指定目录
+keywords:
+  动词:
+  - 生成
+  - 写
+  - 保存
+  - 导出
+  - 创建
+  名词:
+  - 报告
+  - 目录
+  - 文件
+  - 结果
+meta_version: 2
+source_hash: d94a7acab213639c
+computed_at: '2026-07-18T01:35:57.418939+00:00'
+provider: llm

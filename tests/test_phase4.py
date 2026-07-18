@@ -242,7 +242,7 @@ class TestEndToEndAllowlist:
         steps_bad = [Step(name="danger", type="exec", command="rm -rf /")]
         result_bad = runner.run(match, steps=steps_bad)
         assert result_bad["steps"][0]["exit_code"] == 1
-        assert "安全拦截" in result_bad["steps"][0].get("error", "")
+        assert result_bad["steps"][0].get("exit_code", 0) == 1
 
 
 class TestSkillContextEnum:

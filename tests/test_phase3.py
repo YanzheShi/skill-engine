@@ -144,8 +144,8 @@ class TestRunnerSteps:
         """exec step 超时"""
         import sys
         if sys.platform == "win32":
-            # 用 Python 的 time.sleep 更可靠
-            cmd = "python -c \"import time; time.sleep(10)\""
+            # ping 延迟 5 秒，不触发安全审批
+            cmd = "ping -n 6 127.0.0.1 > nul"
         else:
             cmd = "sleep 5"
         steps = [Step(name="slow", type="exec", command=cmd, timeout=1)]

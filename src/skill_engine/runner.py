@@ -22,6 +22,8 @@ from typing import Optional
 from langchain_core.tools import tool
 from .models import Skill, MatchResult, Step
 from .assembler import Assembler
+from .scanner import should_approve, _is_approved, _is_blocked, _save_approval, _save_blocklist
+from .scanner import should_approve, _is_approved, _is_blocked, _save_approval, _save_blocklist
 from .executor import Executor
 
 
@@ -103,6 +105,7 @@ class Runner:
         self.llm_api_base = llm_api_base
         self.llm_api_key = llm_api_key
         self.llm_model = llm_model
+        self._session_approvals: dict[str, bool] = {}  # op_str → True(允许) / False(拒绝)
 
     def _run_llm_once(self, skill: Skill, arguments: dict, llm) -> dict:
         """档位 A：单次 LLM 调用（CC 原生 skill 兜底）
@@ -213,6 +216,20 @@ class Runner:
     ) -> dict:
         """执行 shell 命令"""
         cmd = self._resolve_template(step.command or "", prev_outputs, arguments)
+
+        # 安全审批
+        decision, reason = should_approve(
+            cmd, skill.directory, risk_hint="step_exec"
+        )
+        if decision == "BLOCK":
+            return {"name": step.name, "type": "exec", "command": cmd,
+                    "output": "", "error": f"[安全拦截] {reason}", "exit_code": 1, "timed_out": False}
+        if decision == "ATTENTION":
+            approved = self._check_approval(skill.metadata.name, cmd.split()[0] if cmd else "", cmd)
+            if not approved:
+                return {"name": step.name, "type": "exec", "command": cmd,
+                        "output": "", "error": "[用户跳过] 操作已取消", "exit_code": 1, "timed_out": False}
+
         # 使用 step 级别的 timeout
         step_timeout = step.timeout
         result = self.executor.run_step(cmd, cwd=Path(skill.directory), timeout=step_timeout)
@@ -320,6 +337,104 @@ class Runner:
             template = template.replace(f"{{{key_clean}}}", str(value))
         return template
 
+    # ================================================================
+    # 安全审批辅助
+    # ================================================================
+
+    def _check_approval(self, skill_name: str, binary: str, op_str: str = "") -> bool:
+        """检查操作是否已被审批，或弹交互式确认
+
+        审批级别（按 op_str 粒度）：
+        - y: 本次允许
+        - Y: 当前会话允许（同 op_str 自动放行）
+        - N: 拒绝
+        - r: 当前会话拒绝（同 op_str 自动拒绝）
+        """
+        import sys, os
+
+        # 会话级审批缓存
+        if op_str in self._session_approvals:
+            return self._session_approvals[op_str]
+
+        # 非交互模式
+        auto_approve = os.environ.get("SKILLS_ENGINE_AUTO_APPROVE", "").strip().lower()
+        NO_AUTO = {"", "none", "0", "false"}
+        if auto_approve and auto_approve not in NO_AUTO:
+            if auto_approve == "all":
+                return True
+            for entry in auto_approve.split(","):
+                entry = entry.strip()
+                if ":" in entry:
+                    s, b = entry.split(":", 1)
+                    if s == skill_name and b == binary:
+                        return True
+                elif entry == skill_name:
+                    return True
+            return False
+
+        # 测试/CI 环境默认拒绝
+        if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("CI"):
+            return False
+
+        # ===== 交互模式 =====
+        try:
+            import ctypes
+            from ctypes import wintypes
+            _kernel32 = ctypes.windll.kernel32
+
+            _stdin_handle = _kernel32.GetStdHandle(-10)
+            _stdout_handle = _kernel32.GetStdHandle(-11)
+            INVALID = ctypes.c_void_p(-1).value
+
+            if _stdin_handle in (None, INVALID, 0):
+                return False
+            if _stdout_handle in (None, INVALID, 0):
+                _stdout_handle = _kernel32.GetStdHandle(-12)
+            if _stdout_handle in (None, INVALID, 0):
+                return False
+
+            # 保存并设置控制台输入模式（禁用行缓冲和回显）
+            _old_mode = wintypes.DWORD(0)
+            _kernel32.GetConsoleMode(_stdin_handle, ctypes.byref(_old_mode))
+            _raw_mode = _old_mode.value & ~0x0006
+            _kernel32.SetConsoleMode(_stdin_handle, _raw_mode)
+
+            # 输出提示
+            prompt_text = f"\n⚠️  [{skill_name}] 请求执行:\n"
+            prompt_text += f"   命令: {op_str or binary}\n"
+            prompt_text += "   本次允许(y) / 会话允许(Y) / 拒绝(N) / 会话拒绝(r): "
+            _kernel32.WriteConsoleW(
+                _stdout_handle, prompt_text, len(prompt_text), None, None
+            )
+
+            # 读单个字符
+            _buf = ctypes.create_unicode_buffer(2)
+            _read = wintypes.DWORD(0)
+            _kernel32.ReadConsoleW(
+                _stdin_handle, _buf, 1, ctypes.byref(_read), None
+            )
+            _raw = _buf.value
+            _kernel32.WriteConsoleW(_stdout_handle, "\n", 1, None, None)
+
+            # 恢复原始控制台模式
+            _kernel32.SetConsoleMode(_stdin_handle, _old_mode)
+
+        except Exception:
+            return False
+
+        # 区分大小写处理
+        if _raw == "y":
+            return True  # 本次允许，不记缓存
+        elif _raw == "Y":
+            self._session_approvals[op_str] = True
+            return True  # 会话允许
+        elif _raw == "N":
+            return False  # 拒绝本次，不记缓存
+        elif _raw == "r":
+            self._session_approvals[op_str] = False
+            return False  # 会话拒绝
+        else:  # 其他按键
+            return False
     # ================================================================
     # Phase 8: 档位 B — tool_dispatch loop
     # ================================================================
@@ -634,19 +749,25 @@ class Runner:
 
                 elif tc["type"] == "bash":
                     cmd = tc["input"].get("command", "")
-                    result = self.executor.run_step(cmd, cwd=Path(skill.directory))
+                    # tool_dispatch: LLM 侧命令，直接 BLOCK（安全设计 v2）
+                    import logging
+                    logging.getLogger("skill_engine.runner").warning(
+                        f"tool_dispatch bash 被安全拦截: {cmd[:80]}"
+                    )
                     step_results.append({
                         "name": f"bash_{tc['id']}",
                         "type": "bash",
                         "command": cmd,
-                        "output": result["stdout"],
-                        "error": result["stderr"],
+                        "output": "",
+                        "error": "[安全拦截] tool_dispatch 命令不自动执行",
                     })
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
-                        "content": result["stdout"] or result["stderr"],
+                        "name": "bash",
+                        "content": "[安全拦截] tool_dispatch 命令不自动执行",
                     })
+                    continue
 
                 elif tc["type"] == "read_file":
                     filepath = tc["input"].get("path", "")

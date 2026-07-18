@@ -1,0 +1,29 @@
+intention:
+- 备份
+- 复制
+- 存档
+synonyms:
+  备份:
+  - 复制
+  - 存档
+  复制:
+  - 备份
+  - 拷贝
+  存档:
+  - 备份
+  - 保存
+purpose: 备份配置文件到安全位置
+keywords:
+  动词:
+  - 备份
+  - 复制
+  - 存档
+  名词:
+  - 配置文件
+  - 目录
+  - 文件
+  - 安全位置
+meta_version: 2
+source_hash: 444763713e7c8a95
+computed_at: '2026-07-18T01:35:15.602316+00:00'
+provider: llm

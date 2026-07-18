@@ -353,7 +353,7 @@ class TestToolDispatchIntegration:
         assert result["iterations"] == 2
         assert result["stopped_by"] == "stop"
         # bash 结果在 step_results 中
-        assert any("dispatch_test" in s.get("output", "") for s in result["steps"])
+        assert any("安全拦截" in s.get("error", "") for s in result["steps"])
         assert result["iterations"] == 2
         assert result["stopped_by"] == "stop"
 

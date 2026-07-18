@@ -5,7 +5,7 @@ Gradio Web UI — skill-engine 的使用界面
 1. Skill 列表：展示所有已安装的 skills（含分组信息）
 2. Skill 匹配：输入查询，展示匹配的 skills（支持 explain 详情）
 3. Skill 直接执行：输入查询，自动匹配并执行
-4. Skill 手动执行：选择 skill 并执行（支持 args + 多种模式）
+4. Skill 手动执行：选择 skill 并执行（支持 args + 多种模式 + 审批）
 5. 管理：安装/卸载/更新 skills
 6. Trace：路由匹配记录
 
@@ -153,21 +153,8 @@ def match_skills(query: str, explain: bool = False) -> str:
     return "\n".join(lines)
 
 
-def run_skill(skill_name: str, query: str, mode: str = "compile", progress: gr.Progress = gr.Progress()) -> str:
-    """执行 skill（手动选择）"""
-    if not skill_name:
-        return "请选择一个 skill。"
-    if not query or not query.strip():
-        return "请输入查询内容。"
-
-    progress(0.1, desc="正在匹配 skill...")
-    index, registry, router, executor, assembler, runner = _get_engine()
-
-    llm = _get_llm_client()
-    plan = router.match(skill_name, llm=llm)
-    if not plan.primary:
-        return f"未找到 skill: {skill_name}"
-
+def _do_run_skill(skill_name: str, query: str, mode: str, runner, registry, assembler, plan, progress: gr.Progress = gr.Progress()) -> str:
+    """执行 skill（内部函数，不包含 engine 创建）"""
     if mode == "dry-run":
         progress(0.5, desc="正在编译 Prompt...")
         skill = registry.load_skill(plan.primary.name)
@@ -193,7 +180,21 @@ def run_skill(skill_name: str, query: str, mode: str = "compile", progress: gr.P
         progress(1.0, desc="完成")
         output = result.get("output", "")[:5000]
         files = result.get("files_created", [])
+        steps = result.get("steps", [])
         text = f"## Skill: {result.get('skill_name', plan.primary.name)}\n\n```\n{output}\n```\n"
+        # 附加步骤详情（含错误信息）
+        if steps:
+            text += "\n### 步骤详情\n\n"
+            for s in steps:
+                s_name = s.get("name", "?")
+                s_type = s.get("type", "?")
+                s_err = s.get("error", "")
+                s_exit = s.get("exit_code")
+                status = "✅" if s_exit in (None, 0) else "❌"
+                text += f"- {status} **{s_name}** ({s_type})"
+                if s_err:
+                    text += f" — {s_err}"
+                text += "\n"
         if files:
             text += "\n**创建的文件：**\n" + "\n".join(f"  - {f}" for f in files)
         return text
@@ -208,6 +209,114 @@ def run_skill(skill_name: str, query: str, mode: str = "compile", progress: gr.P
         if files:
             text += "\n**创建的文件：**\n" + "\n".join(f"  - {f}" for f in files)
         return text
+
+
+# ================================================================
+# 审批集成
+# ================================================================
+
+def scan_approval_needs(skill_name: str, query: str):
+    """扫描 skill 的 steps，返回需要审批的命令列表
+
+    Returns:
+        (list_of_dicts, markdown_str)
+        list_of_dicts: [{step_name, command, reason, op_str}, ...]
+        markdown_str: 用于 UI 展示的 markdown 表格
+    """
+    if not skill_name:
+        return [], ""
+
+    skills_dir = _get_project_skills_dir()
+    if not skills_dir:
+        return [], "未找到 skills 目录"
+
+    from skill_engine.discovery import discover
+    from skill_engine.registry import Registry
+    from skill_engine.runner import Runner
+    from skill_engine.executor import Executor
+    from skill_engine.assembler import Assembler
+
+    index = discover(roots=[skills_dir])
+    registry = Registry(index)
+    skill = registry.load_skill(skill_name)
+    if not skill:
+        return [], f"无法加载 skill: {skill_name}"
+
+    executor = Executor(timeout=30, allow_all=True)
+    assembler = Assembler(executor=executor, command_timeout=30)
+    runner = Runner(assembler, executor)
+
+    steps = runner._parse_steps_from_body(skill.body)
+    if not steps:
+        return [], "没有 Steps DSL 定义"
+
+    arguments = {"$ARGUMENTS": query, "$0": query}
+
+    from skill_engine.scanner import should_approve
+
+    pending = []
+    for step in steps:
+        if step.type != "exec":
+            continue
+        cmd = runner._resolve_template(step.command or "", {}, arguments)
+        decision, reason = should_approve(cmd, skill.directory, risk_hint="step_exec")
+        if decision == "ATTENTION":
+            pending.append({
+                "step_name": step.name,
+                "command": cmd,
+                "reason": reason,
+                "op_str": cmd,
+            })
+
+    if not pending:
+        return [], "✅ 无需审批，可直接执行"
+
+    # 生成 markdown 表格
+    lines = ["## 待审批命令\n", "| 步骤名 | 命令 | 原因 | 选择 |", "|--------|------|------|------|"]
+    for p in pending:
+        cmd_short = p["command"][:55] + ("..." if len(p["command"]) > 55 else "")
+        lines.append(f"| {p['step_name']} | `{cmd_short}` | {p['reason']} | ⬇ 见下方输入框 |")
+    lines.append("")
+    lines.append("在下方输入框中按行输入选择，格式：`步骤名: 选项`")
+    lines.append("选项：`y`(本次允许) / `Y`(会话允许) / `N`(拒绝) / `r`(会话拒绝)")
+
+    return pending, "\n".join(lines)
+
+
+def run_skill_with_approval(skill_name: str, query: str, mode: str, choices_text: str, progress: gr.Progress = gr.Progress()) -> str:
+    """执行 skill，按用户的选择预填充会话审批缓存"""
+    if not skill_name or not query:
+        return "请选择 skill 并输入查询。"
+
+    progress(0.1, desc="正在初始化...")
+    index, registry, router, executor, assembler, runner = _get_engine()
+
+    llm = _get_llm_client()
+    plan = router.match(skill_name, llm=llm)
+    if not plan.primary:
+        return f"未找到 skill: {skill_name}"
+
+    # 解析审批选择
+    if choices_text and choices_text.strip():
+        # 先扫描，建立 step_name → op_str 映射
+        pending, _ = scan_approval_needs(skill_name, query)
+        if pending:
+            step_to_op = {p["step_name"]: p["op_str"] for p in pending}
+            for line in choices_text.strip().split("\n"):
+                line = line.strip()
+                if not line or ":" not in line:
+                    continue
+                step_name, decision = line.split(":", 1)
+                step_name = step_name.strip()
+                decision = decision.strip().lower()
+                if step_name in step_to_op and decision in ("y", "Y", "n", "N", "r"):
+                    op_str = step_to_op[step_name]
+                    if decision in ("Y", "y"):
+                        runner._session_approvals[op_str] = True
+                    else:  # N, r
+                        runner._session_approvals[op_str] = False
+
+    return _do_run_skill(skill_name, query, mode, runner, registry, assembler, plan, progress)
 
 
 def run_skill_direct(query: str, mode: str = "compile", progress: gr.Progress = gr.Progress()) -> str:
@@ -228,46 +337,25 @@ def run_skill_direct(query: str, mode: str = "compile", progress: gr.Progress = 
             result += "\n⚠️ 匹配结果不确定"
         return result
 
-    if mode == "dry-run":
-        progress(0.5, desc="正在编译 Prompt...")
-        skill = registry.load_skill(plan.primary.name)
-        if not skill:
-            return f"无法加载 skill: {plan.primary.name}"
-        final_prompt = assembler.assemble(skill, {"$ARGUMENTS": query, "$0": query})
-        progress(1.0, desc="完成")
-        return f"## 匹配: {plan.primary.name}（得分: {plan.score or 'N/A'}）\n\n```\n{final_prompt[:5000]}\n```\n"
+    return _do_run_skill(plan.primary.name, query, mode, runner, registry, assembler, plan, progress)
 
-    elif mode == "llm":
-        progress(0.3, desc="正在初始化 LLM...")
-        llm = _get_llm_client()
-        if not llm:
-            return "## 档位 A 需要 LLM 配置\n\n请设置环境变量:\n- AGNES_MODEL\n- AGNES_BASE_URL\n- AGNES_API_KEY"
-        progress(0.5, desc="正在调用 LLM...")
-        result = runner.run_plan(plan, registry, query=query, llm=llm)
-        progress(1.0, desc="完成")
-        return f"## Skill: {result.get('skill_name', plan.primary.name)}\n\n匹配得分: {plan.score or 'N/A'}\n\n**输出：**\n\n{result.get('output', '')[:5000]}"
 
-    elif mode == "steps":
-        progress(0.3, desc="正在执行 Steps DSL...")
-        result = runner.run_plan(plan, registry, query=query)
-        progress(1.0, desc="完成")
-        output = result.get("output", "")[:5000]
-        files = result.get("files_created", [])
-        text = f"## Skill: {result.get('skill_name', plan.primary.name)}\n\n匹配得分: {plan.score or 'N/A'}\n\n```\n{output}\n```\n"
-        if files:
-            text += "\n**创建的文件：**\n" + "\n".join(f"  - {f}" for f in files)
-        return text
+def run_skill(skill_name: str, query: str, mode: str = "compile", progress: gr.Progress = gr.Progress()) -> str:
+    """执行 skill（手动选择，无审批预处理）"""
+    if not skill_name:
+        return "请选择一个 skill。"
+    if not query or not query.strip():
+        return "请输入查询内容。"
 
-    else:
-        progress(0.3, desc="正在编译...")
-        result = runner.run_plan(plan, registry, query=query)
-        output = result.get("output", "")[:5000]
-        files = result.get("files_created", [])
-        progress(1.0, desc="完成")
-        text = f"## Skill: {result.get('skill_name', plan.primary.name)}\n\n匹配得分: {plan.score or 'N/A'}\n\n```\n{output}\n```\n"
-        if files:
-            text += "\n**创建的文件：**\n" + "\n".join(f"  - {f}" for f in files)
-        return text
+    progress(0.1, desc="正在匹配 skill...")
+    index, registry, router, executor, assembler, runner = _get_engine()
+
+    llm = _get_llm_client()
+    plan = router.match(skill_name, llm=llm)
+    if not plan.primary:
+        return f"未找到 skill: {skill_name}"
+
+    return _do_run_skill(skill_name, query, mode, runner, registry, assembler, plan, progress)
 
 
 def _refresh_dropdown():
@@ -357,16 +445,169 @@ def create_demo() -> gr.Blocks:
                 match_result_md = gr.Markdown()
                 match_btn.click(match_skills, inputs=[match_query, explain_check], outputs=[match_result_md])
 
-            # Tab 3: 直接执行
+            # Tab 3: 直接执行（逐步交互审批）
             with gr.Tab("直接执行"):
                 exec_query = gr.Textbox(label="输入查询", placeholder="如 '帮我生成第49题的题解'")
                 exec_mode = gr.Radio(choices=["compile", "llm", "steps", "dry-run"], value="compile", label="执行模式")
-                exec_btn = gr.Button("执行", variant="primary")
-                exec_result_md = gr.Markdown()
-                exec_btn.click(run_skill_direct, inputs=[exec_query, exec_mode], outputs=[exec_result_md])
 
-            # Tab 4: 手动执行
+                # --- 审批状态 ---
+                exec_step_state = gr.State({
+                    "skill_name": "",
+                    "query": "",
+                    "mode": "steps",
+                    "pending": [],
+                    "choices": {},
+                    "current_index": 0,
+                })
+
+                # --- 扫描按钮 ---
+                exec_scan_btn = gr.Button("扫描审批", variant="secondary", size="sm")
+
+                # --- 逐步审批面板 ---
+                with gr.Column(visible=False) as exec_approval_panel:
+                    exec_approval_info = gr.Markdown("### 待审批")
+                    with gr.Row():
+                        exec_y_btn = gr.Button("y 本次允许", variant="primary", size="sm")
+                        exec_Y_btn = gr.Button("Y 会话允许", variant="primary", size="sm")
+                        exec_n_btn = gr.Button("N 拒绝", variant="secondary", size="sm")
+                        exec_r_btn = gr.Button("r 会话拒绝", variant="stop", size="sm")
+                    exec_choices_log = gr.Markdown("已作出的选择：无")
+
+                # --- 执行按钮 ---
+                exec_final_btn = gr.Button("执行", variant="primary", visible=False)
+
+                # --- 结果区 ---
+                exec_result_md = gr.Markdown()
+
+                # 扫描审批
+                def _handle_exec_scan(query, mode):
+                    if not query or not query.strip():
+                        return "请输入查询内容。", exec_step_state.value, \
+                               gr.update(visible=False), gr.update(visible=False)
+
+                    index, registry, router, executor, assembler, runner = _get_engine()
+                    llm = _get_llm_client()
+                    plan = router.match(query, llm=llm)
+                    if not plan or not plan.primary:
+                        msg = "未找到匹配的 skill。"
+                        if hasattr(plan, 'reason') and plan.reason:
+                            msg += f"\n原因: {plan.reason}"
+                        return msg, exec_step_state.value, \
+                               gr.update(visible=False), gr.update(visible=False)
+
+                    skill_name = plan.primary.name
+
+                    if mode != "steps":
+                        result = _do_run_skill(skill_name, query, mode, runner, registry, assembler, plan)
+                        return result, exec_step_state.value, \
+                               gr.update(visible=False), gr.update(visible=False)
+
+                    pending, scan_md = scan_approval_needs(skill_name, query)
+                    if not pending:
+                        result = _do_run_skill(skill_name, query, mode, runner, registry, assembler, plan)
+                        return result, exec_step_state.value, \
+                               gr.update(visible=False), gr.update(visible=False)
+
+                    first = pending[0]
+                    state = {
+                        "skill_name": skill_name,
+                        "query": query,
+                        "mode": mode,
+                        "pending": pending,
+                        "choices": {},
+                        "current_index": 0,
+                    }
+                    info = (
+                        f"### 第 1/{len(pending)} 步：{first['step_name']}\n\n"
+                        f"**命令**: `{first['command'][:100]}`\n\n"
+                        f"**原因**: {first['reason']}\n\n"
+                        f"请选择操作："
+                    )
+                    return "", state, gr.update(visible=True), gr.update(visible=False)
+
+                exec_scan_btn.click(
+                    fn=_handle_exec_scan,
+                    inputs=[exec_query, exec_mode],
+                    outputs=[exec_result_md, exec_step_state, exec_approval_panel, exec_final_btn],
+                )
+
+                # 四个审批按钮
+                def _handle_exec_decision(state, decision):
+                    pending = state["pending"]
+                    idx = state["current_index"]
+                    item = pending[idx]
+                    state["choices"][item["step_name"]] = decision
+                    state["current_index"] = idx + 1
+
+                    choices_text = "\n".join(
+                        f"- **{k}**: {v}" for k, v in state["choices"].items()
+                    )
+
+                    if state["current_index"] >= len(pending):
+                        info = (
+                            f"## ✅ 审批完成\n\n"
+                            f"已对 {len(pending)} 个步骤做出选择：\n\n"
+                            f"{choices_text}\n\n"
+                            f"点击下方「执行」按钮运行。"
+                        )
+                        return state, gr.update(value=info), \
+                               gr.update(visible=False), gr.update(visible=False), \
+                               gr.update(visible=False), gr.update(visible=False), \
+                               gr.update(visible=True), gr.update(value=choices_text)
+
+                    next_item = pending[state["current_index"]]
+                    info = (
+                        f"### 第 {state['current_index'] + 1}/{len(pending)} 步：{next_item['step_name']}\n\n"
+                        f"**命令**: `{next_item['command'][:100]}`\n\n"
+                        f"**原因**: {next_item['reason']}\n\n"
+                        f"请选择操作："
+                    )
+                    return state, gr.update(value=info), \
+                           gr.update(visible=True), gr.update(visible=True), \
+                           gr.update(visible=True), gr.update(visible=True), \
+                           gr.update(visible=False), gr.update(value=choices_text)
+
+                def _make_exec_handler(decision):
+                    def _fn(state):
+                        return _handle_exec_decision(state, decision)
+                    return _fn
+
+                exec_y_btn.click(fn=_make_exec_handler("y"), inputs=[exec_step_state],
+                                 outputs=[exec_step_state, exec_approval_info,
+                                          exec_y_btn, exec_Y_btn, exec_n_btn, exec_r_btn,
+                                          exec_final_btn, exec_choices_log])
+                exec_Y_btn.click(fn=_make_exec_handler("Y"), inputs=[exec_step_state],
+                                 outputs=[exec_step_state, exec_approval_info,
+                                          exec_y_btn, exec_Y_btn, exec_n_btn, exec_r_btn,
+                                          exec_final_btn, exec_choices_log])
+                exec_n_btn.click(fn=_make_exec_handler("N"), inputs=[exec_step_state],
+                                 outputs=[exec_step_state, exec_approval_info,
+                                          exec_y_btn, exec_Y_btn, exec_n_btn, exec_r_btn,
+                                          exec_final_btn, exec_choices_log])
+                exec_r_btn.click(fn=_make_exec_handler("r"), inputs=[exec_step_state],
+                                 outputs=[exec_step_state, exec_approval_info,
+                                          exec_y_btn, exec_Y_btn, exec_n_btn, exec_r_btn,
+                                          exec_final_btn, exec_choices_log])
+
+                # 执行
+                def _handle_exec_final(state):
+                    skill_name = state["skill_name"]
+                    query = state["query"]
+                    mode = state["mode"]
+                    choices_text = "\n".join(
+                        f"{k}: {v}" for k, v in state["choices"].items()
+                    )
+                    return run_skill_with_approval(skill_name, query, mode, choices_text)
+
+                exec_final_btn.click(
+                    fn=_handle_exec_final,
+                    inputs=[exec_step_state],
+                    outputs=[exec_result_md],
+                )
+
+            # Tab 4: 手动执行（逐步交互审批）
             with gr.Tab("手动执行"):
+                # --- 选择区 ---
                 initial_skills = list_skills_for_dropdown()
                 skill_select = gr.Dropdown(
                     choices=initial_skills, label="选择 Skill",
@@ -378,10 +619,164 @@ def create_demo() -> gr.Blocks:
                     refresh_dropdown_btn.click(fn=_refresh_dropdown, outputs=[skill_select])
 
                 manual_query = gr.Textbox(label="查询/参数", placeholder="输入参数（如 '49'）或查询文本")
-                manual_mode = gr.Radio(choices=["compile", "llm", "steps", "dry-run"], value="compile", label="执行模式")
-                manual_btn = gr.Button("执行", variant="primary")
+                manual_mode = gr.Radio(choices=["compile", "llm", "steps", "dry-run"], value="steps", label="执行模式")
+
+                # --- 审批状态 ---
+                step_state = gr.State({
+                    "skill_name": "",
+                    "query": "",
+                    "mode": "steps",
+                    "pending": [],
+                    "choices": {},
+                    "current_index": 0,
+                })
+
+                # --- 扫描按钮 ---
+                scan_btn = gr.Button("扫描审批", variant="secondary", size="sm")
+
+                # --- 逐步审批面板 ---
+                with gr.Column(visible=False) as approval_panel:
+                    approval_info = gr.Markdown("### 待审批")
+                    with gr.Row():
+                        y_btn = gr.Button("y 本次允许", variant="primary", size="sm")
+                        Y_btn = gr.Button("Y 会话允许", variant="primary", size="sm")
+                        n_btn = gr.Button("N 拒绝", variant="secondary", size="sm")
+                        r_btn = gr.Button("r 会话拒绝", variant="stop", size="sm")
+                    choices_log = gr.Markdown("已作出的选择：无")
+
+                # --- 执行按钮（审批完后显示）---
+                exec_final_btn = gr.Button("执行", variant="primary", visible=False)
+
+                # --- 结果区 ---
                 manual_result_md = gr.Markdown()
-                manual_btn.click(run_skill, inputs=[skill_select, manual_query, manual_mode], outputs=[manual_result_md])
+
+                # 扫描审批
+                def _handle_scan(skill_name, query, mode):
+                    if not skill_name or not query:
+                        return "请选择 skill 并输入查询。", step_state.value, \
+                               gr.update(visible=False), gr.update(visible=False)
+
+                    if mode != "steps":
+                        index, registry, router, executor, assembler, runner = _get_engine()
+                        llm = _get_llm_client()
+                        plan = router.match(skill_name, llm=llm)
+                        if not plan.primary:
+                            return f"未找到 skill: {skill_name}", step_state.value, \
+                                   gr.update(visible=False), gr.update(visible=False)
+                        result = _do_run_skill(skill_name, query, mode, runner, registry, assembler, plan)
+                        return result, step_state.value, gr.update(visible=False), gr.update(visible=False)
+
+                    pending, scan_md = scan_approval_needs(skill_name, query)
+                    if not pending:
+                        index, registry, router, executor, assembler, runner = _get_engine()
+                        llm = _get_llm_client()
+                        plan = router.match(skill_name, llm=llm)
+                        if not plan.primary:
+                            return f"未找到 skill: {skill_name}", step_state.value, \
+                                   gr.update(visible=False), gr.update(visible=False)
+                        result = _do_run_skill(skill_name, query, mode, runner, registry, assembler, plan)
+                        return result, step_state.value, gr.update(visible=False), gr.update(visible=False)
+
+                    first = pending[0]
+                    state = {
+                        "skill_name": skill_name,
+                        "query": query,
+                        "mode": mode,
+                        "pending": pending,
+                        "choices": {},
+                        "current_index": 0,
+                    }
+                    info = (
+                        f"### 第 1/{len(pending)} 步：{first['step_name']}\n\n"
+                        f"**命令**: `{first['command'][:100]}`\n\n"
+                        f"**原因**: {first['reason']}\n\n"
+                        f"请选择操作："
+                    )
+                    return "", state, gr.update(visible=True), gr.update(visible=False)
+
+                scan_btn.click(
+                    fn=_handle_scan,
+                    inputs=[skill_select, manual_query, manual_mode],
+                    outputs=[manual_result_md, step_state, approval_panel, exec_final_btn],
+                )
+
+                # 四个审批按钮
+                def _handle_decision(state, decision):
+                    pending = state["pending"]
+                    idx = state["current_index"]
+                    item = pending[idx]
+                    state["choices"][item["step_name"]] = decision
+                    state["current_index"] = idx + 1
+
+                    # 已选择的日志
+                    choices_text = "\n".join(
+                        f"- **{k}**: {v}" for k, v in state["choices"].items()
+                    )
+
+                    if state["current_index"] >= len(pending):
+                        # 全部审批完成
+                        info = (
+                            f"## ✅ 审批完成\n\n"
+                            f"已对 {len(pending)} 个步骤做出选择：\n\n"
+                            f"{choices_text}\n\n"
+                            f"点击下方「执行」按钮运行。"
+                        )
+                        return state, gr.update(value=info), \
+                               gr.update(visible=False), gr.update(visible=False), \
+                               gr.update(visible=False), gr.update(visible=False), \
+                               gr.update(visible=True), gr.update(value=choices_text)
+
+                    # 下一个
+                    next_item = pending[state["current_index"]]
+                    info = (
+                        f"### 第 {state['current_index'] + 1}/{len(pending)} 步：{next_item['step_name']}\n\n"
+                        f"**命令**: `{next_item['command'][:100]}`\n\n"
+                        f"**原因**: {next_item['reason']}\n\n"
+                        f"请选择操作："
+                    )
+                    return state, gr.update(value=info), \
+                           gr.update(visible=True), gr.update(visible=True), \
+                           gr.update(visible=True), gr.update(visible=True), \
+                           gr.update(visible=False), gr.update(value=choices_text)
+
+                def _make_handler(decision):
+                    def _fn(state):
+                        return _handle_decision(state, decision)
+                    return _fn
+
+                y_btn.click(fn=_make_handler("y"), inputs=[step_state],
+                            outputs=[step_state, approval_info,
+                                     y_btn, Y_btn, n_btn, r_btn,
+                                     exec_final_btn, choices_log])
+                Y_btn.click(fn=_make_handler("Y"), inputs=[step_state],
+                            outputs=[step_state, approval_info,
+                                     y_btn, Y_btn, n_btn, r_btn,
+                                     exec_final_btn, choices_log])
+                n_btn.click(fn=_make_handler("N"), inputs=[step_state],
+                            outputs=[step_state, approval_info,
+                                     y_btn, Y_btn, n_btn, r_btn,
+                                     exec_final_btn, choices_log])
+                r_btn.click(fn=_make_handler("r"), inputs=[step_state],
+                            outputs=[step_state, approval_info,
+                                     y_btn, Y_btn, n_btn, r_btn,
+                                     exec_final_btn, choices_log])
+
+                # 执行
+                def _handle_final_exec(state):
+                    skill_name = state["skill_name"]
+                    query = state["query"]
+                    mode = state["mode"]
+                    # 把 choices 转成文本格式
+                    choices_text = "\n".join(
+                        f"{k}: {v}" for k, v in state["choices"].items()
+                    )
+                    return run_skill_with_approval(skill_name, query, mode, choices_text)
+
+                exec_final_btn.click(
+                    fn=_handle_final_exec,
+                    inputs=[step_state],
+                    outputs=[manual_result_md],
+                )
 
             # Tab 5: 管理
             with gr.Tab("管理"):

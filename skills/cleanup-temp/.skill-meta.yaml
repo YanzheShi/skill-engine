@@ -1,0 +1,24 @@
+intention:
+- 清理
+- 删除
+synonyms:
+  清理:
+  - 清除
+  - 扫除
+  删除:
+  - 移除
+  - 删掉
+purpose: 清理临时文件和缓存
+keywords:
+  动词:
+  - 清理
+  - 删除
+  名词:
+  - 临时文件
+  - 缓存
+  - 目录
+  - 磁盘
+meta_version: 2
+source_hash: cb919d1240cde5aa
+computed_at: '2026-07-18T01:35:25.365362+00:00'
+provider: llm
