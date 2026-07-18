@@ -106,6 +106,7 @@ class Runner:
         self.llm_api_key = llm_api_key
         self.llm_model = llm_model
         self._session_approvals: dict[str, bool] = {}  # op_str → True(允许) / False(拒绝)
+        self._session_allow_all: bool = False  # 全部允许（A 键）
 
     def _run_llm_once(self, skill: Skill, arguments: dict, llm) -> dict:
         """档位 A：单次 LLM 调用（CC 原生 skill 兜底）
@@ -349,8 +350,13 @@ class Runner:
         - Y: 当前会话允许（同 op_str 自动放行）
         - N: 拒绝
         - r: 当前会话拒绝（同 op_str 自动拒绝）
+        - A: 全部允许（当前会话剩余所有操作自动放行）
         """
         import sys, os
+
+        # 会话级全部允许
+        if self._session_allow_all:
+            return True
 
         # 会话级审批缓存
         if op_str in self._session_approvals:
@@ -402,7 +408,7 @@ class Runner:
             # 输出提示
             prompt_text = f"\n⚠️  [{skill_name}] 请求执行:\n"
             prompt_text += f"   命令: {op_str or binary}\n"
-            prompt_text += "   本次允许(y) / 会话允许(Y) / 拒绝(N) / 会话拒绝(r): "
+            prompt_text += "   本次允许(y) / 会话允许(Y) / 拒绝(N) / 会话拒绝(r) / 全部允许(A): "
             _kernel32.WriteConsoleW(
                 _stdout_handle, prompt_text, len(prompt_text), None, None
             )
@@ -433,6 +439,9 @@ class Runner:
         elif _raw == "r":
             self._session_approvals[op_str] = False
             return False  # 会话拒绝
+        elif _raw == "A":
+            self._session_allow_all = True
+            return True  # 全部允许
         else:  # 其他按键
             return False
     # ================================================================
@@ -749,25 +758,79 @@ class Runner:
 
                 elif tc["type"] == "bash":
                     cmd = tc["input"].get("command", "")
-                    # tool_dispatch: LLM 侧命令，直接 BLOCK（安全设计 v2）
-                    import logging
-                    logging.getLogger("skill_engine.runner").warning(
-                        f"tool_dispatch bash 被安全拦截: {cmd[:80]}"
-                    )
-                    step_results.append({
-                        "name": f"bash_{tc['id']}",
-                        "type": "bash",
-                        "command": cmd,
-                        "output": "",
-                        "error": "[安全拦截] tool_dispatch 命令不自动执行",
-                    })
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "name": "bash",
-                        "content": "[安全拦截] tool_dispatch 命令不自动执行",
-                    })
-                    continue
+                    # tool_dispatch: 根据安全模式走审批或放行
+                    from skill_engine.security.scanner import should_approve
+                    decision, reason = should_approve(cmd, skill.directory, risk_hint="tool_dispatch")
+                    if decision == "BLOCK":
+                        import logging
+                        logging.getLogger("skill_engine.runner").warning(
+                            f"tool_dispatch bash 被安全拦截: {cmd[:80]}"
+                        )
+                        step_results.append({
+                            "name": f"bash_{tc['id']}",
+                            "type": "bash",
+                            "command": cmd,
+                            "output": "",
+                            "error": "[安全拦截] tool_dispatch 命令不自动执行",
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "name": "bash",
+                            "content": "[安全拦截] tool_dispatch 命令不自动执行",
+                        })
+                        continue
+                    elif decision == "ATTENTION":
+                        approved = self._check_approval(
+                            skill.metadata.name,
+                            cmd.split()[0] if cmd else "",
+                            cmd,
+                        )
+                        if not approved:
+                            step_results.append({
+                                "name": f"bash_{tc['id']}",
+                                "type": "bash",
+                                "command": cmd,
+                                "output": "",
+                                "error": "[用户跳过] 操作已取消",
+                            })
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "bash",
+                                "content": "[用户跳过] 操作已取消",
+                            })
+                            continue
+                    # SAFE 或审批通过：执行命令
+                    try:
+                        exec_result = self.executor.run_step(cmd, cwd=Path(skill.directory))
+                        output = exec_result.get("stdout", "") or exec_result.get("stderr", "")
+                        step_results.append({
+                            "name": f"bash_{tc['id']}",
+                            "type": "bash",
+                            "command": cmd,
+                            "output": output[:500],
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "name": "bash",
+                            "content": output[:2000],
+                        })
+                    except Exception as e:
+                        step_results.append({
+                            "name": f"bash_{tc['id']}",
+                            "type": "bash",
+                            "command": cmd,
+                            "output": "",
+                            "error": str(e),
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "name": "bash",
+                            "content": f"[执行失败: {e}]",
+                        })
 
                 elif tc["type"] == "read_file":
                     filepath = tc["input"].get("path", "")

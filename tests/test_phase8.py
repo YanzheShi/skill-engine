@@ -341,6 +341,11 @@ class TestToolDispatchIntegration:
             arguments={},
         )
 
+        # 先设 strict 模式，验证拦截机制
+        import os
+        old_mode = os.environ.get("SKILLS_ENGINE_SECURITY_MODE", "")
+        os.environ["SKILLS_ENGINE_SECURITY_MODE"] = "strict"
+
         llm = MockLLMWithTools([
             {"content": "", "tool_calls": [
                 {"id": "call_1", "type": "bash", "input": {"command": "echo dispatch_test"}}
@@ -352,10 +357,12 @@ class TestToolDispatchIntegration:
         assert result["skill_name"] == "test"
         assert result["iterations"] == 2
         assert result["stopped_by"] == "stop"
-        # bash 结果在 step_results 中
         assert any("安全拦截" in s.get("error", "") for s in result["steps"])
-        assert result["iterations"] == 2
-        assert result["stopped_by"] == "stop"
+
+        if old_mode:
+            os.environ["SKILLS_ENGINE_SECURITY_MODE"] = old_mode
+        else:
+            del os.environ["SKILLS_ENGINE_SECURITY_MODE"]
 
     def test_run_tool_dispatch_overrides_llm(self, runner):
         """tool_dispatch 优先级高于 llm（档位 A）"""

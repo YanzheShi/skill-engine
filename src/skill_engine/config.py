@@ -7,12 +7,18 @@ Reads from .env:
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain_core.tools import tool
 
 # 在模块加载时加载 .env，使 LLM_CONFIGS 能读取环境变量
-load_dotenv()
+# 先找项目根目录下的 .env，再找 CWD
+_env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(dotenv_path=_env_path)
+else:
+    load_dotenv()
 
 # 模型别名 -> 具体配置的映射表
 # 你可以在这里随时增加或修改你的模型
@@ -87,3 +93,20 @@ def get_llm(alias: str = DEFAULT_LLM, **kwargs):
         raise ValueError(f"模型 '{alias}' 的配置不完整，请检查 .env 文件中的环境变量")
 
     return init_chat_model(**config)
+
+
+# ================================================================
+# 安全配置
+# ================================================================
+
+SECURITY_MODE = os.getenv("SKILLS_ENGINE_SECURITY_MODE", "strict").strip().lower()
+"""安全模式
+- strict（默认）: tool_dispatch/ctx_relay 直接 BLOCK
+- permissive: tool_dispatch/ctx_relay 降级为 ATTENTION（弹窗确认）
+- off: 所有命令放行
+"""
+
+
+def get_security_mode() -> str:
+    """获取当前安全模式（每次读环境变量，不缓存）"""
+    return os.getenv("SKILLS_ENGINE_SECURITY_MODE", "strict").strip().lower()

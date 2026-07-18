@@ -111,10 +111,19 @@ def should_approve(
     Returns:
         ("SAFE", "") 或 ("ATTENTION", "原因") 或 ("BLOCK", "原因")
     """
-    # BLOCK: LLM 侧命令，不弹窗直接拒
-    if risk_hint in ("ctx_relay", "tool_dispatch"):
+    # 安全模式检查
+    from skill_engine.config import get_security_mode
+    sec_mode = get_security_mode()
+
+    # 安全模式 off：全放行
+    if sec_mode == "off":
+        return ("SAFE", "")
+
+    # strict 模式：LLM 侧命令直接 BLOCK
+    if sec_mode == "strict" and risk_hint in ("ctx_relay", "tool_dispatch"):
         return ("BLOCK", f"{risk_hint}: LLM 侧命令，不自动执行")
 
+    # permissive：LLM 侧命令也走命令级检查
     binary, subcmd = _classify(op_str)
 
     # assembler_bang: 只查路径出界，不查 binary
@@ -123,7 +132,7 @@ def should_approve(
             return ("ATTENTION", "!cmd 目标路径在 skill 目录外")
         return ("SAFE", "")
 
-    # step_exec: 检查 binary、路径、语义
+    # 检查 binary、路径、语义
     if binary in RISKY_BINARIES:
         return ("ATTENTION", f"危险命令: {binary}")
     if _path_escapes(op_str, Path(skill_dir)):
