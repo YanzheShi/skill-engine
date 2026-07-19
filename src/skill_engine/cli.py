@@ -315,8 +315,8 @@ def run(
         if plan.primary:
             skill = registry.load_skill(plan.primary.name)
             if skill:
-                from .execution.runner import _parse_named_params
-                _args = {"$ARGUMENTS": match_query, "$0": match_query, **_parse_named_params(match_query)}
+                from .execution.tool_defs import parse_named_params
+                _args = {"$ARGUMENTS": match_query, "$0": match_query, **parse_named_params(match_query)}
                 prompt = assembler.assemble(skill, _args)
                 print(f"\n{'='*60}")
                 print(f"Skill: {skill.metadata.name}")

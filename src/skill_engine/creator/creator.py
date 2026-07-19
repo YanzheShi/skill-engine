@@ -421,3 +421,199 @@ class SkillValidator:
             "compile": compile_result,
             "scripts": scripts_result,
         }
+
+# ================================================================
+# 高级创建函数（LLM 模式 + 直接模式 + 注册）
+# ================================================================
+
+
+def default_body_template(name: str, description: str) -> str:
+    """生成默认 body 模板"""
+    return f"""\
+# {name}
+
+{description}
+
+## 工作流程
+
+1. 理解用户需求
+2. 执行相关操作
+3. 返回结果
+
+## 注意事项
+
+- 遵循技能设计规范
+- 保持输出格式清晰
+"""
+
+
+def create_skill(
+    # LLM 模式参数
+    intent: str = None,
+    llm: object = None,
+    # 通用参数
+    name: str = None,
+    dry_run: bool = False,
+    # 直接模式参数（向后兼容）
+    description: str = None,
+    groups: list[str] = None,
+    when_to_use: str = "",
+    argument_hint: str = "",
+    arguments: list[str] = None,
+    body_template: str = "",
+    scripts: dict[str, str] = None,
+    assets: dict[str, str] = None,
+    steps: list = None,
+    skills_dir: str = "skills",
+    # 验证依赖（可选，传入则执行验证）
+    assembler=None,
+    executor=None,
+) -> dict:
+    """创建 skill — 双模式
+
+    LLM 模式（Phase 11 主模式）：
+        传入 intent + llm → LLM 自动生成完整设计
+
+    直接模式（向后兼容）：
+        传入 name + description + ... → 直接调 Creator 写入
+
+    Args:
+        intent: 自然语言意图（LLM 模式）
+        llm: LLM 客户端（LLM 模式）
+        name: 可选，覆盖 LLM 生成的名称，或直接模式必填
+        dry_run: 仅生成 design 不写入（LLM 模式）
+        description/groups/etc: 直接模式参数
+        assembler: Assembler 实例（传入则执行验证）
+        executor: Executor 实例（传入则执行验证）
+
+    Returns:
+        {name, path, status, valid, errors, ...}
+    """
+    from skill_engine.creator.creator import SkillCreator, SkillValidator
+    from skill_engine.routing.discovery import discover
+    from skill_engine.routing.registry import Registry
+
+    # LLM 模式
+    if intent is not None and llm is not None:
+        from skill_engine.creator.designer import SkillDesigner
+
+        designer = SkillDesigner()
+        design = designer.design(intent, llm)
+
+        if name:
+            design["name"] = name
+
+        if dry_run:
+            return {"valid": True, "design": design, "dry_run": True}
+
+        VALID_CREATE_KEYS = {
+            "name", "description", "groups", "when_to_use",
+            "argument_hint", "arguments", "body_template",
+            "scripts", "assets", "steps",
+        }
+        filtered = {k: v for k, v in design.items() if k in VALID_CREATE_KEYS}
+
+        creator = SkillCreator(base_dir=skills_dir)
+        result = creator.create(**filtered)
+        result["name"] = design["name"]
+
+        if result["status"] == "success":
+            index = discover(roots=[skills_dir])
+            registry = Registry(index)
+            skill = registry.load_skill(design["name"])
+            if skill:
+                if assembler and executor:
+                    validator = SkillValidator(assembler, executor)
+                    validation = validator.full_validate(skill)
+                    result["validated"] = True
+                    result["compile_result"] = validation["compile"]
+                    result["scripts_result"] = validation["scripts"]
+                    result["valid"] = validation["valid"]
+                else:
+                    result["validated"] = True
+                    result["valid"] = True
+            else:
+                result["errors"].append("注册失败：无法加载新 skill")
+                result["status"] = "failed"
+                result["valid"] = False
+        else:
+            result["validated"] = False
+            result["valid"] = False
+
+        return result
+
+    # 直接模式（向后兼容）
+    assert name is not None, "直接模式需要提供 name 参数"
+
+    creator = SkillCreator(base_dir=skills_dir)
+    bt = body_template
+    if not bt and (steps or arguments):
+        bt = ""  # 触发结构化 body
+    elif not bt:
+        bt = default_body_template(name, description or "")
+
+    result = creator.create(
+        name=name,
+        description=description or "",
+        groups=groups,
+        when_to_use=when_to_use,
+        argument_hint=argument_hint,
+        arguments=arguments,
+        body_template=bt,
+        scripts=scripts,
+        assets=assets,
+        steps=steps,
+    )
+
+    if result["status"] == "success":
+        index = discover(roots=[skills_dir])
+        registry = Registry(index)
+        skill = registry.load_skill(name)
+        if skill:
+            if assembler and executor:
+                validator = SkillValidator(assembler, executor)
+                validation = validator.full_validate(skill)
+                result["validated"] = True
+                result["compile_result"] = validation["compile"]
+                result["scripts_result"] = validation["scripts"]
+                result["valid"] = validation["valid"]
+            else:
+                result["validated"] = True
+                result["valid"] = True
+        else:
+            result["errors"].append("注册失败：无法加载新 skill")
+            result["status"] = "failed"
+            result["valid"] = False
+    else:
+        result["validated"] = False
+        result["valid"] = False
+
+    return result
+
+
+def register_new_skill(skill_dir: str, skills_dir: str = "skills") -> Optional[str]:
+    """热注册新 skill 到 registry（无需重启）
+
+    直接从磁盘 discover 并添加到 index。
+
+    Args:
+        skill_dir: skill 目录名（相对于 skills_dir）
+
+    Returns:
+        skill name 或 None
+    """
+    from skill_engine.routing.discovery import discover
+    from skill_engine.routing.registry import Registry
+
+    full_dir = Path(skills_dir) / skill_dir
+    if not full_dir.exists():
+        return None
+
+    index = discover(roots=[skills_dir])
+    name = None
+    for n, meta in index.items():
+        if meta.directory == str(full_dir):
+            name = n
+            break
+
+    return name
