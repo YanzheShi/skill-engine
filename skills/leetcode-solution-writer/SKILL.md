@@ -1,12 +1,13 @@
 ---
 name: leetcode-solution-writer
-description: LeetCode 题解生成助手，用于在 ~/.leetcode/docs/ 目录下创建题解文档。配合斜杠命令调用，在刷完题并通过 OJ 后使用。根据当前打开的题目文件解析题号，使用 fetch_problem.py 获取题目信息，基于 solution-template.md 模板创建题解文件，然后结合对话历史交互式迭代生成完整题解。触发场景：(1) 用户显式调用斜杠命令（如 /leetcode-writeup），(2) 刷题完成后说"生成题解"或"写题解"，(3) 其他需要创建或补充 LeetCode 题解的场景。
+description: LeetCode 题解生成助手，用于在 ~/.leetcode/docs/ 目录下创建题解文档。注意：~/.leetcode 是题解产出目录，不是工作目录。脚本和模板都在 skill 当前目录下，不要 cd 到 ~/.leetcode 再执行脚本。配合斜杠命令调用，在刷完题并通过 OJ 后使用。根据当前打开的题目文件解析题号，使用 fetch_problem.py 获取题目信息，基于 solution-template.md 模板创建题解文件，然后结合对话历史交互式迭代生成完整题解。触发场景：(1) 用户显式调用斜杠命令（如 /leetcode-writeup），(2) 刷题完成后说"生成题解"或"写题解"，(3) 其他需要创建或补充 LeetCode 题解的场景。
 groups: [leetcode, programming]
 ---
 
 # LeetCode 题解生成助手
 
-用于配合 VSCode LeetCode 插件，在 `~/.leetcode/docs/` 目录下创建题解文档。
+在 `~/.leetcode/docs/` 目录下创建题解文档。
+用户请求：$ARGUMENTS
 
 ## 核心工作流程
 
@@ -14,34 +15,38 @@ groups: [leetcode, programming]
 
 **你必须按以下顺序尝试获取题号，一旦成功就立即停止搜索，不要再尝试其他方式：**
 
-1. **首选：从 `$ARGUMENTS` 参数中获取**（如 `49`、`group-anagrams`）
-   - 如果 `$ARGUMENTS` 包含数字 → 那就是题号
-   - 如果 `$ARGUMENTS` 包含英文单词 → 那就是 title slug
+1. **首选：从上方「用户请求」中获取题号
+   - 如果用户输入包含数字 → 那就是题号
+   - 如果用户输入包含英文单词 → 那就是 title slug
    - **拿到题号后直接进入第二步，不要做任何文件搜索！**
 
-2. **备选：从对话上下文中获取**（如果 `$ARGUMENTS` 中没有明确题号）
+2. **备选：从对话上下文中获取**（如果用户输入中没有明确题号）
    - 回顾之前的对话，看用户是否提到过题号或题目名称
 
 3. **最后手段：搜索本地文件**（仅当前两步都失败时）
-   - 仅在 `$ARGUMENTS` 完全无法提取题号时，才使用 `find` / `dir` 等命令搜索本地文件
+   - 仅在前面步骤完全无法提取题号时，才使用 `find` / `dir` 等命令搜索本地文件
    - **禁止**盲目搜索整个文件系统（如 `find / -name ...`）
    - **禁止**反复验证同一个文件的存在性或内容
 
-> ⚠️ **重要提醒**：用户每次调用你时，题号一定在 `$ARGUMENTS` 中。不要浪费时间搜索文件，除非用户明确要求你查找本地文件。
+> ⚠️ **重要提醒**：用户每次调用你时，题号一定在用户消息中。不要浪费时间搜索文件，除非用户明确要求你查找本地文件。
 
 ### 第二步：获取题目信息
 
-拿到题号后，**立即**执行：
+拿到题号后，**立即**在当前目录下执行：
 
 ```bash
 python scripts/fetch_problem.py 49
 ```
+
+**重要：当前工作目录就是 skill 目录，脚本就在当前目录的 scripts/ 下。不要 cd 到 ~/.leetcode！不要自行添加 cd 命令！直接在 skill 目录下执行脚本。**
 
 直接传入题号，不要先搜索文件再执行脚本。
 
 脚本直接调用 LeetCode GraphQL API 获取题目数据，无需外部依赖。
 
 ### 第三步：创建题解目录和文件
+
+**注意**：`~/.leetcode/` 是 write_file 的输出路径，不是 bash 的工作目录。不要先 cd 到 ~/.leetcode 再执行操作。
 
 在 `~/.leetcode/docs/` 下创建目录结构：
 ```
@@ -255,7 +260,7 @@ AI: 已创建题解文件，基于历史对话提取了 4 个思路：
 
     题解已按模板格式生成，记录了完整的思考历程和情景细节。
 
-    查看文件：/home/yuming/.leetcode/docs/49. 字母异位词分组/题解.md
+    查看文件：`~/.leetcode/docs/{题号}. {题目标题}/题解.md`
 ```
 
 ## 代码注释规范
@@ -406,6 +411,11 @@ int hash(string str) {
 
 ## 注意事项
 
+0. **执行位置（最重要）**：
+   - 当前工作目录就是 skill 目录，`scripts/fetch_problem.py` 和 `assets/solution-template.md` 都在当前目录下
+   - **绝对不要** `cd ~/.leetcode` 再执行脚本——`~/.leetcode` 只是 write_file 的输出目标，不是脚本所在位置
+   - 拿到题号后直接用 `python3 scripts/fetch_problem.py <题号>` 执行，不要加任何 cd 前缀
+
 1. **模板文件路径**：
    - 题解模板固定位置：`assets/solution-template.md`
    - 必须严格按照模板的 markdown 结构生成
@@ -445,10 +455,11 @@ int hash(string str) {
 - ❌ 反复搜索同一个文件是否存在（如多次 `find`、`dir`、`ls`）
 - ❌ 读取文件后再次 `cat` / `type` / `Get-Content` 验证内容
 - ❌ 在不同路径之间来回尝试（如 `~/.leetcode`、`C:\Users\`、`/tmp/`、`/`）
-- ❌ 在 `$ARGUMENTS` 已经包含题号的情况下还去搜索本地文件
+- ❌ 自行添加 `cd ~/.leetcode` 或 `cd ~` 等命令——当前工作目录已经是 skill 目录，脚本和模板直接可用
+- ❌ 在用户输入已经包含题号的情况下还去搜索本地文件
 - ❌ 写了一半文件后又去读取刚写的文件来"确认"
 
 **正确的做法：**
-1. `$ARGUMENTS` 里有题号 → 直接 `python scripts/fetch_problem.py <题号>`
+1. 用户输入里有题号 → 直接 `python scripts/fetch_problem.py <题号>`
 2. 拿到题目数据 → 直接 `write_file` 创建题解文件
 3. 文件写入完成 → 返回最终答案，**不要**再去 `cat` 或 `type` 验证
