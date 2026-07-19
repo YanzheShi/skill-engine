@@ -21,6 +21,7 @@ from typing import Optional
 from skill_engine.models import MatchPlan, SelectedSkill, MergedMeta
 
 logger = logging.getLogger("skill_engine.router")
+from skill_engine.config import get_llm, ROUTER_LLM
 from skill_engine.routing.registry import Registry
 from skill_engine.routing.scoring import score_keyword
 from skill_engine.routing.tokenize import tokenize_query, is_english, PROPER_EN
@@ -112,8 +113,7 @@ class Router:
         Returns:
             MatchPlan
         """
-        if self.verbose:
-                    logger.info(f"Router 开始: query={query}")
+        logger.info(f"Router 开始: query={query}")
 
         # ──────────────────────────────────────────────
         # 1️⃣ 精确：name / alias / shortcut
@@ -168,11 +168,14 @@ class Router:
                 logger.info(f"  keyword {name}: {s:.3f}")
 
         kws.sort(key=lambda x: x[0], reverse=True)
-        if self.verbose:
-            if kws:
-                logger.info(f"keyword 候选: {len(kws)} 个, 最高={kws[0][0]:.3f} ({kws[0][1]})")
-            else:
-                logger.info("keyword 候选: 0 个")
+        # 始终输出 keyword 匹配概况
+        if kws:
+            top3 = ', '.join(f"{n}({s:.3f})" for s, n in kws[:3])
+            logger.info(f"keyword 匹配: {len(kws)} 个候选, top3: {top3}")
+            if len(kws) >= 2:
+                logger.info(f"  top1 领先 top2: {kws[0][0] - kws[1][0]:.3f}")
+        else:
+            logger.info("keyword 匹配: 0 个候选")
 
         # ──────────────────────────────────────────────
         # 3️⃣ 决定要不要 LLM（三触发）
@@ -185,13 +188,11 @@ class Router:
             except Exception:
                 _llm = None
             if not _llm:
-                if self.verbose:
-                    logger.info("  LLM 不可用，跳过兜底")
+                logger.info("  LLM 不可用，跳过兜底")
             else:
                 # 裁断：top1 领先 top2 超过 0.5 时直接定 single，不走 LLM
                 if len(kws) >= 2 and kws[0][0] - kws[1][0] > 0.5:
-                    if self.verbose:
-                        logger.info(f"  → {kws[0][1]} ({kws[0][0]:.3f}) 领先 {kws[1][1]} ({kws[1][0]:.3f}) >0.5，直接定 single")
+                    logger.info(f"  top1 领先 >0.5，跳过 LLM: {kws[0][1]} ({kws[0][0]:.3f}) vs {kws[1][1]} ({kws[1][0]:.3f})")
                     return MatchPlan(
                         mode="single",
                         primary=SelectedSkill(name=kws[0][1]),
@@ -199,8 +200,7 @@ class Router:
                         score=kws[0][0],
                     )
 
-                if self.verbose:
-                    logger.info(f"  触发 LLM 兜底: {reason}")
+                logger.info(f"  触发 LLM 兜底: {reason}")
                 plan = self._llm_fallback(query, llm_candidates, _llm, kws)
                 if plan:
                     return plan
@@ -214,8 +214,7 @@ class Router:
                 reason="无匹配 skill",
                 uncertain=True,
             )
-            if self.verbose:
-                logger.info(f"  → 无匹配: {plan.reason}")
+            logger.info(f"  无匹配: {plan.reason}")
             return plan
 
         # 多候选退化：返 top1 但标 uncertain
@@ -226,8 +225,7 @@ class Router:
             score=kws[0][0],
             uncertain=True,
         )
-        if self.verbose:
-            logger.info(f"  → {kws[0][1]} ({kws[0][0]:.3f}) uncertain")
+        logger.info(f"  退回 keyword 结果: {kws[0][1]} ({kws[0][0]:.3f})，标 uncertain")
         return plan
 
     # ================================================================
@@ -264,10 +262,12 @@ class Router:
             return True, active, "0 命中"
 
         if len(kws) == 1 and kws[0][0] >= THRESH_SINGLE:
+            logger.info(f"  单候选 {kws[0][1]} 分 {kws[0][0]:.3f} >= {THRESH_SINGLE}，跳过 LLM")
             return False, [], ""
 
         candidates = [k[1] for k in kws[:10]]
         if len(kws) == 1:
+            logger.info(f"  单候选 {kws[0][1]} 分 {kws[0][0]:.3f} < {THRESH_SINGLE}，触发 LLM 兜底")
             return True, candidates, f"单候选分低 {kws[0][0]}"
         return True, candidates, "多候选，LLM 决定 single/multi"
 
