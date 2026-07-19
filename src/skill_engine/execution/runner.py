@@ -14,6 +14,7 @@ Runner — Skill 执行器，三路分流
 >>> print(result["output"])
 """
 
+import os
 import re
 import time
 import yaml
@@ -22,7 +23,6 @@ from typing import Optional
 from langchain_core.tools import tool
 from skill_engine.models import Skill, MatchResult, Step
 from skill_engine.execution.assembler import Assembler
-from skill_engine.security.scanner import should_approve, _is_approved, _is_blocked, _save_approval, _save_blocklist
 from skill_engine.security.scanner import should_approve, _is_approved, _is_blocked, _save_approval, _save_blocklist
 from skill_engine.execution.executor import Executor
 
@@ -36,7 +36,14 @@ from skill_engine.execution.executor import Executor
 
 @tool
 def bash(command: str) -> str:
-    """Execute a shell command and return stdout. If the output is very long, it will be truncated."""  # noqa: E501
+    """Execute a shell command and return stdout.
+
+    Note: On Windows the runtime is cmd.exe, not bash.
+    - Use `python` (not python3) for scripts.
+    - Do NOT use `mkdir -p`, just `mkdir`.
+    - Paths with spaces must be quoted.
+    - Do NOT use multi-line `python -c` commands.
+    """  # noqa: E501
 
 
 @tool
@@ -107,6 +114,36 @@ class Runner:
         self.llm_model = llm_model
         self._session_approvals: dict[str, bool] = {}  # op_str → True(允许) / False(拒绝)
         self._session_allow_all: bool = False  # 全部允许（A 键）
+
+    @staticmethod
+    def _format_observation(cmd: str, exec_result: dict) -> str:
+        """格式化 bash 执行结果为结构化 observation，包含 exit_code 等关键字段
+
+        让 LLM 能区分"成功"（exit_code: 0）和"失败"（exit_code: 非零），
+        避免空 stdout 时 LLM 无谓重试。
+
+        Args:
+            cmd: 原始命令
+            exec_result: executor.run_step() 返回的结果 dict
+
+        Returns:
+            格式化后的 observation 字符串（≤10000 chars）
+        """
+        exit_code = exec_result.get("exit_code", -1)
+        stdout = exec_result.get("stdout", "")
+        stderr = exec_result.get("stderr", "")
+        timed_out = exec_result.get("timed_out", False)
+
+        lines = [f"exit_code: {exit_code}"]
+        if timed_out:
+            lines.append("(timed_out)")
+        if stdout:
+            lines.append("stdout:")
+            lines.append(stdout[:8000])
+        if stderr:
+            lines.append("stderr:")
+            lines.append(stderr[:500])
+        return "\n".join(lines)[:10000]
 
     def _run_llm_once(self, skill: Skill, arguments: dict, llm) -> dict:
         """档位 A：单次 LLM 调用（CC 原生 skill 兜底）
@@ -779,6 +816,7 @@ class Runner:
                             "name": "bash",
                             "content": "[安全拦截] tool_dispatch 命令不自动执行",
                         })
+                        print(f"    → BLOCKED: {cmd[:80]}")
                         continue
                     elif decision == "ATTENTION":
                         approved = self._check_approval(
@@ -800,23 +838,30 @@ class Runner:
                                 "name": "bash",
                                 "content": "[用户跳过] 操作已取消",
                             })
+                            print(f"    → REJECTED by user: {cmd[:80]}")
                             continue
                     # SAFE 或审批通过：执行命令
                     try:
                         exec_result = self.executor.run_step(cmd, cwd=Path(skill.directory))
-                        output = exec_result.get("stdout", "") or exec_result.get("stderr", "")
+                        obs = self._format_observation(cmd, exec_result)
                         step_results.append({
                             "name": f"bash_{tc['id']}",
                             "type": "bash",
                             "command": cmd,
-                            "output": output[:500],
+                            "output": obs[:500],
                         })
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "name": "bash",
-                            "content": output[:2000],
+                            "content": obs,
                         })
+                        # 换行打印：exit_code 一行，stdout/stderr 缩进
+                        obs_lines = obs.split("\n")
+                        print(f"    → {obs_lines[0]}")
+                        for ol in obs_lines[1:]:
+                            if ol.strip():
+                                print(f"      {ol}")
                     except Exception as e:
                         step_results.append({
                             "name": f"bash_{tc['id']}",
@@ -831,47 +876,107 @@ class Runner:
                             "name": "bash",
                             "content": f"[执行失败: {e}]",
                         })
+                        print(f"    → ERROR: {e}")
 
                 elif tc["type"] == "read_file":
                     filepath = tc["input"].get("path", "")
-                    full_path = Path(skill.directory) / filepath
-                    try:
-                        content = full_path.read_text(encoding="utf-8")
-                        step_results.append({
-                            "name": f"read_{tc['id']}",
-                            "type": "read_file",
-                            "path": str(full_path),
-                            "output": content[:1000],
-                        })
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "content": content,
-                        })
-                    except FileNotFoundError:
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc["id"],
-                            "content": f"[文件不存在: {filepath}]",
-                        })
+                    # WSL 模式：/home/andre/... 或 ~ 路径走 WSL bash 读取
+                    if (filepath.startswith("/") or filepath.startswith("~")) and self.executor.shell == "wsl":
+                        try:
+                            content = self.executor.wsl_read_file(filepath)
+                            step_results.append({
+                                "name": f"read_{tc['id']}",
+                                "type": "read_file",
+                                "path": filepath,
+                                "output": content[:1000],
+                            })
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "read_file",
+                                "content": content,
+                            })
+                            print(f"    → read {len(content)} chars from {filepath}")
+                        except FileNotFoundError:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "read_file",
+                                "content": f"[文件不存在: {filepath}]",
+                            })
+                    else:
+                        # cmd 模式：展开 ~ 为 Windows 用户目录
+                        efp = filepath
+                        if efp.startswith("~/"):
+                            efp = os.path.expanduser("~") + "/" + efp[2:]
+                        elif efp == "~" or efp.startswith("~"):
+                            efp = os.path.expanduser("~") + efp[1:]
+                        full_path = Path(skill.directory) / efp
+                        try:
+                            content = full_path.read_text(encoding="utf-8")
+                            step_results.append({
+                                "name": f"read_{tc['id']}",
+                                "type": "read_file",
+                                "path": str(full_path),
+                                "output": content[:1000],
+                            })
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "read_file",
+                                "content": content,
+                            })
+                            print(f"    → read {len(content)} chars from {filepath}")
+                        except FileNotFoundError:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "read_file",
+                                "content": f"[文件不存在: {filepath}]",
+                            })
 
                 elif tc["type"] == "write_file":
                     filepath = tc["input"].get("path", "")
                     content = tc["input"].get("content", "")
-                    full_path = Path(skill.directory) / filepath
-                    full_path.parent.mkdir(parents=True, exist_ok=True)
-                    full_path.write_text(content, encoding="utf-8")
-                    files_created.append(str(full_path))
-                    step_results.append({
-                        "name": f"write_{tc['id']}",
-                        "type": "write_file",
-                        "path": str(full_path),
-                    })
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": "ok",
-                    })
+                    # WSL 模式：/home/andre/... 或 ~ 路径走 WSL bash 写入
+                    if (filepath.startswith("/") or filepath.startswith("~")) and self.executor.shell == "wsl":
+                        self.executor.wsl_write_file(filepath, content)
+                        files_created.append(filepath)
+                        step_results.append({
+                            "name": f"write_{tc['id']}",
+                            "type": "write_file",
+                            "path": filepath,
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "name": "write_file",
+                            "content": f"wrote {len(content)} bytes to {filepath}",
+                        })
+                        print(f"    → wrote {len(content)} bytes to {filepath}")
+                    else:
+                        # cmd 模式：展开 ~ 为 Windows 用户目录
+                        efp = filepath
+                        if efp.startswith("~/"):
+                            efp = os.path.expanduser("~") + "/" + efp[2:]
+                        elif efp == "~" or efp.startswith("~"):
+                            efp = os.path.expanduser("~") + efp[1:]
+                        full_path = Path(skill.directory) / efp
+                        full_path.parent.mkdir(parents=True, exist_ok=True)
+                        full_path.write_text(content, encoding="utf-8")
+                        files_created.append(str(full_path))
+                        step_results.append({
+                            "name": f"write_{tc['id']}",
+                            "type": "write_file",
+                            "path": str(full_path),
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "name": "write_file",
+                            "content": f"wrote {len(content)} bytes to {filepath}",
+                        })
+                        print(f"    → wrote {len(content)} bytes to {filepath}")
 
                 else:
                     messages.append({
@@ -1077,7 +1182,8 @@ class Runner:
 
             # 调用 LLM 执行该 skill
             try:
-                output = llm.invoke(prompt)
+                resp = llm.invoke(prompt)
+                output = resp.content if hasattr(resp, "content") else str(resp)
                 chain_results.append({
                     "skill": skill_name,
                     "status": "success",

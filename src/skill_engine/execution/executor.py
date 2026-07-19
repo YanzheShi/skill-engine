@@ -62,13 +62,46 @@ class Executor:
         self.allowlist = allowlist or self.DEFAULT_ALLOWLIST
         self.max_output = max_output
         self.allow_all = allow_all  # MVP 设为 True，V0.2 改为 False
-        # 自动检测 shell：Windows 用 cmd，Linux/macOS 用 bash
+        # 自动检测 shell：Windows 优先用 WSL bash，否则 cmd；Linux/macOS 用 bash
         if shell is not None:
             self.shell = shell
         elif os.name == "nt":
-            self.shell = "cmd"
+            self.shell = self._detect_wsl_shell()
         else:
             self.shell = "bash"
+
+    @staticmethod
+    def _detect_wsl_shell() -> str:
+        """检测 shell 模式
+        
+        - 在 WSL 内部运行（WSL_DISTRO_NAME 存在）：用原生 bash
+        - 在 Windows 上：用 cmd（即使 wsl.exe 可用也不用，文件应写入 Windows 文件系统）
+        """
+        if os.environ.get("WSL_DISTRO_NAME"):
+            return "bash"
+        return "cmd"
+
+    @staticmethod
+    def _to_wsl_path(win_path: str) -> str:
+        """转换 Windows 路径为 WSL 路径：D:\\Code\\... → /mnt/d/code/..."""
+        p = Path(win_path)
+        drive = p.drive.lower().rstrip(":")
+        rest = str(p.relative_to(p.anchor)).replace("\\", "/")
+        return f"/mnt/{drive}/{rest}"
+
+    @staticmethod
+    def _wsl_quote_path(path: str) -> str:
+        """Quote 路径供 WSL bash 使用，保留 ~ 展开能力
+        
+        shlex.quote 会把 ~ 也包在单引号里导致 bash 不展开。
+        这里把 ~ 部分单独保留不 quote，只 quote 后面的路径部分。
+        """
+        if path.startswith("~/"):
+            rest = shlex.quote(path[2:])  # '.leetcode/docs/...'
+            return f"~/{rest}"             # ~/'.leetcode/docs/...'
+        elif path == "~":
+            return "~"
+        return shlex.quote(path)
 
     def run_preprocess(self, command: str, cwd: Path, multiline: bool = False) -> dict:
         """预处理型执行 — 给 Assembler 用
@@ -119,21 +152,40 @@ class Executor:
 
         try:
             env = self._build_env(cwd)
-            # Windows shell=True 时需要用 cmd /c，Linux 用 bash -c
-            if self.shell == "cmd":
+            if self.shell == "wsl":
+                # WSL bash：所有 Unix 路径语法直接工作
+                # 用 wsl.exe --cd 设置工作目录，不出现在命令字符串中
+                wsl_cwd = self._to_wsl_path(str(cwd))
+                full_cmd = command
+                proc = subprocess.run(
+                    ["wsl.exe", "--cd", wsl_cwd, "bash", "-c", full_cmd],
+                    capture_output=True,
+                    text=False,
+                    timeout=effective_timeout,
+                    env=env,
+                )
+            elif self.shell == "cmd":
                 full_cmd = f'cmd /c "{command}"'
+                proc = subprocess.run(
+                    full_cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=False,
+                    timeout=effective_timeout,
+                    cwd=str(cwd),
+                    env=env,
+                )
             else:
                 full_cmd = f"{self.shell} -c {shell_quote(command)}"
-            # 先以二进制获取输出（不指定编码）
-            proc = subprocess.run(
-                full_cmd,
-                shell=True,
-                capture_output=True,
-                text=False,  # 不自动解码，我们手动处理
-                timeout=effective_timeout,
-                cwd=str(cwd),
-                env=env,
-            )
+                proc = subprocess.run(
+                    full_cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=False,
+                    timeout=effective_timeout,
+                    cwd=str(cwd),
+                    env=env,
+                )
 
             # 手动解码：先试 UTF-8，失败回退到系统编码
             raw_stdout = proc.stdout[:self.max_output] if proc.stdout else b""
@@ -156,7 +208,7 @@ class Executor:
         except subprocess.TimeoutExpired:
             return {
                 "stdout": "",
-                "stderr": f"[超时: {self.timeout}s]",
+                "stderr": f"[超时: {effective_timeout}s]",
                 "exit_code": -1,
                 "timed_out": True,
             }
@@ -167,6 +219,51 @@ class Executor:
                 "exit_code": -1,
                 "timed_out": False,
             }
+
+    def wsl_read_file(self, path: str) -> str:
+        """通过 WSL bash 读取文件（处理 WSL 绝对路径和 ~ 路径）
+        
+        Args:
+            path: WSL 路径（如 /home/andre/.leetcode/docs/题解.md 或 ~/.leetcode/...）
+            
+        Returns:
+            文件内容字符串
+            
+        Raises:
+            FileNotFoundError: 文件不存在
+        """
+        dest = self._wsl_quote_path(path)
+        result = subprocess.run(
+            ["wsl.exe", "bash", "-c", f"cat {dest}"],
+            capture_output=True, timeout=self.timeout,
+        )
+        if result.returncode != 0:
+            raise FileNotFoundError(f"WSL path not found: {path}")
+        return result.stdout.decode("utf-8", errors="replace")
+
+    def wsl_write_file(self, path: str, content: str) -> None:
+        """通过 WSL bash 写入文件（处理 WSL 绝对路径和 ~ 路径）
+        
+        Args:
+            path: WSL 路径（如 /home/andre/.leetcode/docs/题解.md 或 ~/.leetcode/...）
+            content: 文件内容
+            
+        Raises:
+            IOError: 写入失败
+        """
+        import base64, os
+        encoded = base64.b64encode(content.encode("utf-8")).decode()
+        dest = self._wsl_quote_path(path)
+        # 在 Python 端计算目录路径，避免 bash 中 $(dirname) 的单词分割问题
+        dir_path = self._wsl_quote_path(os.path.dirname(path))
+        cmd = f"mkdir -p {dir_path} && echo {encoded} | base64 -d > {dest}"
+        result = subprocess.run(
+            ["wsl.exe", "bash", "-c", cmd],
+            capture_output=True,
+            timeout=self.timeout,
+        )
+        if result.returncode != 0:
+            raise IOError(f"WSL write failed: {result.stderr.decode('utf-8', errors='replace')}")
 
     def _is_safe(self, command: str, allowlist: set[str]) -> bool:
         """检查命令是否安全（白名单检查）
@@ -187,8 +284,10 @@ class Executor:
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
         env["LANG"] = "C.UTF-8"
-        env["HOME"] = str(cwd)
+        # 不覆盖 HOME，保留系统真实用户目录
+        # env["HOME"] = str(cwd)  # 已删除：子进程 HOME 应指向用户目录，而非 skill 目录
         sep = ";" if os.name == "nt" else ":"
         env["PATH"] = f"{cwd}/scripts{sep}{cwd}{sep}{env.get('PATH', '/usr/bin:/bin')}"
         return env

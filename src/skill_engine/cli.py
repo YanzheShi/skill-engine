@@ -356,17 +356,6 @@ def run(
         print(f"{'='*60}")
     else:
         print(f"Skill: {result['skill_name']}")
-        print(f"分数: {result.get('score', 0):.2f}")
-        if 'steps' in result and result['steps']:
-            print(f"步骤:")
-            for s in result['steps']:
-                status = "OK" if s.get("exit_code", 0) == 0 or s.get("type") in ("llm", "write") else f"ERR(exit={s.get('exit_code')})"
-                print(f"  - {s.get('name')} ({s.get('type')}): {status}")
-                if 'output' in s and s['output']:
-                    out = str(s['output'])[:200]
-                    print(f"    输出: {out}")
-                if 'error' in s and s['error']:
-                    print(f"    错误: {str(s['error'])[:200]}")
         if 'iterations' in result:
             print(f"迭代: {result['iterations']} 次")
         print(f"{'='*60}")
