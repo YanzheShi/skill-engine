@@ -359,10 +359,22 @@ class Runner:
         max_iterations: int = 10,
     ) -> dict:
         """档位 B：tool_dispatch 循环 — 委派给 ToolDispatchRunner"""
+        # 读取 human_in_loop 配置（从 SKILL.md frontmatter 或 .skill-local.yaml）
+        from skill_engine.models import TurnPolicy
+        from skill_engine.execution.human_io import CliHumanIO
+
+        human_io = None
+        turn_policy = None
+        if match_result.skill.metadata.human_in_loop:
+            human_io = CliHumanIO()
+            turn_policy = TurnPolicy(**(match_result.skill.metadata.turn_policy or {}))
+
         td_runner = tool_dispatch.ToolDispatchRunner(
             executor=self.executor,
             assembler=self.assembler,
             approval_fn=self._check_approval,
+            human_io=human_io,
+            turn_policy=turn_policy,
         )
         return td_runner.run(match_result, llm, max_iterations)
 

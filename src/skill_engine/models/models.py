@@ -7,7 +7,7 @@ Skills Engine 数据模型
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Literal
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class SkillContext(str, Enum):
@@ -28,6 +28,73 @@ class SkillMeta:
     priority: int = 0  # 越高越优先
     state: str = "on"  # 受 skillOverrides 影响
     trust_tag: Optional[str] = None  # trusted / untrusted / None（来源标注）
+
+
+@dataclass
+class TurnPolicy:
+    """多轮对话的终止策略
+
+    max_turns: 最大轮数（防无限循环）
+    user_exit: 用户输入这些关键词时结束
+    stop_when: LLM 输出包含这些字符串时自动结束（不追问用户）
+    """
+    max_turns: int = 20
+    user_exit: list[str] = field(default_factory=lambda: ["/done", "/exit", "结束"])
+    stop_when: Optional[list[str]] = None  # 接受 str 或 list[str]，__post_init__ 统一
+
+    def __post_init__(self):
+        """统一 stop_when 为 list[str]"""
+        if self.stop_when is not None and isinstance(self.stop_when, str):
+            self.stop_when = [self.stop_when]
+
+    def should_stop(self, text: str) -> bool:
+        """LLM 输出是否包含结束信号？
+        
+        如果 stop_when 中的任意字符串出现在 text 中，返回 True。
+        """
+        if not self.stop_when:
+            return False
+        return any(kw in text for kw in self.stop_when)
+
+
+@dataclass
+class RunResult:
+    """tool_dispatch 的返回值，替代裸 dict
+
+    output:  最终文本（LLM 无 tool_calls 时返回的文本 / 超时/错误信息）
+    ctx:     执行上下文（steps 结果、files_created 等）
+    history: 本次完整 messages，含 system/user/assistant/tool
+
+    支持 dict 式访问（result["output"]）和属性访问（result.output），
+    保持向后兼容。
+    """
+    output: Optional[str]
+    ctx: dict
+    history: list[dict]
+
+    def __getitem__(self, key: str):
+        """兼容 dict 式访问：result["output"] → result.output"""
+        if key in ("output", "history"):
+            return getattr(self, key)
+        # ctx 中的 key 直接透传（如 skill_name, iterations, steps 等）
+        if key in self.ctx:
+            return self.ctx[key]
+        raise KeyError(key)
+
+    def get(self, key: str, default=None):
+        """兼容 dict.get()"""
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __contains__(self, key: str) -> bool:
+        """兼容 key in result"""
+        try:
+            self[key]
+            return True
+        except KeyError:
+            return False
 
 
 class SkillMetadata(BaseModel):
@@ -56,6 +123,8 @@ class SkillMetadata(BaseModel):
     alias: Optional[list[str]] = Field(default=None, description="语义别名")
     shortcuts: Optional[list[str]] = Field(default=None, description="命令行缩写")
     intent_verbs: Optional[list[str]] = Field(default=None, description="作者手写意图动词")
+    human_in_loop: bool = Field(default=False, description="启用多轮对话模式（CC 静默忽略）")
+    turn_policy: dict | None = Field(default=None, description="轮次策略配置（CC 静默忽略）")
 
 
 class MergedMeta(BaseModel):
@@ -83,6 +152,9 @@ class MergedMeta(BaseModel):
     alias: Optional[list[str]] = Field(default=None)
     shortcuts: Optional[list[str]] = Field(default=None)
     intent_verbs: Optional[list[str]] = Field(default=None)
+
+    human_in_loop: bool = Field(default=False, description="启用多轮对话模式")
+    turn_policy: dict | None = Field(default=None, description="轮次策略配置")
 
     # 预处理缓存（.skill-meta.yaml 原始内容，score_keyword 用）
     meta_cache: dict = Field(default_factory=dict, description="预处理缓存")
@@ -147,6 +219,8 @@ class Step(BaseModel):
     output_file: Optional[str] = Field(default=None, description="write 类型的输出文件")
     input_ref: Optional[str] = Field(default=None, description="引用前一步的输出")
     timeout: Optional[int] = Field(default=30, description="超时秒数")
+    human_in_loop: bool = Field(default=False, description="V0.2: Steps DSL 路径用")
+    turn_policy: dict | None = Field(default=None, description="V0.2: Steps DSL 路径用")
 
 
 class SkillOverride(BaseModel):

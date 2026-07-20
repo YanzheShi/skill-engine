@@ -392,3 +392,89 @@ class TestToolDispatchIntegration:
         # 应该走 tool_dispatch 而不是档位 A
         assert "dispatch done" in result["output"]
         assert "档位A" not in result["output"]
+
+
+class TestHumanInLoop:
+    """测试 human_in_loop 多轮对话模式"""
+
+    def test_human_in_loop_off(self):
+        """human_in_loop=False: LLM 无 tool_calls 时直接返回，不进入对话"""
+        from skill_engine.execution.runner import Runner
+        from skill_engine.execution.executor import Executor
+        from skill_engine.execution.assembler import Assembler
+        from skill_engine.models import Skill, SkillMetadata, MatchResult
+
+        executor = Executor(timeout=10)
+        assembler = Assembler(executor=executor)
+        runner = Runner(assembler, executor)
+        skill = Skill(
+            metadata=SkillMetadata(name="test", description="测试", human_in_loop=False),
+            body="测试",
+            directory="/tmp",
+        )
+        match = MatchResult(skill=skill, score=1.0, method="name", arguments={})
+        llm = MockLLMWithTools(["最终答案"])
+
+        result = runner.run(match, tool_dispatch=llm, max_iterations=5)
+        assert result["output"] == "最终答案"
+        assert result["stopped_by"] == "stop"
+
+    def test_turn_policy_should_stop(self):
+        """TurnPolicy.should_stop 匹配 stop_when"""
+        from skill_engine.models import TurnPolicy
+
+        policy = TurnPolicy(stop_when=["已完成", "结束"])
+        assert policy.should_stop("访谈已完成")
+        assert policy.should_stop("结束面试")
+        assert not policy.should_stop("继续提问")
+
+    def test_turn_policy_should_stop_string(self):
+        """TurnPolicy stop_when 接受 str，自动转 list"""
+        from skill_engine.models import TurnPolicy
+
+        policy = TurnPolicy(stop_when="已完成")
+        assert policy.should_stop("访谈已完成")
+        assert not policy.should_stop("继续提问")
+
+    def test_turn_policy_should_stop_none(self):
+        """TurnPolicy stop_when=None 时 should_stop 返回 False"""
+        from skill_engine.models import TurnPolicy
+
+        policy = TurnPolicy(stop_when=None)
+        assert not policy.should_stop("任何文本")
+
+    def test_turn_policy_max_turns(self):
+        """TurnPolicy max_turns 默认值"""
+        from skill_engine.models import TurnPolicy
+
+        policy = TurnPolicy()
+        assert policy.max_turns == 20
+        assert "/done" in policy.user_exit
+        assert "/exit" in policy.user_exit
+
+    def test_run_result_dict_access(self):
+        """RunResult 支持 dict 式访问 result["output"]"""
+        from skill_engine.models import RunResult
+        from skill_engine.models import TurnPolicy
+
+        result = RunResult(
+            output="测试输出",
+            ctx={"steps": [], "files_created": [], "iterations": 1, "stopped_by": "stop", "skill_name": "test"},
+            history=[{"role": "system", "content": "test"}],
+        )
+        assert result["output"] == "测试输出"
+        assert result["iterations"] == 1
+        assert result["stopped_by"] == "stop"
+        assert result.get("nonexistent") is None
+
+    def test_run_result_attr_access(self):
+        """RunResult 支持属性访问 result.output"""
+        from skill_engine.models import RunResult
+
+        result = RunResult(
+            output="测试输出",
+            ctx={"steps": []},
+            history=[],
+        )
+        assert result.output == "测试输出"
+        assert result.history == []

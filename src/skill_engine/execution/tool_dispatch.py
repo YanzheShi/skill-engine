@@ -17,10 +17,11 @@ import logging
 from pathlib import Path
 from typing import Optional, Callable
 
-from skill_engine.models import Skill, MatchResult
+from skill_engine.models import Skill, MatchResult, TurnPolicy, RunResult
 from skill_engine.execution.assembler import Assembler
 from skill_engine.execution.executor import Executor
 from skill_engine.execution.tool_defs import TOOL_DISPATCH_TOOLS
+from skill_engine.execution.human_io import HumanIO
 from skill_engine.security.scanner import should_approve
 
 
@@ -105,7 +106,7 @@ class ToolDispatchRunner:
     1. 编译 final prompt 作为 system message
     2. 调用 LLM(llm.invoke(messages)) → 返回 {content, tool_calls}
     3. 有 tool_calls → Executor 执行 → 追加 tool message → 回到 2
-    4. 无 tool_calls → LLM 返回最终答案 → 结束
+    4. 无 tool_calls → 判断 human_in_loop → 问用户 / 结束
     """
 
     def __init__(
@@ -113,10 +114,14 @@ class ToolDispatchRunner:
         executor: Executor,
         assembler: Assembler,
         approval_fn: Optional[Callable] = None,
+        human_io: Optional[HumanIO] = None,
+        turn_policy: Optional[TurnPolicy] = None,
     ):
         self.executor = executor
         self.assembler = assembler
         self.approval_fn = approval_fn  # Runner._check_approval 回调
+        self.human_io = human_io
+        self.turn_policy = turn_policy
 
     def run(
         self,
@@ -170,25 +175,19 @@ class ToolDispatchRunner:
                         wait_time = 3 * (attempt + 1)
                         time.sleep(wait_time)
                         if attempt == max_retries - 1:
-                            return {
-                                "skill_name": skill.metadata.name,
-                                "score": 1.0,
-                                "steps": step_results,
-                                "output": f"[LLM 调用被限流（已重试 {max_retries} 次）: {err_str}]",
-                                "files_created": files_created,
-                                "iterations": iterations,
-                                "stopped_by": "rate_limited",
-                            }
+                            return RunResult(
+                                output=f"[LLM 调用被限流（已重试 {max_retries} 次）: {err_str}]",
+                                ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
+                                     "iterations": iterations, "stopped_by": "rate_limited"},
+                                history=messages[:] if 'messages' in dir() else [],
+                            )
                     else:
-                        return {
-                            "skill_name": skill.metadata.name,
-                            "score": 1.0,
-                            "steps": step_results,
-                            "output": f"[LLM 调用失败: {err_str}]",
-                            "files_created": files_created,
-                            "iterations": iterations,
-                            "stopped_by": "error",
-                        }
+                        return RunResult(
+                            output=f"[LLM 调用失败: {err_str}]",
+                            ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
+                                 "iterations": iterations, "stopped_by": "error"},
+                            history=messages[:] if 'messages' in dir() else [],
+                        )
 
             # 每轮 LLM 调用之间加短暂延迟，降低触发 rate limit 的概率
             time.sleep(0.5)
@@ -211,18 +210,57 @@ class ToolDispatchRunner:
                     print(f"    - {tc['type']}: {tc['input']}")
 
             if not tool_calls:
-                # LLM 返回最终答案，停止
-                messages.append({"role": "assistant", "content": resp.get("content", "")})
-                step_results.append({"name": "llm_response", "type": "llm", "output": resp.get("content", "")})
-                return {
-                    "skill_name": skill.metadata.name,
-                    "score": 1.0,
-                    "steps": step_results,
-                    "output": resp.get("content", ""),
-                    "files_created": files_created,
-                    "iterations": iterations,
-                    "stopped_by": "stop",
-                }
+                text = resp.get("content", "")
+                messages.append({"role": "assistant", "content": text})
+
+                if self.human_io and self.turn_policy:
+                    # 多轮对话模式
+                    if self.turn_policy.should_stop(text):
+                        # LLM 说完了 → 直接结束，不追问用户
+                        step_results.append({"name": "llm_response", "type": "llm", "output": text})
+                        return RunResult(
+                            output=text,
+                            ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
+                                 "iterations": iterations, "stopped_by": "stop"},
+                            history=messages,
+                        )
+                    else:
+                        # LLM 在问用户 → emit + read + 追 history + 继续
+                        self.human_io.emit(text)
+                        user_input = self.human_io.read()
+
+                        # 用户退出
+                        if user_input in (self.turn_policy.user_exit or []):
+                            step_results.append({"name": "llm_response", "type": "llm", "output": text})
+                            return RunResult(
+                                output=text,
+                                ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
+                                     "iterations": iterations, "stopped_by": "user_exit"},
+                                history=messages,
+                            )
+
+                        # 达到最大轮数
+                        if iterations >= self.turn_policy.max_turns:
+                            step_results.append({"name": "llm_response", "type": "llm", "output": text})
+                            return RunResult(
+                                output=text,
+                                ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
+                                     "iterations": iterations, "stopped_by": "max_turns"},
+                                history=messages,
+                            )
+
+                        # 追加用户回答，继续循环
+                        messages.append({"role": "user", "content": user_input})
+                        continue
+
+                # 非多轮模式：原行为
+                step_results.append({"name": "llm_response", "type": "llm", "output": text})
+                return RunResult(
+                    output=text,
+                    ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
+                         "iterations": iterations, "stopped_by": "stop"},
+                    history=messages,
+                )
 
             # 有 tool_calls，执行每个
             lc_tool_calls = []
@@ -240,15 +278,12 @@ class ToolDispatchRunner:
 
             for tc in tool_calls:
                 if tc["type"] == "stop":
-                    return {
-                        "skill_name": skill.metadata.name,
-                        "score": 1.0,
-                        "steps": step_results,
-                        "output": tc["input"].get("reason", "stopped"),
-                        "files_created": files_created,
-                        "iterations": iterations,
-                        "stopped_by": "tool_stop",
-                    }
+                    return RunResult(
+                        output=tc["input"].get("reason", "stopped"),
+                        ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
+                             "iterations": iterations, "stopped_by": "tool_stop"},
+                        history=messages,
+                    )
 
                 elif tc["type"] == "bash":
                     cmd = tc["input"].get("command", "")
@@ -438,12 +473,9 @@ class ToolDispatchRunner:
                     })
 
         # 达到最大迭代次数
-        return {
-            "skill_name": skill.metadata.name,
-            "score": 1.0,
-            "steps": step_results,
-            "output": "[达到最大迭代次数]",
-            "files_created": files_created,
-            "iterations": iterations,
-            "stopped_by": "max_iterations",
-        }
+        return RunResult(
+            output="[达到最大迭代次数]",
+            ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
+                 "iterations": iterations, "stopped_by": "max_iterations"},
+            history=messages,
+        )
