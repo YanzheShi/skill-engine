@@ -21,16 +21,76 @@ def bash(command: str) -> str:
 
 
 @tool
-def read_file(path: str) -> str:
-    """Read the contents of a file at the given path (relative to the skill directory)."""  # noqa: E501
+def read_file(path: str, offset: int = 0, limit: int = 0) -> str:
+    """Read the contents of a file.
+
+    Supports absolute paths, paths relative to the working directory,
+    and ~/ expansion. Returns content with line numbers.
+    Use offset/limit for pagination on large files.
+    """  # noqa: E501
 
 
 @tool
 def write_file(path: str, content: str) -> str:
-    """Write content to a file at the given path (relative to the skill directory)."""
+    """Write content to a file.
+
+    Supports absolute paths, paths relative to the working directory,
+    and ~/ expansion. Creates parent directories automatically.
+    For new files only. To modify an existing file, use edit_file.
+    """
 
 
-TOOL_DISPATCH_TOOLS = [bash, read_file, write_file]
+@tool
+def edit_file(path: str, edits: list[dict]) -> str:
+    """Apply targeted edits to a file at `path`.
+
+    Each edit replaces an exact `oldText` with `newText`.
+    All edits are matched against the original file content, then applied
+    in file order in one pass. Edits earlier in the file are applied first
+    so later edits are not affected by newText of earlier edits.
+
+    Args:
+        path: Target file path (absolute, or relative to working directory).
+        edits: List of {oldText, newText} dicts. Each `oldText` must appear
+               exactly once in the file, or the entire operation fails.
+
+    Returns:
+        Success: "applied N edits to <path>"
+        Failure: "error: <reason>"
+    """
+
+
+@tool
+def search_files(pattern: str, path: str = ".", file_glob: str = "") -> str:
+    """Search for a regex pattern in files within a directory.
+
+    Uses Python's re module for pattern matching. Returns matching files
+    with line numbers and context. This is a pure tool (no bash dependency),
+    so it works even when bash is blocked.
+
+    Args:
+        pattern: Regex pattern to search for.
+        path: Directory to search in (absolute, or relative to working directory).
+        file_glob: Optional file filter (e.g. "*.py" to only search Python files).
+
+    Returns:
+        Matching lines with file paths and line numbers, or "no matches found".
+    """
+
+
+@tool
+def stop(reason: str = "finished") -> str:
+    """Signal that the task is complete and stop the tool dispatch loop.
+
+    Call this when you have finished all work (reading, editing, verifying).
+    Do NOT call this if you need to ask the user a question first.
+
+    Args:
+        reason: Brief description of what was accomplished.
+    """
+
+
+TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop]
 
 
 def parse_named_params(query: str) -> dict:

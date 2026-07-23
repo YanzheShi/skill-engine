@@ -241,38 +241,40 @@ class Runner:
         llm: Optional[object] = None,
         tool_dispatch: Optional[object] = None,
         max_iterations: int = 10,
+        working_root: Optional[str] = None,
     ) -> dict:
-        """执行 skill — 四路分流（含 Steps DSL 自动检测）
+        """Execute skill - 4-route dispatch (auto-detect Steps DSL).
 
         Args:
-            match_result: 匹配结果
-            steps: 自定义 steps DSL（可选）
-            llm: LLM 客户端（可选，档位 A）
-            tool_dispatch: LLM 客户端（可选，档位 B）
-            max_iterations: 最大迭代次数（档位 B）
+            match_result: Match result
+            steps: Custom steps DSL (optional)
+            llm: LLM client (optional, for route A)
+            tool_dispatch: LLM client (optional, for route B)
+            max_iterations: Max iterations (route B)
+            working_root: Working directory root (file operations base, defaults to skill.directory)
         """
         skill = match_result.skill
         arguments = match_result.arguments
 
-        # 路径 0: 自动检测 body 中的 steps（优先级最高）
+        # Route 0: auto-detect Steps from body (highest priority)
         if steps is None:
             parsed = self._parse_steps_from_body(skill.body)
             if parsed is not None:
                 steps = parsed
 
-        # 路径 1: 显式传入 steps → 确定性执行
+        # Route 1: explicit steps - deterministic execution
         if steps is not None:
             return self._run_steps(steps, arguments, skill)
 
-        # 路径 2: 档位 B — tool_dispatch loop（CC 原生 skill 兼容）
+        # Route 2: route B - tool_dispatch loop
         if tool_dispatch:
-            return self._run_tool_dispatch(match_result, tool_dispatch, max_iterations)
+            return self._run_tool_dispatch(match_result, tool_dispatch, max_iterations, working_root)
 
-        # 路径 3: 档位 A — 单次 LLM 调用
+        # Route 3: route A - single LLM call
         if llm:
             return self._run_llm_once(skill, arguments, llm)
 
-        # 路径 4: 纯编译
+        # Route 4: pure compile
         final_prompt = self.assembler.assemble(skill, arguments)
         return {
             "skill_name": skill.metadata.name,
@@ -282,7 +284,7 @@ class Runner:
             "files_created": [],
             "iterations": 0,
             "stopped_by": "none",
-                    }
+        }
 
     def run_plan(
 
@@ -293,6 +295,7 @@ class Runner:
                     llm: Optional[object] = None,
                     tool_dispatch: Optional[object] = None,
                     max_iterations: int = 10,
+                    working_root: Optional[str] = None,
                 ) -> dict:
                     """执行 MatchPlan（直接传入 MatchPlan，不经过 MatchResult 包装）
 
@@ -303,6 +306,7 @@ class Runner:
                         llm: LLM 客户端（档位 A）
                         tool_dispatch: LLM 客户端（档位 B）
                         max_iterations: 档位 B 最大迭代次数
+                        working_root: 工作目录根路径（文件操作基准，默认 skill.directory）
 
                     Returns:
                         与 run() 相同的 dict 格式。
@@ -321,7 +325,8 @@ class Runner:
                                 method=plan.method, arguments={"$ARGUMENTS": query, "$0": query, **parse_named_params(query)},
                             )
                             result = self.run(
-                                mr, llm=llm, tool_dispatch=tool_dispatch, max_iterations=max_iterations
+                                mr, llm=llm, tool_dispatch=tool_dispatch, max_iterations=max_iterations,
+                                working_root=working_root,
                             )
                             result["skill_name"] = selected.name
                             all_results.append(result)
@@ -350,13 +355,15 @@ class Runner:
                         skill=skill, score=plan.score or 1.0,
                         method=plan.method, arguments={"$ARGUMENTS": query, "$0": query, **parse_named_params(query)},
                     )
-                    return self.run(mr, llm=llm, tool_dispatch=tool_dispatch, max_iterations=max_iterations)
+                    return self.run(mr, llm=llm, tool_dispatch=tool_dispatch, max_iterations=max_iterations,
+                       working_root=working_root)
 
     def _run_tool_dispatch(
         self,
         match_result: MatchResult,
         llm,
         max_iterations: int = 10,
+        working_root: Optional[str] = None,
     ) -> dict:
         """档位 B：tool_dispatch 循环 — 委派给 ToolDispatchRunner"""
         # 读取 human_in_loop 配置（从 SKILL.md frontmatter 或 .skill-local.yaml）
@@ -375,6 +382,7 @@ class Runner:
             approval_fn=self._check_approval,
             human_io=human_io,
             turn_policy=turn_policy,
+            working_root=working_root,
         )
         return td_runner.run(match_result, llm, max_iterations)
 

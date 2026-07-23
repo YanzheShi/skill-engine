@@ -26,8 +26,8 @@ def resolve_template(template: str, prev_outputs: dict, arguments: dict) -> str:
     """解析模板中的变量引用
 
     支持：
-    - {variable} → prev_outputs[variable]
-    - $VAR → arguments[VAR] 或 arguments[$VAR]
+    - {variable}  prev_outputs[variable]
+    - $VAR  arguments[VAR] 或 arguments[$VAR]
     """
     # 替换 {step_name} 引用
     for name, output in prev_outputs.items():
@@ -246,11 +246,35 @@ class StepsRunner:
     def _write_step(
         self, step: Step, prev_outputs: dict, arguments: dict, skill: Skill
     ) -> dict:
-        """写入文件"""
+        """写入文件（带安全门）"""
         content = resolve_template(
             step.template or prev_outputs.get("", ""), prev_outputs, arguments
         )
         output_file = resolve_template(step.output_file or "", prev_outputs, arguments)
+
+        # 直接检查敏感文件名（不依赖 _path_escapes 的正则提取）
+        from skill_engine.security.scanner import RISKY_FILENAMES
+        if Path(output_file).name in RISKY_FILENAMES:
+            if self.approval_fn:
+                approved = self.approval_fn(skill.metadata.name, "write", output_file)
+            else:
+                approved = False
+            if not approved:
+                return {"name": step.name, "type": "write", "error": "[用户跳过] 敏感文件操作已取消"}
+
+        # 安全门（只查路径，strict 不 BLOCK）
+        decision, reason = should_approve(
+            f"write:{output_file}", skill.directory, risk_hint="tool_file"
+        )
+        if decision == "BLOCK":
+            return {"name": step.name, "type": "write", "error": f"[安全拦截] {reason}"}
+        if decision == "ATTENTION":
+            if self.approval_fn:
+                approved = self.approval_fn(skill.metadata.name, "write", output_file)
+            else:
+                approved = False
+            if not approved:
+                return {"name": step.name, "type": "write", "error": "[用户跳过] 操作已取消"}
 
         Path(output_file).parent.mkdir(parents=True, exist_ok=True)
         Path(output_file).write_text(content, encoding="utf-8")
@@ -264,8 +288,33 @@ class StepsRunner:
     def _read_step(
         self, step: Step, prev_outputs: dict, arguments: dict, skill: Skill
     ) -> dict:
-        """读取文件"""
+        """读取文件（带安全门）"""
         filepath = resolve_template(step.input_ref or "", prev_outputs, arguments)
+
+        # 直接检查敏感文件名（不依赖 _path_escapes 的正则提取）
+        from skill_engine.security.scanner import RISKY_FILENAMES
+        if Path(filepath).name in RISKY_FILENAMES:
+            if self.approval_fn:
+                approved = self.approval_fn(skill.metadata.name, "read", filepath)
+            else:
+                approved = False
+            if not approved:
+                return {"name": step.name, "type": "read", "error": "[用户跳过] 敏感文件操作已取消"}
+
+        # 安全门（只查路径，strict 不 BLOCK）
+        decision, reason = should_approve(
+            f"read:{filepath}", skill.directory, risk_hint="tool_file"
+        )
+        if decision == "BLOCK":
+            return {"name": step.name, "type": "read", "error": f"[安全拦截] {reason}"}
+        if decision == "ATTENTION":
+            if self.approval_fn:
+                approved = self.approval_fn(skill.metadata.name, "read", filepath)
+            else:
+                approved = False
+            if not approved:
+                return {"name": step.name, "type": "read", "error": "[用户跳过] 操作已取消"}
+
         try:
             content = Path(filepath).read_text(encoding="utf-8")
             return {"name": step.name, "type": "read", "output": content}

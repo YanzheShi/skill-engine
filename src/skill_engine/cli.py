@@ -254,7 +254,7 @@ def run(
     llm: bool = typer.Option(False, "--llm", help="使用 LLM 单次调用（档位 A）"),
     tool_dispatch: bool = typer.Option(False, "--tool-dispatch", "-td", help="使用 tool_dispatch 循环（档位 B，CC 原生 skill 兼容）"),
     steps: bool = typer.Option(False, "--steps", help="使用 Steps DSL 确定性执行（自动检测 body 中的 ## Steps）"),
-    max_iterations: int = typer.Option(10, "--max-iter", help="档位 B 最大迭代次数"),
+    max_iterations: int = typer.Option(30, "--max-iter", help="档位 B 最大迭代次数"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只编译不执行（输出 prompt）"),
     non_interactive: bool = typer.Option(False, "--non-interactive", help="非交互模式，ATTENTION→BLOCK"),
     args: str = typer.Option("", "--args", "-a", help="用户实际请求参数（当指定 skill name 时使用）"),
@@ -328,14 +328,16 @@ def run(
         return
 
     if tool_dispatch:
-        td_llm = _get_tool_llm_client()
-        if not td_llm:
-            print("[ERROR] --tool-dispatch 需要 LLM 配置")
-            print("  请设置环境变量: AGNES_MODEL, AGNES_BASE_URL, AGNES_API_KEY")
-            print("  或去掉 --tool-dispatch 使用纯编译模式")
-            raise typer.Exit(code=1)
-        print(f"[INFO] 使用 tool_dispatch 模式 (档位 B), 最大迭代 {max_iterations} 次")
-        result = runner.run_plan(plan, registry, query=match_query, tool_dispatch=td_llm, max_iterations=max_iterations)
+            td_llm = _get_tool_llm_client()
+            if not td_llm:
+                print("[ERROR] --tool-dispatch 需要 LLM 配置")
+                print("  请设置环境变量: AGNES_MODEL, AGNES_BASE_URL, AGNES_API_KEY")
+                print("  或去掉 --tool-dispatch 使用纯编译模式")
+                raise typer.Exit(code=1)
+            print(f"[INFO] 使用 tool_dispatch 模式 (档位 B), 最大迭代 {max_iterations} 次")
+            from pathlib import Path as _Path
+            result = runner.run_plan(plan, registry, query=match_query, tool_dispatch=td_llm,
+                                      max_iterations=max_iterations, working_root=str(_Path.cwd()))
     elif llm:
         llm_client = _get_llm_client()
         result = runner.run_plan(plan, registry, query=match_query, llm=llm_client)

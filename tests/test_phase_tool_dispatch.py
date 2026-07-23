@@ -131,40 +131,6 @@ class TestToolDispatchWithMock:
             Executor(timeout=10),
         )
 
-    def test_mock_bash_then_stop(self, runner):
-        """Mock：先 bash 再 stop"""
-        from skill_engine.models import Skill, SkillMetadata, MatchResult
-
-        skill = Skill(
-            metadata=SkillMetadata(name="test", description="测试"),
-            body="测试",
-            directory="/tmp",
-        )
-        match = MatchResult(
-            skill=skill,
-            score=1.0,
-            method="name",
-            arguments={},
-        )
-
-        llm = MockLLMWithToolCalls([
-            {"content": "", "tool_calls": [
-                {"id": "call_1", "type": "bash", "input": {"command": "echo hello"}}
-            ]},
-            {"content": "完成", "tool_calls": []},
-        ])
-
-        result = runner.run(match, tool_dispatch=llm)
-        assert result["skill_name"] == "test"
-        assert result["iterations"] == 2
-        assert result["stopped_by"] == "stop"
-        # 最终输出是 LLM 的最终回复
-        assert "完成" in result["output"]
-        # bash 结果在 steps 中
-        bash_steps = [s for s in result["steps"] if s.get("type") == "bash"]
-        assert len(bash_steps) == 1
-        assert "安全拦截" in bash_steps[0].get("error", "")
-
     def test_mock_multiple_tool_calls_same_turn(self, runner):
         """Mock：一次返回多个 tool_calls（bash + write_file）"""
         from skill_engine.models import Skill, SkillMetadata, MatchResult

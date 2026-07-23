@@ -39,7 +39,7 @@ class TurnPolicy:
     stop_when: LLM 输出包含这些字符串时自动结束（不追问用户）
     """
     max_turns: int = 20
-    user_exit: list[str] = field(default_factory=lambda: ["/done", "/exit", "结束"])
+    user_exit: list[str] = field(default_factory=lambda: ["/done", "/exit", "结束", "再见", "拜拜", "退出"])
     stop_when: Optional[list[str]] = None  # 接受 str 或 list[str]，__post_init__ 统一
 
     def __post_init__(self):

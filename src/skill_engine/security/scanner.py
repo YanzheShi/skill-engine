@@ -10,6 +10,7 @@
 - 扫描只提醒，不阻止
 """
 
+import os
 import re
 from pathlib import Path
 from typing import Literal, Optional
@@ -27,9 +28,6 @@ RISKY_PREFIXES: list[str] = ["/etc/", "~/.ssh/", "~/.aws/", "~/.kube/"]
 
 # 敏感文件名（无论路径，匹配到就弹审批）
 RISKY_FILENAMES: set[str] = {".env", ".npmrc", ".pypirc", ".netrc"}
-
-# 允许写入的安全路径
-ALLOWED_WRITE: list[str] = ["/output/", "<skill_dir>/"]
 
 # 危险语义操作（不搞分类体系，单行例外）
 RISKY_SEMANTIC: set[tuple[str, str]] = {("git", "push")}
@@ -88,6 +86,14 @@ def _path_escapes(cmd_str: str, skill_dir: Path) -> bool:
     return False
 
 
+def _load_allowlist() -> set[str]:
+    """从环境变量 SKILLS_ENGINE_ALLOWLIST 加载允许的 binary 列表"""
+    raw = os.environ.get("SKILLS_ENGINE_ALLOWLIST", "").strip()
+    if not raw:
+        return set()
+    return set(b.strip().lower() for b in raw.split(",") if b.strip())
+
+
 # ================================================================
 # 运行时审批
 # ================================================================
@@ -107,6 +113,7 @@ def should_approve(
             - assembler_bang: !cmd 预处理（skill 可信，只查路径出界）
             - ctx_relay: 上一步 LLM 输出作为参数（不信任）
             - tool_dispatch: LLM 吐的 bash tool_call（不信任）
+            - tool_file: LLM 吐的文件操作 tool_call（只查路径，strict 不 BLOCK）
 
     Returns:
         ("SAFE", "") 或 ("ATTENTION", "原因") 或 ("BLOCK", "原因")
@@ -123,8 +130,24 @@ def should_approve(
     if sec_mode == "strict" and risk_hint in ("ctx_relay", "tool_dispatch"):
         return ("BLOCK", f"{risk_hint}: LLM 侧命令，不自动执行")
 
+    # tool_file: 文件操作，只查路径出界，不查 binary
+    # strict 模式下也不 BLOCK，因为文件操作受路径解析约束
+    if risk_hint == "tool_file":
+        if _path_escapes(op_str, Path(skill_dir)):
+            return ("ATTENTION", "目标路径在 skill 目录外")
+        return ("SAFE", "")
+
     # permissive：LLM 侧命令也走命令级检查
     binary, subcmd = _classify(op_str)
+
+    # allowlist 检查：命中 allowlist 的 binary 自动放行（只查路径）
+    allowlist = _load_allowlist()
+    if binary in allowlist:
+        if _path_escapes(op_str, Path(skill_dir)):
+            return ("ATTENTION", "目标路径在 skill 目录外")
+        if (binary, subcmd) in RISKY_SEMANTIC:
+            return ("ATTENTION", f"语义风险: {binary} {subcmd}")
+        return ("SAFE", "")
 
     # assembler_bang: 只查路径出界，不查 binary
     if risk_hint == "assembler_bang":

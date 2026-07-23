@@ -7,6 +7,7 @@ Assembler — Skill 编译器
 3. 注入 skill 目录路径变量（${SKILL_DIR}, ${SKILL_SCRIPTS_DIR} 等）
 4. 加载支持文件内容（refs）
 5. 注入宪法切片（宪法 = 全局约束规则）
+6. 注入平台说明（Windows cmd 环境自动检测）
 
 编译后的 final prompt 格式：
 ```
@@ -89,6 +90,16 @@ class Assembler:
         # 5. 注入宪法切片
         if self.constitution:
             body = f"# 宪法约束\n{self.constitution}\n\n{body}"
+
+        # 5.5 注入平台说明（Windows cmd 环境自动检测）
+        if hasattr(self.executor, 'shell') and self.executor.shell == "cmd":
+            body += (
+                "\n\n## 平台说明\n"
+                "注意：当前运行环境是 Windows cmd，不是 Linux bash。\n"
+                "- 使用 `dir` 而不是 `ls` 列出目录\n"
+                "- 使用 `python` 而不是 `python3` 运行脚本\n"
+                "- 路径使用反斜杠 \\ 或正斜杠 / 均可\n"
+            )
 
         # 6. 包装
         return f"[SKILL: {skill.metadata.name}]\n{body}"
