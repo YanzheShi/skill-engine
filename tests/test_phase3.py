@@ -15,6 +15,7 @@ from skill_engine.models import Step, Skill, SkillMetadata, MatchResult
 from skill_engine.execution.executor import Executor
 from skill_engine.execution.assembler import Assembler
 from skill_engine.execution.runner import Runner
+from skill_engine.execution.steps import resolve_template
 
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "sample-skills"
@@ -291,31 +292,31 @@ class TestResolveTemplate:
         return Runner(assembler, executor)
 
     def test_replace_step_output(self, runner):
-        result = runner._resolve_template("{output}", {"output": "hello"}, {})
+        result = resolve_template("{output}", {"output": "hello"}, {})
         assert result == "hello"
 
     def test_replace_multiple_step_outputs(self, runner):
-        result = runner._resolve_template("{a} {b}", {"a": "foo", "b": "bar"}, {})
+        result = resolve_template("{a} {b}", {"a": "foo", "b": "bar"}, {})
         assert result == "foo bar"
 
     def test_replace_arg_param(self, runner):
-        result = runner._resolve_template("$ARGUMENTS", {}, {"$ARGUMENTS": "world"})
+        result = resolve_template("$ARGUMENTS", {}, {"$ARGUMENTS": "world"})
         assert result == "world"
 
     def test_replace_positional_param(self, runner):
-        result = runner._resolve_template("$0", {}, {"$0": "49"})
+        result = resolve_template("$0", {}, {"$0": "49"})
         assert result == "49"
 
     def test_replace_named_param(self, runner):
-        result = runner._resolve_template("$problem_id", {}, {"$problem_id": "104"})
+        result = resolve_template("$problem_id", {}, {"$problem_id": "104"})
         assert result == "104"
 
     def test_mixed_refs_and_args(self, runner):
-        result = runner._resolve_template("{data} and $ARGUMENTS", {"data": "hello"}, {"$ARGUMENTS": "world"})
+        result = resolve_template("{data} and $ARGUMENTS", {"data": "hello"}, {"$ARGUMENTS": "world"})
         assert result == "hello and world"
 
     def test_no_replacement_when_missing(self, runner):
-        result = runner._resolve_template("{missing} $MISSING", {}, {})
+        result = resolve_template("{missing} $MISSING", {}, {})
         assert result == "{missing} $MISSING"
 
 

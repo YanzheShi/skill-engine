@@ -1,0 +1,10 @@
+{
+  "title": "两数之和",
+  "description": "给定一个整数数组 nums 和一个整数目标值 target，请在数组中找出 和为目标值 target 的那 两个 整数，并返回它们的数组下标。",
+  "difficulty": "easy",
+  "function_signature": "nums: List[int], target: int -> List[int]",
+  "optimal_solution": "class Solution:\n    def twoSum(self, nums: List[int], target: int) -> List[int]:\n        seen = {}\n        for i, n in enumerate(nums):\n            if target - n in seen:\n                return [seen[target - n], i]\n            seen[n] = i\n        return []",
+  "brute_solution": "class Solution:\n    def twoSum(self, nums: List[int], target: int) -> List[int]:\n        for i in range(len(nums)):\n            for j in range(i + 1, len(nums)):\n                if nums[i] + nums[j] == target:\n                    return [i, j]\n        return []",
+  "constraints": ["2 <= nums.length <= 10^4", "-10^9 <= nums[i] <= 10^9", "-10^9 <= target <= 10^9", "只会存在一个有效答案"],
+  "test_cases": []
+}
