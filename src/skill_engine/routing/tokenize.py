@@ -10,7 +10,11 @@
 """
 
 import re
+import warnings
 from typing import Optional
+
+# 抑制 jieba posseg 的 Python 3.12+ 无效转义字符警告（jieba 自身源码问题）
+warnings.filterwarnings("ignore", category=SyntaxWarning, module="jieba")
 
 # 领域专有名词集（硬编码兜底，Preprocessor 可自动膨胀）
 # 用户可在 .skill-local.yaml 的 router_proper_en_append 追加
