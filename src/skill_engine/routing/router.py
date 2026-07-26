@@ -182,6 +182,17 @@ class Router:
         # ──────────────────────────────────────────────
         should_llm, llm_candidates, reason = self._should_llm(query, kws, qtokens)
 
+        # ★ 自信匹配（单候选且分数 >= THRESH_SINGLE）：直接返回，不标 uncertain
+        if not should_llm:
+            if kws:
+                logger.info(f"  自信匹配: {kws[0][1]} ({kws[0][0]:.3f})，跳过 LLM")
+                return MatchPlan(
+                    mode="single",
+                    primary=SelectedSkill(name=kws[0][1]),
+                    method="keyword",
+                    score=kws[0][0],
+                )
+
         if should_llm:
             try:
                 _llm = get_llm(ROUTER_LLM)
