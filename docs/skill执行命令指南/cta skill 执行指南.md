@@ -5,7 +5,7 @@
 ## 前提
 
 - `skill-engine run` 固定扫描「当前目录下的 `skills/`」，所以运行前 **必须 `cd` 到 skill-engine 根目录**（其根下有 `skills/`）。在 code-tutor-agent 目录直接跑会扫不到 skill、直接 exit 1。
-- `--llm` 模式需要 skill-engine 已配置可用 LLM（默认 `sensenova-deepseek`，见 `skill_engine.config.get_llm()`）。
+- `--llm` 模式需要 skill-engine 已配置可用 LLM（默认 `sensenova-deepseek`，见 `skill_engine.config.get_llm(purpose="...")`）。
 - 不想调 LLM、只看 prompt 装配时，把 `--llm` 换成 `--dry-run` 即可。
 - **题解 / 测试用例是 Steps DSL**，含 `python` exec 步骤，运行前需放行安全审批（二选一）：
   ```powershell
@@ -59,7 +59,7 @@ uv run skill-engine run cta-generate-solution -a "description=给定一个整数
 ```
 
 - `prepare` 步骤是 `python` exec，务必先放行安全审批（见前提）。
-- `solve` 步骤走 skill-engine 的 `get_llm()`（默认 sensenova）生成题解。
+- `solve` 步骤走 skill-engine 的 `get_llm(purpose="...")`（默认 sensenova-deepseek）生成题解。
 - 输出结构（固定三节）：`## 思路讲解`（核心思想 / 算法流程 / 复杂度 / 易错点）+ `## OptimalSolution`（可 AC 最优代码，class Solution 风格）+ `## BruteSolution`（暴力对照）。`OptimalSolution` / `BruteSolution` 均为可被 Python `compile` 的合法代码。
 
 ## 3. 出测试用例（参考解 oracle 回填）— `cta-generate-test-cases` ✅ 一步到位

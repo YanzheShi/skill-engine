@@ -222,7 +222,7 @@ class StepsRunner:
 
         try:
             from skill_engine.config import get_llm
-            llm = get_llm(temperature=0.7)
+            llm = get_llm(purpose="steps-llm")
 
             resp = llm.invoke(template)
             if hasattr(resp, "content"):

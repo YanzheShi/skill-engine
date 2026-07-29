@@ -296,10 +296,10 @@ class Orchestrator:
         Returns:
             编排结果 dict
         """
-        # 默认使用 agnes 配置
+        # 默认使用配置的模型
         if llm is None:
             from skill_engine.config import get_llm
-            llm = get_llm()
+            llm = get_llm(purpose="orchestrator")
         
         # 构建 catalog
         catalog = self._build_catalog(registry)

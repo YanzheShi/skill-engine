@@ -56,7 +56,7 @@ def _get_engine(roots: Optional[list[Path]] = None):
     try:
         from skill_engine.config import get_llm
         from skill_engine.creator.preprocessor import Preprocessor
-        llm = get_llm()
+        llm = get_llm(purpose="ui-engine")
         preprocessor = Preprocessor(llm=llm)
     except Exception:
         pass
@@ -68,11 +68,11 @@ def _get_engine(roots: Optional[list[Path]] = None):
     return index, registry, router, executor, assembler, runner
 
 
-def _get_llm_client():
+def _get_llm_client(purpose: str = "ui-chat"):
     """获取 LLM 客户端"""
     try:
         from skill_engine.config import get_llm
-        return get_llm()
+        return get_llm(purpose=purpose)
     except Exception:
         return None
 

@@ -20,8 +20,6 @@ import sys
 import typer
 from typing import Optional
 
-from skill_engine.config import ROUTER_LLM
-
 # Fix Windows encoding for CLI output
 if sys.platform == "win32":
     import locale
@@ -219,7 +217,7 @@ def _create_router(registry, verbose: bool = False):
     return Router(registry, preprocessor=None, verbose=verbose)
 
 
-def _get_llm_client():
+def _get_llm_client(purpose: str = "cli-chat"):
     """获取 LLM 客户端（档位 A 用）"""
     try:
         from skill_engine.config import get_llm
@@ -227,13 +225,13 @@ def _get_llm_client():
         print("[ERROR] 无法导入 config 模块")
         raise typer.Exit(code=1)
     try:
-        return get_llm()
+        return get_llm(purpose=purpose)
     except Exception as e:
         print(f"[ERROR] 获取 LLM 配置失败: {e}")
         raise typer.Exit(code=1)
 
 
-def _get_tool_llm_client():
+def _get_tool_llm_client(purpose: str = "cli-tool"):
     """获取带工具绑定的 LLM 客户端（档位 B tool_dispatch 用）"""
     try:
         from skill_engine.config import get_llm
@@ -241,7 +239,7 @@ def _get_tool_llm_client():
         print("[ERROR] 无法导入 config 模块")
         raise typer.Exit(code=1)
     try:
-        llm = get_llm()
+        llm = get_llm(purpose=purpose)
         return llm
     except Exception as e:
         print(f"[ERROR] 获取 LLM 配置失败: {e}")
@@ -368,10 +366,10 @@ def run(
         print()
 
 
-def _get_llm_client():
+def _get_llm_client(purpose: str = "cli-chat"):
     """获取 LLM 客户端（档位 A 用）
 
-    通过 config.get_llm 从环境变量读取 AGNES_* 配置，返回裸模型。
+    通过 config.get_llm 获取模型实例，返回裸模型。
     """
     try:
         from skill_engine.config import get_llm
@@ -380,13 +378,13 @@ def _get_llm_client():
         raise typer.Exit(code=1)
 
     try:
-        return get_llm()
+        return get_llm(purpose=purpose)
     except Exception as e:
         print(f"[ERROR] 获取 LLM 配置失败: {e}")
         raise typer.Exit(code=1)
 
 
-def _get_tool_llm_client():
+def _get_tool_llm_client(purpose: str = "cli-tool"):
     """获取带工具绑定的 LLM 客户端（档位 B tool_dispatch 用）
 
     通过 config.get_llm 获取裸模型，再用 bind_tools 绑定内建工具，
@@ -399,7 +397,7 @@ def _get_tool_llm_client():
         raise typer.Exit(code=1)
 
     try:
-        llm = get_llm()
+        llm = get_llm(purpose=purpose)
         return llm
     except Exception as e:
         print(f"[ERROR] 获取 LLM 配置失败: {e}")
@@ -589,10 +587,10 @@ def index(
     # 2. 获取 LLM
     print("[INFO] 获取 LLM 客户端...")
     try:
-        llm = get_llm()
+        llm = get_llm(purpose="cli-index")
     except Exception as e:
         print(f"[ERROR] 获取 LLM 配置失败: {e}")
-        print("  请设置环境变量: AGNES_MODEL, AGNES_BASE_URL, AGNES_API_KEY")
+        print("  请设置环境变量: SENSENOVA_MODEL, SENSENOVA_BASE_URL, SENSENOVA_API_KEY")
         raise typer.Exit(code=1)
 
     # 3. 预处理
@@ -679,7 +677,7 @@ def create(
     from .execution.executor import Executor
 
     print("[INFO] 获取 LLM 客户端...")
-    llm = get_llm()
+    llm = get_llm(purpose="cli-create")
     print("[INFO] LLM 客户端就绪")
 
     executor = Executor(timeout=30, allow_all=True)
@@ -780,7 +778,7 @@ def scan_security(
         print(f"LLM 深度分析")
         print(f"{'='*60}")
         from .config import get_llm
-        llm = get_llm()
+        llm = get_llm(purpose="cli-security")
         targets = [name] if name else registry.list_active()
         for n in targets:
             skill = registry.load_skill(n)

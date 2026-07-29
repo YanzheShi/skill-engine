@@ -70,7 +70,7 @@ class TestBindTools:
         """bind_tools 返回一个可调用对象"""
         from skill_engine.config import get_llm
 
-        llm = get_llm()
+        llm = get_llm(purpose="cli-tool")
         from skill_engine.execution.runner import TOOL_DISPATCH_TOOLS
         bound = llm.bind_tools(TOOL_DISPATCH_TOOLS)
 
@@ -83,7 +83,7 @@ class TestBindTools:
         """bind_tools 后的模型仍然接受 messages 参数"""
         from skill_engine.config import get_llm
 
-        llm = get_llm()
+        llm = get_llm(purpose="cli-tool")
         from skill_engine.execution.runner import TOOL_DISPATCH_TOOLS
         bound = llm.bind_tools(TOOL_DISPATCH_TOOLS)
 

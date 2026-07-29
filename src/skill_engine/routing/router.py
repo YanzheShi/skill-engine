@@ -21,7 +21,7 @@ from typing import Optional
 from skill_engine.models import MatchPlan, SelectedSkill, MergedMeta
 
 logger = logging.getLogger("skill_engine.router")
-from skill_engine.config import get_llm, ROUTER_LLM
+from skill_engine.config import get_llm
 from skill_engine.routing.registry import Registry
 from skill_engine.routing.scoring import score_keyword
 from skill_engine.routing.tokenize import tokenize_query, is_english, PROPER_EN
@@ -134,7 +134,7 @@ class Router:
             if self.verbose:
                 logger.info("  纯英文 query → 跳 LLM 兜底")
             try:
-                _llm = get_llm(ROUTER_LLM)
+                _llm = get_llm(purpose="router")
             except Exception:
                 _llm = None
             if _llm:
@@ -195,7 +195,7 @@ class Router:
 
         if should_llm:
             try:
-                _llm = get_llm(ROUTER_LLM)
+                _llm = get_llm(purpose="router")
             except Exception:
                 _llm = None
             if not _llm:
