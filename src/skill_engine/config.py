@@ -70,7 +70,7 @@ LLM_CONFIGS = {
 
 
 DEFAULT_LLM = "sensenova-deepseek"
-ROUTER_LLM = "sensenova"
+ROUTER_LLM = "sensenova-deepseek"
 
 def get_llm(alias: str = DEFAULT_LLM, **kwargs):
     """
