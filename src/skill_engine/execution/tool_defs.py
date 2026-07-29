@@ -109,6 +109,24 @@ def parse_named_params(query: str) -> dict:
     if not query or not query.strip():
         return {}
     params = {}
+    # ── 模式 1：整串是逗号分隔的 k=v 列表（值可含空格）──
+    # 例：topic=two sum,difficulty=easy / topic=图论（graph theory 遍历）,difficulty=medium
+    # 仅在 ASCII 逗号后紧跟新 key= 时才切分，值内的中文逗号/顿号不受影响。
+    # 修复：旧正则 value 用 \S+ 贪婪匹配，"topic=array,difficulty=easy" 会把
+    # ",difficulty=easy" 整段吞进 topic 的值，difficulty 丢失（下游 {difficulty}
+    # 占位符不被替换）。
+    segments = re.split(r',(?=\s*[^=\s,]+=)', query.strip())
+    if len(segments) > 1:
+        seg_pairs = []
+        for seg in segments:
+            m = re.match(r'^\s*([^=\s,]+)=(.*\S)\s*$', seg, re.S)
+            if not m:
+                seg_pairs = None
+                break
+            seg_pairs.append((m.group(1).strip(), m.group(2).rstrip(',;')))
+        if seg_pairs:
+            return dict(seg_pairs)
+    # ── 模式 2：自然语言里散落的 k=v / k:v（原有行为）──
     # key=value 格式，key 不限字符集
     for match in re.finditer(r'([^=\s]+)=(\S+)', query):
         key = match.group(1).strip()

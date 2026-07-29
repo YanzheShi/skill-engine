@@ -287,7 +287,8 @@ def run(
 
     # --args 模式：query_or_name 是 skill 名（精确匹配），args 是用户实际请求
     # 否则 query_or_name 是自然语言查询，走三步路由
-    llm = _get_llm_client()
+    # 修复：此处曾有 `llm = _get_llm_client()`，把 --llm 布尔 flag 覆盖成客户端对象，
+    # 导致 ① 不带 --llm 也强制走 LLM 分支；② 无 AGNES_* 配置时纯编译模式也直接退出。
     if args:
         # 用 skill 名做匹配（精确命中 name exact 路由），用 args 做 $ARGUMENTS
         plan = router.match(query_or_name)
@@ -323,8 +324,6 @@ def run(
                 print(f"分数: {plan.score or 1.0:.2f}")
                 print(f"{'='*60}")
                 print(prompt[:2000])
-        return
-
         return
 
     if tool_dispatch:
