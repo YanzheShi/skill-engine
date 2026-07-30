@@ -242,6 +242,8 @@ class Runner:
         tool_dispatch: Optional[object] = None,
         max_iterations: int = 10,
         working_root: Optional[str] = None,
+        state_path: Optional[str] = None,
+        resume_from: Optional[str] = None,
     ) -> dict:
         """Execute skill - 4-route dispatch (auto-detect Steps DSL).
 
@@ -252,6 +254,8 @@ class Runner:
             tool_dispatch: LLM client (optional, for route B)
             max_iterations: Max iterations (route B)
             working_root: Working directory root (file operations base, defaults to skill.directory)
+            state_path: 可选，运行状态落盘路径（P2-3 todo 续跑）
+            resume_from: 可选，从指定状态文件续跑（P2-3）
         """
         skill = match_result.skill
         arguments = match_result.arguments
@@ -268,7 +272,8 @@ class Runner:
 
         # Route 2: route B - tool_dispatch loop
         if tool_dispatch:
-            return self._run_tool_dispatch(match_result, tool_dispatch, max_iterations, working_root)
+            return self._run_tool_dispatch(match_result, tool_dispatch, max_iterations, working_root,
+                                            state_path=state_path, resume_from=resume_from)
 
         # Route 3: route A - single LLM call
         if llm:
@@ -296,6 +301,8 @@ class Runner:
                     tool_dispatch: Optional[object] = None,
                     max_iterations: int = 10,
                     working_root: Optional[str] = None,
+                    state_path: Optional[str] = None,
+                    resume_from: Optional[str] = None,
                 ) -> dict:
                     """执行 MatchPlan（直接传入 MatchPlan，不经过 MatchResult 包装）
 
@@ -326,7 +333,7 @@ class Runner:
                             )
                             result = self.run(
                                 mr, llm=llm, tool_dispatch=tool_dispatch, max_iterations=max_iterations,
-                                working_root=working_root,
+                                working_root=working_root, state_path=state_path, resume_from=resume_from,
                             )
                             result["skill_name"] = selected.name
                             all_results.append(result)
@@ -356,7 +363,7 @@ class Runner:
                         method=plan.method, arguments={"$ARGUMENTS": query, "$0": query, **parse_named_params(query)},
                     )
                     return self.run(mr, llm=llm, tool_dispatch=tool_dispatch, max_iterations=max_iterations,
-                       working_root=working_root)
+                       working_root=working_root, state_path=state_path, resume_from=resume_from)
 
     def _run_tool_dispatch(
         self,
@@ -364,6 +371,8 @@ class Runner:
         llm,
         max_iterations: int = 10,
         working_root: Optional[str] = None,
+        state_path: Optional[str] = None,
+        resume_from: Optional[str] = None,
     ) -> dict:
         """档位 B：tool_dispatch 循环 — 委派给 ToolDispatchRunner"""
         # 读取 human_in_loop 配置（从 SKILL.md frontmatter 或 .skill-local.yaml）
@@ -384,7 +393,8 @@ class Runner:
             turn_policy=turn_policy,
             working_root=working_root,
         )
-        return td_runner.run(match_result, llm, max_iterations)
+        return td_runner.run(match_result, llm, max_iterations,
+                              state_path=state_path, resume_from=resume_from)
 
     def _parse_tool_calls(self, response) -> list:
         """委派给 tool_dispatch.parse_tool_calls"""

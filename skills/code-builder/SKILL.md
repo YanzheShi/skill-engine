@@ -5,6 +5,8 @@ groups:
 - development
 - coding
 human_in_loop: true
+extra_tools:
+- tools.py
 turn_policy:
   max_turns: 30
   stop_when: "已完成|改动完成|已汇报|任务圆满完成|再见"

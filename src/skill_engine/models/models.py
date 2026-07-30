@@ -126,6 +126,16 @@ class SkillMetadata(BaseModel):
     human_in_loop: bool = Field(default=False, description="启用多轮对话模式（CC 静默忽略）")
     turn_policy: dict | None = Field(default=None, description="轮次策略配置（CC 静默忽略）")
 
+    # ===== 大型代码能力扩展字段（P1）=====
+    extra_tools: list[str] = Field(
+        default_factory=list,
+        description="额外工具模块文件名（相对 skill 目录，如 ['tools.py']），引擎自动加载其中 @tool 并合并进 bind_tools",
+    )
+    context_budget: int = Field(
+        default=0,
+        description="档位 B 上下文 token 预算；0=引擎默认(8192)",
+    )
+
 
 class MergedMeta(BaseModel):
     """三层合并后的 Skill 元数据（SKILL.md + .skill-meta.yaml + .skill-local.yaml）
@@ -155,6 +165,16 @@ class MergedMeta(BaseModel):
 
     human_in_loop: bool = Field(default=False, description="启用多轮对话模式")
     turn_policy: dict | None = Field(default=None, description="轮次策略配置")
+
+    # ===== 大型代码能力扩展字段（P1，与 SkillMetadata 对齐）=====
+    extra_tools: list[str] = Field(
+        default_factory=list,
+        description="额外工具模块文件名（相对 skill 目录），引擎自动加载其中 @tool 并合并进 bind_tools",
+    )
+    context_budget: int = Field(
+        default=0,
+        description="档位 B 上下文 token 预算；0=引擎默认(8192)",
+    )
 
     # 预处理缓存（.skill-meta.yaml 原始内容，score_keyword 用）
     meta_cache: dict = Field(default_factory=dict, description="预处理缓存")

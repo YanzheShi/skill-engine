@@ -1,0 +1,104 @@
+{
+  "generated_at": "",
+  "function_signature": "nums: List[int] -> int",
+  "count": 12,
+  "visible_test_cases": [],
+  "test_cases": [
+    {
+      "input_args": [
+        "[952, -981, -518, 907, 345, -769, -296, -980]"
+      ],
+      "expected_output": "34457213077490367360",
+      "is_hidden": true,
+      "explanation": "随机生成"
+    },
+    {
+      "input_args": [
+        "[-382, 91]"
+      ],
+      "expected_output": "91",
+      "is_hidden": true,
+      "explanation": "随机生成"
+    },
+    {
+      "input_args": [
+        "[-449, -245, 167, 396, -250, -621, -887]"
+      ],
+      "expected_output": "2231171583795000",
+      "is_hidden": true,
+      "explanation": "随机生成"
+    },
+    {
+      "input_args": [
+        "[-880, -278, 483, 59, -919, -226, -29]"
+      ],
+      "expected_output": "1447939983779520",
+      "is_hidden": true,
+      "explanation": "随机生成"
+    },
+    {
+      "input_args": [
+        "[296, 78, -870, 816]"
+      ],
+      "expected_output": "23088",
+      "is_hidden": true,
+      "explanation": "随机生成"
+    },
+    {
+      "input_args": [
+        "[341, 44, 658, -41, 746]"
+      ],
+      "expected_output": "9872632",
+      "is_hidden": true,
+      "explanation": "随机生成"
+    },
+    {
+      "input_args": [
+        "[501, 80, 28, 929, 297]"
+      ],
+      "expected_output": "309640605120",
+      "is_hidden": true,
+      "explanation": "随机生成"
+    },
+    {
+      "input_args": [
+        "[899, 31, -288, -77, 787, 445]"
+      ],
+      "expected_output": "216440905332960",
+      "is_hidden": true,
+      "explanation": "随机生成"
+    },
+    {
+      "input_args": [
+        "[-214, -69, 534, 562]"
+      ],
+      "expected_output": "4431394728",
+      "is_hidden": true,
+      "explanation": "随机生成"
+    },
+    {
+      "input_args": [
+        "[-951, 3]"
+      ],
+      "expected_output": "3",
+      "is_hidden": true,
+      "explanation": "随机生成"
+    },
+    {
+      "input_args": [
+        "[808, -464, 796, 423, -246, 844, 550, 795]"
+      ],
+      "expected_output": "11460145942718567424000",
+      "is_hidden": true,
+      "explanation": "随机生成"
+    },
+    {
+      "input_args": [
+        "[-119, 852]"
+      ],
+      "expected_output": "852",
+      "is_hidden": true,
+      "explanation": "随机生成"
+    }
+  ]
+}

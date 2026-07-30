@@ -5,7 +5,10 @@
 """
 
 import re
-from langchain_core.tools import tool
+import importlib.util
+import logging
+from pathlib import Path
+from langchain_core.tools import tool, BaseTool
 
 
 @tool
@@ -91,6 +94,51 @@ def stop(reason: str = "finished") -> str:
 
 
 TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop]
+
+# 工具注册表：将硬编码列表升级为可扩展注册表（通用引擎核心，不绑定领域语义）。
+# 各 skill 可经 frontmatter 的 extra_tools 注入领域专属工具，核心不感知具体领域。
+TOOL_REGISTRY: dict[str, BaseTool] = {t.name: t for t in TOOL_DISPATCH_TOOLS}
+
+
+def load_skill_tools(skill) -> list[BaseTool]:
+    """加载某个 skill 自带的领域工具（声明在 frontmatter 的 extra_tools 里）。
+
+    约定：skill 目录下的 tools.py 等模块中，用 @tool 装饰器定义 BaseTool。
+    引擎用 importlib 从绝对路径隔离加载，避免污染全局命名空间。
+    返回的列表会与 TOOL_REGISTRY 合并后传给 bind_tools。
+
+    Args:
+        skill: Skill 对象（需有 .directory 与 .metadata.extra_tools）
+
+    Returns:
+        合并后的工具列表（空列表表示无额外工具）。
+    """
+    modules = getattr(skill.metadata, "extra_tools", None) or []
+    if not modules:
+        return []
+    loaded: list[BaseTool] = []
+    log = logging.getLogger("skill_engine.tool_defs")
+    for rel in modules:
+        tools_py = Path(skill.directory) / rel
+        if not tools_py.exists():
+            log.warning("extra_tools 声明的模块不存在: %s (skill=%s)", tools_py, skill.metadata.name)
+            continue
+        try:
+            mod_name = "_skill_tools_" + re.sub(r"\W", "_", f"{skill.metadata.name}_{rel}")
+            spec = importlib.util.spec_from_file_location(mod_name, str(tools_py))
+            if spec is None or spec.loader is None:
+                log.warning("无法为 %s 生成 import spec", tools_py)
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception as e:
+            log.warning("加载 skill 工具失败 %s: %s", tools_py, e)
+            continue
+        for v in vars(mod).values():
+            if isinstance(v, BaseTool):
+                # 命名冲突防护：同名工具后者覆盖（约定 skill 自带工具加领域前缀，如 cb_）
+                loaded.append(v)
+    return loaded
 
 
 def parse_named_params(query: str) -> dict:
