@@ -136,6 +136,12 @@ class SkillMetadata(BaseModel):
         description="档位 B 上下文 token 预算；0=引擎默认(8192)",
     )
 
+    # ===== MCP 外部工具（方案 A：全局 mcp.json + 字段引用 server 名）=====
+    mcp_servers: list[str] = Field(
+        default_factory=list,
+        description="要接入的 MCP server 名称列表（对应全局 mcp.json 的 mcpServers 键）；引擎自动连接并合并其工具",
+    )
+
 
 class MergedMeta(BaseModel):
     """三层合并后的 Skill 元数据（SKILL.md + .skill-meta.yaml + .skill-local.yaml）
@@ -174,6 +180,12 @@ class MergedMeta(BaseModel):
     context_budget: int = Field(
         default=0,
         description="档位 B 上下文 token 预算；0=引擎默认(8192)",
+    )
+
+    # ===== MCP 外部工具（方案 A：全局 mcp.json + 字段引用 server 名）=====
+    mcp_servers: list[str] = Field(
+        default_factory=list,
+        description="要接入的 MCP server 名称列表（对应全局 mcp.json 的 mcpServers 键）",
     )
 
     # 预处理缓存（.skill-meta.yaml 原始内容，score_keyword 用）

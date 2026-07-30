@@ -53,6 +53,7 @@ analysis_output/
 output/
 ${ANALYSIS_OUTPUT_DIR}/
 fix_indent.py
+.workbuddy/
 
 # .env files may contain API keys
 .env

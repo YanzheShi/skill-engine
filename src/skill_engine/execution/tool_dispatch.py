@@ -20,7 +20,7 @@ from typing import Optional, Callable
 from skill_engine.models import Skill, MatchResult, TurnPolicy, RunResult
 from skill_engine.execution.assembler import Assembler
 from skill_engine.execution.executor import Executor
-from skill_engine.execution.tool_defs import TOOL_REGISTRY, load_skill_tools
+from skill_engine.execution.tool_defs import TOOL_REGISTRY, load_skill_tools, load_mcp_tools
 from skill_engine.execution.context_manager import ContextManager
 from skill_engine.execution.human_io import HumanIO
 from skill_engine.execution.snapshot import FileSnapshot
@@ -29,6 +29,8 @@ from langchain_core.tools import tool
 
 import re
 import json
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +354,7 @@ class ToolDispatchRunner:
         skill_tools_map: dict[str, object] = {}
         if hasattr(llm, "bind_tools"):
             skill_extra = load_skill_tools(skill)
+            skill_mcp = load_mcp_tools(skill)  # 方案 A：接入 mcp.json 声明的远程 MCP 工具
             # P2-2：内置 restore_file 工具（通用文件检查点回滚，不依赖 git）
             snap = self._snapshot
 
@@ -374,8 +377,17 @@ class ToolDispatchRunner:
                 return msg
 
             skill_extra_with_restore = skill_extra + [restore_file]
-            skill_tools_map = {t.name: t for t in skill_extra_with_restore}
-            tools = list(TOOL_REGISTRY.values()) + skill_extra_with_restore
+            # 方案 A：MCP 远程工具并入。同名时优先保留内建工具与 restore_file，
+            # 避免远程工具意外覆盖核心文件操作（bash/read_file/edit_file/...）。
+            builtin_names = set(TOOL_REGISTRY.keys()) | {"restore_file"}
+            skill_mcp_safe = [t for t in skill_mcp if t.name not in builtin_names]
+            if len(skill_mcp_safe) != len(skill_mcp):
+                logger.warning(
+                    "MCP 工具存在与内建同名的项，已跳过被覆盖的 %d 个",
+                    len(skill_mcp) - len(skill_mcp_safe),
+                )
+            skill_tools_map = {t.name: t for t in skill_extra_with_restore + skill_mcp_safe}
+            tools = list(TOOL_REGISTRY.values()) + skill_extra_with_restore + skill_mcp_safe
             disallowed = getattr(skill.metadata, "disallowed_tools", None) or []
             allowed = getattr(skill.metadata, "allowed_tools", None) or []
             if disallowed:

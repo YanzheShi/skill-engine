@@ -141,6 +141,26 @@ def load_skill_tools(skill) -> list[BaseTool]:
     return loaded
 
 
+def load_mcp_tools(skill) -> list[BaseTool]:
+    """加载 skill 经 mcp_servers 字段声明的 MCP 远程工具。
+
+    复用 mcp_client.load_mcp_tools：从全局 mcp.json 解析 server 定义、连接，
+    把远程工具拉成本地 BaseTool，与 extra_tools 一样合并进 bind_tools。
+    无 mcp_servers 或连接失败都返回空列表（不中断执行）。
+
+    Args:
+        skill: Skill 对象（需有 .metadata.mcp_servers）
+
+    Returns:
+        合并后的工具列表（空列表表示无 MCP 工具）。
+    """
+    from skill_engine.execution.mcp_client import load_mcp_tools as _load_mcp
+    server_names = getattr(skill.metadata, "mcp_servers", None) or []
+    if not server_names:
+        return []
+    return _load_mcp(server_names)
+
+
 def parse_named_params(query: str) -> dict:
     """从 query 中提取 named params（key=value 或 key:value 对）
 
