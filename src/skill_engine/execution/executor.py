@@ -26,6 +26,8 @@ import shlex
 from pathlib import Path
 from typing import Optional
 
+from .paths import to_native_path, native_path_hint
+
 shell_quote = shlex.quote
 
 
@@ -139,6 +141,23 @@ class Executor:
             timeout: 超时秒数（覆盖默认值）
         """
         effective_timeout = timeout if timeout is not None else self.timeout
+
+        # 工作目录归一化：Windows 下 /d/x、/mnt/d/x 这类 POSIX 写法会让
+        # subprocess 抛 [WinError 267] 目录名称无效，且异常被吞成 exit_code:-1，
+        # 模型看不出根因只能反复重试。这里提前转换 + 校验，给出可执行的纠正提示。
+        native_cwd = to_native_path(cwd)
+        if native_cwd is None or not native_cwd.is_dir():
+            return {
+                "stdout": "",
+                "stderr": (
+                    f"[工作目录无效: {cwd}] {native_path_hint(cwd)}"
+                    if native_cwd is None or not native_cwd.exists()
+                    else f"[工作目录不是目录: {cwd}]"
+                ),
+                "exit_code": 1,
+                "timed_out": False,
+            }
+        cwd = native_cwd
 
         # 安全检查
         if check_allowlist and not self.allow_all:

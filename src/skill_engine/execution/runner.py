@@ -24,6 +24,44 @@ from skill_engine.execution.executor import Executor
 from skill_engine.execution import tool_dispatch
 from skill_engine.execution import steps as steps_runner
 from skill_engine.execution.tool_defs import parse_named_params
+from skill_engine.execution.paths import to_native_path, native_path_hint
+
+
+class SkillSession:
+    """单次 session 的持续状态持有者（由外层 REPL 维护）。
+
+    薄数据对象：持有跨轮累积的对话历史 messages，以及落盘路径 state_path。
+    不含执行逻辑（执行统一在 ToolDispatchRunner.run）。
+
+    - messages: 跨轮累积的完整对话历史（含 system/user/assistant/tool）
+    - state_path: 落盘路径；缺省落到 <working_root>/.workbuddy/sessions/<skill>.session.json
+    - snapshot: 会话级文件检查点。整个 session 共用一个 FileSnapshot 实例，
+      使 restore_file 能回滚到「会话起点」而非「本轮起点」。
+    """
+
+    def __init__(
+        self,
+        skill_name: str,
+        working_root: Optional[str] = None,
+        state_path: Optional[str] = None,
+        messages: Optional[list] = None,
+        snapshot=None,
+    ):
+        self.skill_name = skill_name
+        self.working_root = working_root
+        if state_path:
+            self.state_path = state_path
+        else:
+            base = Path(working_root) if working_root else Path.cwd()
+            self.state_path = str(base / ".workbuddy" / "sessions" / f"{skill_name}.session.json")
+        self.messages: list = list(messages or [])
+        if snapshot is None:
+            from skill_engine.execution.snapshot import FileSnapshot
+            snapshot = FileSnapshot(Path(working_root) if working_root else Path.cwd())
+        self.snapshot = snapshot
+
+    def append_user(self, content: str) -> None:
+        self.messages.append({"role": "user", "content": content})
 
 
 class Runner:
@@ -395,6 +433,204 @@ class Runner:
         )
         return td_runner.run(match_result, llm, max_iterations,
                               state_path=state_path, resume_from=resume_from)
+
+    def run_repl(
+        self,
+        plan,
+        registry,
+        query: str = "",
+        llm=None,
+        max_iterations: int = 30,
+        working_root: Optional[str] = None,
+        state_path: Optional[str] = None,
+        resume_from: Optional[str] = None,
+        human_io=None,
+    ) -> dict:
+        """多轮会话（Session/REPL）模式：单 skill 持续执行。详见 docs/多轮会话模式-session-repl设计.md。"""
+        from skill_engine.execution.human_io import CliHumanIO
+        from skill_engine.models import MatchResult
+
+        def _load_session_state(path):
+            import json
+            from pathlib import Path as _P
+            try:
+                p = _P(path)
+                if not p.exists():
+                    return None
+                return json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+
+        def _build_match_result(skill, score, method, q):
+            return MatchResult(
+                skill=skill, score=score, method=method,
+                arguments={"$ARGUMENTS": q, "$0": q, **parse_named_params(q)},
+            )
+
+        def _session_result(name, reason, output=""):
+            return {"skill_name": name, "output": output, "files_created": [],
+                    "iterations": 0, "stopped_by": reason}
+
+        # 1. 解析单 skill（session 不支持 multi 协同）
+        skill, score, method, err = self._resolve_session_skill(plan, registry, query)
+        if err is not None:
+            return err
+
+        # 归一化工作目录：允许 Windows 用户传 Git Bash / WSL 风格路径（/d/x、/mnt/d/x）
+        wr_native = to_native_path(working_root) if working_root else Path.cwd()
+        wr = str(wr_native)
+        if not wr_native.is_dir():
+            print(f"[ERROR] 工作目录不存在: {working_root}\n        {native_path_hint(working_root)}")
+            return _session_result(skill.metadata.name, "invalid_working_root")
+        session = SkillSession(skill_name=skill.metadata.name, working_root=wr, state_path=state_path)
+
+        # 2. 续接
+        resumed = False
+        if resume_from:
+            loaded = _load_session_state(resume_from)
+            if loaded is not None:
+                session.messages = list(loaded.get("messages", []))
+                resumed = bool(session.messages)  # 空历史等同全新会话，避免以空 messages 起轮
+                print(f"[session] 已从 {resume_from} 续接（{len(session.messages)} 条历史）")
+
+        # 3. 构造 runner：session 模式 human_io 始终提供（供 ask_user），turn_policy=None 禁用内部循环
+        hio = human_io or CliHumanIO()
+        td_runner = tool_dispatch.ToolDispatchRunner(
+            executor=self.executor, assembler=self.assembler,
+            approval_fn=self._check_approval, human_io=hio,
+            turn_policy=None, working_root=wr,
+        )
+
+        print(f"[session] 进入 {skill.metadata.name} 持续会话（输入 /exit 或 /done 退出）")
+        # 未给初始 query 且非续接：先打印该 skill 的用法提示，再等待用户第一条指令
+        if not (query or "").strip() and not resumed:
+            print(self._format_skill_hint(skill))
+        save = state_path or session.state_path
+
+        return self._repl_loop(
+            session=session, skill=skill, score=score, method=method,
+            query=query, llm=llm, max_iterations=max_iterations,
+            td_runner=td_runner, hio=hio, save=save, resumed=resumed,
+            build_match_result=_build_match_result, session_result=_session_result,
+        )
+
+    # 空输入（直接回车）时追加的续写指令：明确语义为「基于已有历史继续」，
+    # 而不是回退重跑原始 query（否则会把已完成的第一轮请求重做一遍）。
+    _CONTINUE_HINT = "继续（沿用上文，接着往下做；不要重头开始）"
+
+    @staticmethod
+    def _format_skill_hint(skill) -> str:
+        """渲染 skill 的用法提示（session 未带初始 query 时展示）。
+
+        全部字段用 getattr 兜底：不同 skill 的 frontmatter 填写程度不一，
+        缺字段只是少一行提示，不应让会话起不来。
+        """
+        m = getattr(skill, "metadata", None)
+        name = getattr(m, "name", "skill")
+        lines = [f"─── {name} ───"]
+
+        def _add(label, value):
+            if value:
+                lines.append(f"  {label}: {value}")
+
+        _add("用途", getattr(m, "description", ""))
+        _add("适用", getattr(m, "when_to_use", ""))
+        _add("参数", getattr(m, "argument_hint", ""))
+        named = getattr(m, "arguments", None) or []
+        if named:
+            _add("命名参数", "  ".join(f"--{a}=<值>" for a in named))
+        tools = list(getattr(m, "allowed_tools", None) or [])
+        mcp = list(getattr(m, "mcp_servers", None) or [])
+        _add("预授权工具", ", ".join(tools) if tools else "")
+        _add("MCP", ", ".join(mcp) if mcp else "")
+
+        lines.append("")
+        lines.append("  直接用自然语言描述要做的事即可，例如：")
+        hint = getattr(m, "argument_hint", "")
+        lines.append(f"    {hint}" if hint else "    给 src/xxx.py 加一个 foo() 函数并补上测试")
+        lines.append("  会话内命令：/exit 或 /done 退出 · 直接回车 = 沿用上文继续")
+        return "\n".join(lines)
+
+    def _resolve_session_skill(self, plan, registry, query: str):
+        """从 plan 解析出 session 要跑的单个 skill。
+
+        Returns:
+            (skill, score, method, err_result)；解析失败时 skill 为 None、err_result 为可直接返回的 dict。
+        """
+        sel = plan.primary or (plan.selections[0] if plan.selections else None)
+        if not sel:
+            print(f"[ERROR] 未找到匹配的 skill: {query}")
+            return None, 0, "", {"skill_name": "", "output": "", "files_created": [],
+                                 "iterations": 0, "stopped_by": "no_match"}
+        # 兼容两种 plan 类型：
+        #  - MatchResult（旧 API / 单测）：带 .skill / .score / .method
+        #  - SelectedSkill（router 真实输出的 MatchPlan）：只有 .name
+        if getattr(sel, "skill", None) is not None:
+            skill_name = sel.skill.metadata.name
+            score = getattr(sel, "score", None) or plan.score or 1.0
+            method = getattr(sel, "method", None) or plan.method or "name"
+        else:
+            skill_name = sel.name
+            score = plan.score or 1.0
+            method = plan.method or "name"
+        skill = registry.load_skill(skill_name)
+        if not skill:
+            print(f"[ERROR] 无法加载 skill: {skill_name}")
+            return None, 0, "", {"skill_name": skill_name,
+                                 "output": f"[ERROR] 无法加载 skill: {skill_name}",
+                                 "files_created": [], "iterations": 0, "stopped_by": "load_failed"}
+        return skill, score, method, None
+
+    def _repl_loop(self, session, skill, score, method, query, llm, max_iterations,
+                   td_runner, hio, save, resumed, build_match_result, session_result) -> dict:
+        """session 主循环：每轮读指令 → 调 run(session_mode=True) → 交还控制权。"""
+        iteration = 0
+        last_output = ""
+        while True:
+            iteration += 1
+            if iteration == 1 and not resumed and (query or "").strip():
+                # 全新会话首轮且带了初始 query：直接起轮
+                mr = build_match_result(skill, score, method, query)
+                initial_messages = None
+            else:
+                # 无初始 query / 续接首轮 / 后续各轮：等待用户下条指令
+                user_cmd = hio.read(prompt=f"[{skill.metadata.name}] > ")
+                if user_cmd in ("/exit", "/done"):
+                    return session_result(session.skill_name, "user_exit", output=last_output)
+                cmd = user_cmd.strip()
+                if cmd:
+                    session.append_user(cmd)
+                elif session.messages:
+                    # 空输入：让 LLM 基于历史续写，而非重跑原始 query
+                    session.append_user(self._CONTINUE_HINT)
+                else:
+                    # 尚无任何历史就直接回车：无从"继续"，重新提示而不是空跑一轮
+                    print("[session] 请输入一条指令（/exit 或 /done 退出）")
+                    iteration -= 1
+                    continue
+                initial_messages = session.messages
+                mr = build_match_result(skill, score, method, cmd or query)
+
+            try:
+                result = td_runner.run(
+                    mr, llm, max_iterations=max_iterations,
+                    state_path=save, initial_messages=initial_messages,
+                    session_mode=True, snapshot=session.snapshot,
+                )
+            except KeyboardInterrupt:
+                print(f"[session] 已被 Ctrl+C 中断，状态已落盘（{save}），可用 --resume-from 续接。")
+                return session_result(session.skill_name, "interrupted", output=last_output)
+
+            session.messages = result.get("history") or session.messages
+            out = result.get("output", "")
+            if out:
+                last_output = out
+                print(f"[{skill.metadata.name}] {out}")
+            stopped = result.get("stopped_by")
+            if stopped in ("error", "rate_limited", "max_iterations", "no_match", "load_failed"):
+                return result
+            # session_turn_end / tool_stop → 继续等待下条指令
+            continue
 
     def _parse_tool_calls(self, response) -> list:
         """委派给 tool_dispatch.parse_tool_calls"""

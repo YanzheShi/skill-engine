@@ -21,7 +21,7 @@ class HumanIO(ABC):
         ...
 
     @abstractmethod
-    def read(self) -> str:
+    def read(self, prompt: str = None) -> str:
         ...
 
 
@@ -31,8 +31,9 @@ class CliHumanIO(HumanIO):
     def emit(self, text: str):
         print(f"\n[AI] {text}")
 
-    def read(self) -> str:
+    def read(self, prompt: str = None) -> str:
+        p = prompt if prompt else "[你] "
         try:
-            return input("[你] ").strip()
+            return input(p).strip()
         except (EOFError, KeyboardInterrupt):
             return "/exit"

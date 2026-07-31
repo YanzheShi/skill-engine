@@ -20,6 +20,8 @@ import sys
 import typer
 from typing import Optional
 
+from .execution.paths import to_native_path, native_path_hint
+
 # Fix Windows encoding for CLI output
 if sys.platform == "win32":
     import locale
@@ -231,6 +233,26 @@ def _get_llm_client(purpose: str = "cli-chat"):
         raise typer.Exit(code=1)
 
 
+def _normalize_working_root(working_root: Optional[str]) -> Optional[str]:
+    """归一化并校验 -w/--working-root。
+
+    Windows 用户常在 Git Bash 里敲 `-w /d/Code/proj`，这类 POSIX 路径本机
+    Python 无法识别，会在每条 bash 命令上抛 [WinError 267]。这里提前转成
+    原生路径；目录不存在则立刻退出，而不是让模型跑满迭代次数才失败。
+    """
+    if not working_root:
+        return working_root
+    native = to_native_path(working_root)
+    if native is None or not native.is_dir():
+        print(f"[ERROR] 工作目录不存在: {working_root}")
+        print(f"        {native_path_hint(working_root)}")
+        raise typer.Exit(code=1)
+    resolved = str(native.resolve())
+    if resolved != str(working_root):
+        print(f"[INFO] 工作目录已归一化为原生路径: {resolved}")
+    return resolved
+
+
 def _get_tool_llm_client(purpose: str = "cli-tool"):
     """获取带工具绑定的 LLM 客户端（档位 B tool_dispatch 用）"""
     try:
@@ -275,6 +297,8 @@ def run(
     from .execution.assembler import Assembler
     from .execution.executor import Executor
     from .execution.runner import Runner
+
+    working_root = _normalize_working_root(working_root)
 
     # 1. 发现 + 注册（默认扫描 skills/ 目录）
     from pathlib import Path
@@ -794,3 +818,97 @@ def scan_security(
                 print(f"    {scan_skill_deep(skill, llm)}")
 
     print()
+
+
+@app.command()
+def session(
+    query_or_name: Optional[str] = typer.Argument(
+        None, help="初始请求；配合 --skill 时可省略（进入会话后先看 skill 用法提示）"),
+    skill: Optional[str] = typer.Option(None, "--skill", "-s", help="直接指定 skill 名称（跳过路由匹配）"),
+    max_iterations: int = typer.Option(30, "--max-iter", help="每轮子任务最大迭代次数"),
+    working_root: Optional[str] = typer.Option(None, "--working-root", "-w", help="要修改的目标项目目录（默认引擎 cwd）"),
+    state_path: Optional[str] = typer.Option(None, "--state-path", help="会话状态落盘路径（每轮写入）"),
+    resume_from: Optional[str] = typer.Option(None, "--resume-from", "-r", help="从指定会话状态文件续接"),
+):
+    """进入单 skill 持续会话（REPL 模式）
+
+    单个 skill 像 Claude Code 那样多轮交互：完成一个子任务后保持会话，
+    继续等待新指令，直到用户输入 /exit 或 /done 退出。
+
+    初始请求可以省略（须配合 -s/--skill），此时进入会话后先展示该 skill 的
+    用法提示（用途 / 适用场景 / 参数），再等待你的第一条指令：
+
+        skill-engine session -s code-builder -w /path/to/project
+    """
+    from pathlib import Path
+    from .routing.discovery import discover
+    from .routing.registry import Registry
+    from .execution.assembler import Assembler
+    from .execution.executor import Executor
+    from .execution.runner import Runner
+
+    working_root = _normalize_working_root(working_root)
+
+    project_skills = Path.cwd() / "skills"
+    roots = [str(project_skills)] if project_skills.exists() else []
+    index = discover(roots=roots)
+    registry = Registry(index)
+    router = _create_router(registry)
+
+    if skill:
+        plan = router.match(skill)
+        match_query = query_or_name or ""
+    else:
+        if not query_or_name:
+            print("[ERROR] 未指定 skill：省略初始请求时必须用 -s/--skill 指定 skill")
+            print("  例: skill-engine session -s code-builder -w /path/to/project")
+            print("  或: skill-engine session \"给 utils.py 加一个 greet() 函数\"")
+            raise typer.Exit(code=1)
+        plan = router.match(query_or_name)
+        match_query = query_or_name
+
+    if not plan.primary and not plan.selections:
+        print(f"[ERROR] 未找到匹配的 skill: {skill or query_or_name}")
+        if plan.reason:
+            print(f"  原因: {plan.reason}")
+        raise typer.Exit(code=1)
+
+    if plan.uncertain:
+        print(f"[WARN] 匹配结果不确定（方法: {plan.method}）")
+
+    executor = Executor(timeout=30, allow_all=True)
+    assembler = Assembler(executor=executor, command_timeout=30)
+    runner = Runner(assembler, executor)
+
+    td_llm = _get_tool_llm_client()
+    if not td_llm:
+        print("[ERROR] session 需要 LLM 配置（tool_dispatch 档位 B）")
+        print("  请设置环境变量: SENSENOVA_MODEL, SENSENOVA_BASE_URL, SENSENOVA_API_KEY")
+        raise typer.Exit(code=1)
+
+    print(f"[INFO] 使用 tool_dispatch 模式 (档位 B), 每轮子任务最大迭代 {max_iterations} 次")
+    result = runner.run_repl(
+        plan, registry, query=match_query, llm=td_llm,
+        max_iterations=max_iterations,
+        working_root=working_root or str(Path.cwd()),
+        state_path=state_path, resume_from=resume_from,
+    )
+
+    stopped = result.get("stopped_by")
+    if stopped in ("error", "rate_limited", "no_match", "load_failed"):
+        print(f"[session] 异常退出（{stopped}）: {result.get('output', '')}")
+
+
+def main() -> None:
+    """程序入口。
+
+    三种等价调用方式：
+      1. skill-engine ...              （安装后的 console_scripts，见 pyproject [project.scripts]）
+      2. python -m skill_engine ...    （走 __main__.py，免安装调试推荐）
+      3. python -m skill_engine.cli ...（直接跑本模块）
+    """
+    app()
+
+
+if __name__ == "__main__":
+    main()

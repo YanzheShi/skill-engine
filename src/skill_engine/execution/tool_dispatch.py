@@ -12,6 +12,7 @@
 """
 
 import os
+import sys
 import time
 import logging
 from pathlib import Path
@@ -24,6 +25,7 @@ from skill_engine.execution.tool_defs import TOOL_REGISTRY, load_skill_tools, lo
 from skill_engine.execution.context_manager import ContextManager
 from skill_engine.execution.human_io import HumanIO
 from skill_engine.execution.snapshot import FileSnapshot
+from skill_engine.execution.paths import to_native_path
 from skill_engine.security.scanner import should_approve
 from langchain_core.tools import tool
 
@@ -135,15 +137,69 @@ def _resolve_path(filepath: str, base_dir: Path) -> Path:
     Returns:
         解析后的 Path 对象
     """
-    p = Path(filepath)
+    # 归一化：展开 ~，并在 Windows 上把 /d/x、/mnt/d/x 转成 D:\x
+    # （模型常按 Git Bash 习惯给路径，不转换会被当成相对路径拼错）
+    p = to_native_path(filepath)
+    if p is None:
+        return Path(base_dir)
     if p.is_absolute():
         return p
-    # 展开 ~（如 ~/.ssh/config）
-    expanded = os.path.expanduser(filepath)
-    if expanded != filepath:
-        return Path(expanded)
     # 相对路径
-    return Path(base_dir) / filepath
+    return Path(base_dir) / p
+
+
+def build_env_header(base_dir: Path, shell: str = "") -> str:
+    """生成注入给 LLM 的环境说明块。
+
+    没有这段说明时，模型只能靠猜：在 Windows + cmd.exe 上照样发 `ls -la`、`pwd`，
+    再拿 Git Bash 风格的 `/d/...` 路径去 `cd`，一路失败还看不出原因。
+    把 OS / shell / 工作目录 / 路径风格显式告诉它，这类空转就消失了。
+
+    Args:
+        base_dir: 本次运行的工作目录（已归一化为原生路径）
+        shell: Executor 实际使用的 shell（"cmd" / "bash" / "wsl"）
+
+    Returns:
+        <env> 块 + 环境约定的文本，供拼在 final_prompt 之前
+    """
+    is_win = os.name == "nt"
+    os_name = "Windows" if is_win else ("macOS" if sys.platform == "darwin" else "Linux")
+
+    if shell == "cmd":
+        shell_desc = "cmd.exe（Windows 命令提示符，不是 bash）"
+        shell_rule = (
+            "- Shell 是 cmd.exe：不要用 ls / pwd / cat / grep / touch / rm / "
+            "`mkdir -p`，对应改用 dir / cd / type / findstr / del / mkdir。"
+        )
+    elif shell == "wsl":
+        shell_desc = "WSL bash（命令在 WSL 中执行，路径为 /mnt/<盘符>/... 形式）"
+        shell_rule = "- Shell 是 WSL bash：可用标准 Unix 命令。"
+    else:
+        shell_desc = "bash"
+        shell_rule = "- Shell 是 bash：可用标准 Unix 命令。"
+
+    path_rule = (
+        "- 路径一律用 Windows 原生写法（D:\\a\\b 或 D:/a/b）。不要用 /d/... 或 "
+        "/mnt/d/... —— 那是 Git Bash / WSL 的写法，本机 Python 无法识别，"
+        "会直接报 [WinError 267] 目录名称无效。"
+        if is_win else
+        "- 路径用 POSIX 写法（/home/x/proj）。"
+    )
+
+    return (
+        "<env>\n"
+        f"操作系统: {os_name}\n"
+        f"Shell: {shell_desc}\n"
+        f"工作目录: {base_dir}\n"
+        "</env>\n\n"
+        "环境约定（务必遵守）:\n"
+        "- bash 工具的命令**已经**在上述「工作目录」中执行，不需要也不要 cd 过去。\n"
+        f"{path_rule}\n"
+        "- 相对路径直接以工作目录为基准，例如 src/demo/main.py。\n"
+        "- 读写/搜索文件优先用 read_file / write_file / edit_file / search_files 工具，"
+        "它们跨平台且比 bash 可靠；bash 只用于跑测试、构建等真正需要 shell 的场景。\n"
+        f"{shell_rule}\n\n"
+    )
 
 
 def _read_file_with_lines(content: str, offset: int = 0, limit: int = 0) -> str:
@@ -204,7 +260,34 @@ def format_observation(cmd: str, exec_result: dict) -> str:
     if stderr:
         lines.append("stderr:")
         lines.append(stderr[:500])
+    hint = _diagnose_shell_error(stderr)
+    if hint:
+        lines.append(f"hint: {hint}")
     return "\n".join(lines)[:10000]
+
+
+# stderr 特征 -> 可执行的纠正提示。命中即在 observation 里补一行 hint，
+# 打断"模型看不懂报错 -> 换个花样再试 -> 又失败"的空转循环。
+_SHELL_ERROR_HINTS = (
+    (("WinError 267", "目录名称无效", "The directory name is invalid"),
+     "工作目录路径无效。Windows 上不要用 /d/... 或 /mnt/d/... 这种 Git Bash / WSL 写法，"
+     "改用 D:\\path\\to\\dir。命令已在工作目录中执行，通常根本不需要 cd。"),
+    (("不是内部或外部命令", "is not recognized as an internal or external command"),
+     "当前 shell 是 cmd.exe，不是 bash。ls/pwd/cat/grep/touch 都不可用，"
+     "对应改用 dir/cd/type/findstr，或直接改用 read_file / search_files 等跨平台工具。"),
+    (("WinError 2", "系统找不到指定的文件", "The system cannot find the file specified"),
+     "可执行文件或路径不存在。先用 search_files / read_file 确认路径，再执行。"),
+)
+
+
+def _diagnose_shell_error(stderr: str) -> str:
+    """根据 stderr 匹配已知失败模式，返回一句可执行的纠正提示（无匹配返回空串）。"""
+    if not stderr:
+        return ""
+    for needles, hint in _SHELL_ERROR_HINTS:
+        if any(n in stderr for n in needles):
+            return hint
+    return ""
 
 
 def parse_tool_calls(response) -> list:
@@ -275,7 +358,8 @@ class ToolDispatchRunner:
         self.approval_fn = approval_fn  # Runner._check_approval 回调
         self.human_io = human_io
         self.turn_policy = turn_policy
-        self.working_root = Path(working_root) if working_root else None
+        # 归一化：Windows 下允许用户传 Git Bash / WSL 风格路径（/d/x、/mnt/d/x）
+        self.working_root = to_native_path(working_root)
 
     def _truncate_msg(self, content: str, max_chars: int = 5000) -> str:
         """Truncate tool result message content to prevent context overflow.
@@ -328,6 +412,9 @@ class ToolDispatchRunner:
         max_iterations: int = 10,
         state_path: Optional[str] = None,
         resume_from: Optional[str] = None,
+        initial_messages: Optional[list] = None,
+        session_mode: bool = False,
+        snapshot: Optional[FileSnapshot] = None,
     ) -> dict:
         """执行 tool_dispatch 循环
 
@@ -339,6 +426,12 @@ class ToolDispatchRunner:
                 供后续 resume_from 续跑。不传则不持久化。
             resume_from: 可选，从指定状态文件续跑（载入 messages / 进度），
                 继续对话而非重头来过。与 state_path 同源时即为"中断后续跑"。
+            initial_messages: 可选，直接以该历史起轮（session 续轮用）。
+            session_mode: 会话模式。注入 ask_user 工具，并在无 tool_calls 时
+                立即以 stopped_by="session_turn_end" 返回，把控制权交还编排层。
+            snapshot: 可选，外部注入的 FileSnapshot 实例。不传则每次 run() 新建
+                （检查点=本次运行起点）；session 模式由 run_repl 传入同一实例，
+                使 restore_file 能回滚到整个会话的起点而非本轮起点。
 
         Returns:
             执行结果 dict
@@ -348,7 +441,13 @@ class ToolDispatchRunner:
 
         # P2-2：通用文件快照（检查点），记录写文件前的原始内容供回滚
         base_dir = self.working_root or Path(skill.directory)
-        self._snapshot = FileSnapshot(base_dir)
+
+        # 环境头：显式告诉模型 OS / shell / 工作目录 / 路径风格。
+        # 缺了这段，模型在 Windows 上会照发 ls/pwd 与 /d/... 路径，空转到迭代上限。
+        final_prompt = build_env_header(base_dir, getattr(self.executor, "shell", "")) + final_prompt
+        # 复用外部快照时，_recorded 集合得以跨轮保留，第 2 轮的首次写入不会
+        # 覆盖第 1 轮记录的 .bak（否则只能回滚到本轮起点）。
+        self._snapshot = snapshot if snapshot is not None else FileSnapshot(base_dir)
 
         # 合并内建工具 + 该 skill 自带的领域工具，再按 allowed/disallowed 过滤
         skill_tools_map: dict[str, object] = {}
@@ -376,7 +475,27 @@ class ToolDispatchRunner:
                 ok, msg = snap.restore(target)
                 return msg
 
-            skill_extra_with_restore = skill_extra + [restore_file]
+            # session 模式：注入 ask_user 工具（轮内暂停，向用户提问）；普通 run 不暴露
+            session_tools = []
+            if session_mode:
+                @tool
+                def ask_user(question: str = "") -> str:
+                    """在 session 持续会话中向用户提问并等待回答（轮内暂停）。
+
+                    当你需要用户的某个具体决策/确认才能继续当前任务时调用本工具，
+                    例如"选择方案 A 还是 B"。引擎会暂停并读取用户输入，把回答作为本
+                    工具的返回值回灌给你，你据此继续当前轮（不结束会话）。
+
+                    若只是在汇报进度或等待用户给出下一条指令，不要调用本工具，
+                    直接输出文本即可——引擎会在每轮结束后自动把控制权交还用户。
+                    """
+                    if self.human_io:
+                        if question:
+                            self.human_io.emit(question)
+                        return self.human_io.read()
+                    return ""
+                session_tools = [ask_user]
+            skill_extra_with_restore = skill_extra + [restore_file] + session_tools
             # 方案 A：MCP 远程工具并入。同名时优先保留内建工具与 restore_file，
             # 避免远程工具意外覆盖核心文件操作（bash/read_file/edit_file/...）。
             builtin_names = set(TOOL_REGISTRY.keys()) | {"restore_file"}
@@ -408,9 +527,20 @@ class ToolDispatchRunner:
 
         # P2-3：todo 落盘续跑 —— 若给定 resume_from，载入上次运行状态继续对话
         save_path = state_path or resume_from
-        if resume_from:
+        if initial_messages is not None:
+            # session 模式续轮：直接用历史起轮，final_prompt 已含在 initial_messages 中
+            ctx.messages[:] = list(initial_messages)
+            messages = ctx.messages
+        elif resume_from:
             loaded = self._load_state(resume_from)
             if loaded is not None:
+                if loaded.get("session_mode") and not session_mode:
+                    logger.warning(
+                        "状态文件 %s 由 session 模式产生（含多轮用户指令/ask_user 交互），"
+                        "正以普通 run 载入：ask_user 工具不可用且不会在轮末交还控制权。"
+                        "如需续接会话请改用 `session --resume-from`。",
+                        resume_from,
+                    )
                 ctx.messages[:] = loaded.get("messages", [])
                 messages = ctx.messages
                 iterations = loaded.get("iterations", 0)
@@ -483,6 +613,17 @@ class ToolDispatchRunner:
                 if not tool_calls:
                     text = resp.get("content", "")
                     messages.append({"role": "assistant", "content": text})
+
+                    if session_mode:
+                        # session 模式：子任务完成文本，由外层 REPL 处理后等待下条指令。
+                        # 禁用内部 human_in_loop 追问循环（决策 2），避免双重提问。
+                        step_results.append({"name": "llm_response", "type": "llm", "output": text})
+                        return RunResult(
+                            output=text,
+                            ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
+                                 "iterations": iterations, "stopped_by": "session_turn_end"},
+                            history=messages,
+                        )
 
                     if self.human_io and self.turn_policy:
                         # 多轮对话模式
@@ -959,13 +1100,20 @@ class ToolDispatchRunner:
         finally:
             # P2-3：任一退出路径（含提前 stop / error / max_iterations）都落盘，支撑续跑
             if save_path:
-                self._save_state(save_path, messages, iterations, step_results, files_created, final_prompt)
+                self._save_state(save_path, messages, iterations, step_results, files_created,
+                                 final_prompt, session_mode)
         return result
 
     # ---------------- P2-3：todo 落盘续跑（状态持久化） ----------------
 
-    def _save_state(self, path, messages, iterations, step_results, files_created, final_prompt):
-        """将运行状态落盘为 JSON，供后续 resume_from 续跑。失败静默。"""
+    def _save_state(self, path, messages, iterations, step_results, files_created,
+                    final_prompt, session_mode: bool = False):
+        """将运行状态落盘为 JSON，供后续 resume_from 续跑。失败静默。
+
+        session_mode 一并落盘：session 产生的历史含 ask_user 交互与多轮用户指令，
+        若被普通 run --resume-from 载入，行为语义不同（无 ask_user 工具、
+        无轮边界交还），载入侧据此给出提示。
+        """
         try:
             p = Path(path)
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -975,6 +1123,7 @@ class ToolDispatchRunner:
                 "iterations": iterations,
                 "step_results": step_results,
                 "files_created": files_created,
+                "session_mode": session_mode,
             }
             p.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
         except Exception:
