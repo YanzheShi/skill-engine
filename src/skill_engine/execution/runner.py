@@ -25,6 +25,47 @@ from skill_engine.execution import tool_dispatch
 from skill_engine.execution import steps as steps_runner
 from skill_engine.execution.tool_defs import parse_named_params
 from skill_engine.execution.paths import to_native_path, native_path_hint
+from skill_engine.execution.paste_buffer import resolve_refs, save_paste
+
+
+# ── REPL 元命令辅助（与终端能力无关，解决 input() 回退时多行粘贴被拆分的问题）──
+def _load_file_as_paste(path: str, base) -> str:
+    """把本地文件内容外置成引用 token（REPL 的 :load 命令用）。
+
+    失败返回以 ``[session] :load 失败`` 开头的可读错误串，供调用方重提示。
+    """
+    p = Path(path)
+    if not p.is_file():
+        return f"[session] :load 失败：文件不存在 → {path}"
+    try:
+        content = p.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"[session] :load 失败：{e}"
+    token = save_paste(content, base=base)
+    return token or f"[session] :load 失败：内容无法落盘 → {path}"
+
+
+def _capture_paste(hio, base) -> str:
+    """逐行读取多行输入直到单独一行 '.' 或 EOF，再外置成 token（REPL 的 :paste 命令用）。
+
+    与终端能力无关：即使 stdin 不是真实 TTY、bracketed paste 不可用，也能把
+    多行内容完整捕获成一条指令并落盘，根治 input() 按行拆分的问题。
+    """
+    print("（多行粘贴模式：逐行输入，单独一行输入 . 结束；Ctrl-Z 亦可结束）")
+    lines = []
+    try:
+        while True:
+            line = hio.read(prompt="... ")
+            if line.strip() == ".":
+                break
+            lines.append(line)
+    except (EOFError, KeyboardInterrupt):
+        pass
+    content = "\n".join(lines)
+    if not content.strip():
+        return ""
+    token = save_paste(content, base=base)
+    return token or content
 
 
 class SkillSession:
@@ -494,7 +535,8 @@ class Runner:
                 print(f"[session] 已从 {resume_from} 续接（{len(session.messages)} 条历史）")
 
         # 3. 构造 runner：session 模式 human_io 始终提供（供 ask_user），turn_policy=None 禁用内部循环
-        hio = human_io or CliHumanIO()
+        hio = human_io or CliHumanIO(paste_dir=os.path.join(wr, "pastes"))
+        print(f"[session] 输入模式: {getattr(hio, 'input_mode', lambda: '未知')()}")
         td_runner = tool_dispatch.ToolDispatchRunner(
             executor=self.executor, assembler=self.assembler,
             approval_fn=self._check_approval, human_io=hio,
@@ -548,7 +590,7 @@ class Runner:
         lines.append("  直接用自然语言描述要做的事即可，例如：")
         hint = getattr(m, "argument_hint", "")
         lines.append(f"    {hint}" if hint else "    给 src/xxx.py 加一个 foo() 函数并补上测试")
-        lines.append("  会话内命令：/exit 或 /done 退出 · 直接回车 = 沿用上文继续")
+        lines.append("  会话内命令：/exit 或 /done 退出 · 直接回车 = 沿用上文继续 · :paste 多行输入 · :load <文件> 读取本地文件")
         return "\n".join(lines)
 
     def _resolve_session_skill(self, plan, registry, query: str):
@@ -595,9 +637,27 @@ class Runner:
             else:
                 # 无初始 query / 续接首轮 / 后续各轮：等待用户下条指令
                 user_cmd = hio.read(prompt=f"[{skill.metadata.name}] > ")
+                # 终端无关的元命令：解决 input() 回退时多行粘贴被按行拆分的问题
+                if user_cmd.startswith(":load "):
+                    loaded = _load_file_as_paste(user_cmd[6:].strip(), os.path.join(wr, "pastes"))
+                    if loaded.startswith("[session] :load 失败"):
+                        print(loaded)
+                        iteration -= 1
+                        continue
+                    user_cmd = loaded
+                elif user_cmd.strip() == ":paste":
+                    pasted = _capture_paste(hio, os.path.join(wr, "pastes"))
+                    if not pasted.strip():
+                        print("[session] 未捕获到内容，已忽略")
+                        iteration -= 1
+                        continue
+                    user_cmd = pasted
                 if user_cmd in ("/exit", "/done"):
                     return session_result(session.skill_name, "user_exit", output=last_output)
-                cmd = user_cmd.strip()
+                cmd, paste_paths = resolve_refs(user_cmd)
+                cmd = cmd.strip()
+                if paste_paths:
+                    print(f"[session] 已接管 {len(paste_paths)} 个粘贴片段（已落盘，agent 将读取）")
                 if cmd:
                     session.append_user(cmd)
                 elif session.messages:
