@@ -1107,6 +1107,39 @@ class ToolDispatchRunner:
                             })
                             print(f"     web_search ERROR: {e}")
 
+                    elif tc["type"] == "get_current_time":
+                        timezone = tc["input"].get("timezone", "Asia/Shanghai")
+                        try:
+                            import urllib.request
+                            import json as _json
+                            url = f"https://timeapi.io/api/Time/current/zone?timeZone={urllib.request.quote(timezone)}"
+                            req = urllib.request.Request(url, headers={"User-Agent": "skill-engine/1.0"})
+                            with urllib.request.urlopen(req, timeout=10) as resp:
+                                data = _json.loads(resp.read().decode("utf-8"))
+                            obs = _json.dumps(data, ensure_ascii=False)
+                            step_results.append({
+                                "name": f"get_current_time_{tc['id']}",
+                                "type": "get_current_time",
+                                "timezone": timezone,
+                                "output": obs[:1000],
+                            })
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "get_current_time",
+                                "content": self._truncate_msg(obs),
+                            })
+                            print(f"     get_current_time {timezone}: {data.get('dateTime', '?')}")
+                        except Exception as e:
+                            obs = f"Get time failed: {e}"
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "get_current_time",
+                                "content": obs,
+                            })
+                            print(f"     get_current_time ERROR: {e}")
+
                     else:
                         # ---- skill 自带工具的通用执行分支（工具可插拔接口）----
                         # 内建工具名都已在上面的 if/elif 中处理，这里只兜底 skill 注入的领域工具。

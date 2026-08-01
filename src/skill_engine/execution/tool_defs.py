@@ -120,7 +120,24 @@ def web_search(query: str, max_results: int = 5) -> str:
     """
 
 
-TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search]
+@tool
+def get_current_time(timezone: str = "Asia/Shanghai") -> str:
+    """Get the current date and time from a web time API (not local clock).
+
+    Uses timeapi.io to fetch the current time for a given timezone.
+    Returns structured JSON with year, month, day, hour, minute, seconds,
+    day of week, and whether DST is active.
+
+    Args:
+        timezone: IANA timezone name (e.g. "Asia/Shanghai", "America/New_York",
+                  "Europe/London", "Asia/Tokyo"). Default is "Asia/Shanghai".
+
+    Returns:
+        JSON string with current time information, or error message.
+    """
+
+
+TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search, get_current_time]
 
 # 工具注册表：将硬编码列表升级为可扩展注册表（通用引擎核心，不绑定领域语义）。
 # 各 skill 可经 frontmatter 的 extra_tools 注入领域专属工具，核心不感知具体领域。
