@@ -27,6 +27,7 @@ from skill_engine.execution.human_io import HumanIO
 from skill_engine.execution.snapshot import FileSnapshot
 from skill_engine.execution.paths import to_native_path
 from skill_engine.security.scanner import should_approve
+from skill_engine.config import TAVILY_API_KEY
 from langchain_core.tools import tool
 
 import re
@@ -1052,6 +1053,59 @@ class ToolDispatchRunner:
                                 "content": f"[搜索失败: {e}]",
                             })
                             print(f"     ERROR: {e}")
+
+                    elif tc["type"] == "web_search":
+                        query = tc["input"].get("query", "")
+                        max_results = int(tc["input"].get("max_results", 5))
+                        if not query:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "web_search",
+                                "content": "error: query 不能为空",
+                            })
+                            print("     web_search: empty query")
+                            continue
+                        api_key = TAVILY_API_KEY
+                        if not api_key:
+                            obs = "Search failed: TAVILY_API_KEY is not set. Get a free key at https://app.tavily.com"
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "web_search",
+                                "content": obs,
+                            })
+                            print(f"     web_search: {obs}")
+                            continue
+                        try:
+                            from tavily import TavilyClient
+                            max_results = max(1, min(10, max_results))
+                            client = TavilyClient(api_key=api_key)
+                            result = client.search(query, max_results=max_results)
+                            results = result.get("results", [])
+                            obs = json.dumps(results, ensure_ascii=False)
+                            step_results.append({
+                                "name": f"web_search_{tc['id']}",
+                                "type": "web_search",
+                                "query": query,
+                                "output": obs[:1000],
+                            })
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "web_search",
+                                "content": self._truncate_msg(obs),
+                            })
+                            print(f"     web_search '{query}': {len(results)} results")
+                        except Exception as e:
+                            obs = f"Search failed: {e}"
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "web_search",
+                                "content": obs,
+                            })
+                            print(f"     web_search ERROR: {e}")
 
                     else:
                         # ---- skill 自带工具的通用执行分支（工具可插拔接口）----

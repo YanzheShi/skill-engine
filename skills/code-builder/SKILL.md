@@ -124,6 +124,14 @@ arguments:
 3. **edit_file** — 定向修改已有文件（推荐，oldText 必须唯一）
 4. **search_files** — 在项目中搜索文本（支持正则和 file_glob 过滤）
 5. **bash** — 执行 shell 命令（用于验证）
+6. **web_search** — 网页搜索（使用 Tarvily，付费，每月1000次，避免盲目使用）
+
+**`web_search` 使用场景：**
+- 查某库的最新版本、API 文档、弃用说明
+- 确认某个第三方库是否支持某特性（如 "pydantic v2 是否支持 discriminated union"）
+- 查最新的 Python/框架发布说明
+- 用户问"这个库现在用什么方式"、"有没有更好的替代方案"等需要联网信息的问题
+- 解决构建/运行时错误，搜索错误信息或 Stack Overflow 讨论
 
 
 ## 常见陷阱

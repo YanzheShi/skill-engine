@@ -124,6 +124,14 @@ SECURITY_MODE = os.getenv("SKILLS_ENGINE_SECURITY_MODE", "strict").strip().lower
 """
 
 
+# ================================================================
+# 第三方服务 API Key
+# ================================================================
+
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
+"""Tavily AI Search API key。免费注册：https://app.tavily.com"""
+
+
 def get_security_mode() -> str:
     """获取当前安全模式（每次读环境变量，不缓存）"""
     return os.getenv("SKILLS_ENGINE_SECURITY_MODE", "strict").strip().lower()

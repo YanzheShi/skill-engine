@@ -93,7 +93,34 @@ def stop(reason: str = "finished") -> str:
     """
 
 
-TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop]
+@tool
+def web_search(query: str, max_results: int = 5) -> str:
+    """Search the web using Tavily AI search and return structured JSON results.
+
+    Tavily is designed for AI/LLM use — results include cleaned page content,
+    relevance scores, and source URLs. Free tier: 1,000 searches/month.
+
+    Set the TAVILY_API_KEY environment variable to use this tool.
+    Get a free key at: https://app.tavily.com
+
+    Use this when you need current information from the internet:
+    - New library documentation, APIs, or version-specific features
+    - Framework migration guides and best practices
+    - Error solutions you haven't seen before
+    - Current best practices, trends, or alternatives
+    - Verifying assumptions about library behavior
+
+    Args:
+        query: The search query string.
+        max_results: Maximum number of search results to return (1-10, default 5).
+
+    Returns:
+        JSON string: [{"title": "...", "url": "...", "content": "..."}, ...]
+        or error message: "Search failed: ..."
+    """
+
+
+TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search]
 
 # 工具注册表：将硬编码列表升级为可扩展注册表（通用引擎核心，不绑定领域语义）。
 # 各 skill 可经 frontmatter 的 extra_tools 注入领域专属工具，核心不感知具体领域。
