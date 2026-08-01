@@ -4,13 +4,20 @@
 
 ## 特性
 
-- **独立于任何 AI 产品** — 不依赖 Claude Code、Cursor 等
+- **独立于任何 AI 产品** — 不依赖 Claude Code、Cursor 等，自带 CLI 和 Web UI
 - **兼容 CC 生态** — 能加载和运行 `.agents` 仓库中的 skill
-- **四种运行模式** — Steps DSL（确定性）/ 档位 B（tool_dispatch LLM 循环）/ 档位 A（单次 LLM）/ 纯编译（pipe）
-- **三级路由匹配** — 精确名称 / 关键词打分（jiebai + intention 权重）/ LLM 兜底
+- **四种运行模式** — Steps DSL（确定性）/ tool_dispatch LLM 循环（档位 B）/ 单次 LLM（档位 A）/ 纯编译（pipe）
+- **三级路由匹配** — 精确名称 / 关键词打分（jieba + intention 权重）/ LLM 兜底
 - **安全审批系统** — 离线扫描 + 运行时审批，strict/permissive/off 三种模式
 - **会话级审批缓存** — y(本次)/Y(会话允许)/N(拒绝)/r(会话拒绝)/A(全部允许)
+- **自动审批** — 支持 `skill_name:binary` 粒度格式
+- **MCP 服务器支持** — 通过 `mcp.json` 连接外部 MCP 服务器（stdio/HTTP/SSE）
+- **文件快照** — 执行前自动创建文件检查点，支持回滚
+- **多轮 REPL 会话** — 同一 skill 的持续交互式会话
+- **元数据预处理** — 自动抽取 intention / synonyms / purpose / keywords 增强匹配
+- **Skill 创建** — 通过自然语言描述，LLM 自动生成 skill
 - **Web UI** — Gradio 界面，含逐步交互审批
+- **跨平台路径** — 自动归一化 Git Bash / WSL / Cygwin 路径到 Windows 原生路径
 - **Windows 原生支持** — WriteConsoleW 控制台交互，UTF-8 编码
 
 ## 安装
@@ -25,6 +32,34 @@ uv sync --extra ui
 # 安装 tokenize（中文分词）
 uv sync --extra tokenize
 ```
+
+## 环境变量配置
+
+复制 `.env.example` 为 `.env` 并填入配置：
+
+```bash
+cp .env.example .env
+```
+
+最小配置只需要一个 LLM 提供商（OpenAI 兼容 API）：
+
+```ini
+LLM_MODEL=gpt-4o
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=sk-your-api-key
+```
+
+支持任何 OpenAI 兼容的 API 提供商，包括：
+
+- OpenAI（GPT 系列）
+- SenseNova（商汤）
+- DeepSeek
+- 通义千问（DashScope）
+- vLLM 本地部署
+- Ollama 本地模型
+- 其他任何兼容 OpenAI 接口的服务
+
+> 完整配置项见 [.env.example](.env.example)。
 
 ## 快速开始
 
@@ -41,8 +76,14 @@ skill-engine run "生成题解" --llm
 # 执行 skill（Steps DSL 确定性执行）
 skill-engine run "生成题解" --steps
 
+# 执行 skill（tool_dispatch LLM 循环）
+skill-engine run "生成题解" --tool-dispatch
+
 # 安全扫描
 skill-engine scan-security
+
+# 启动 Web UI
+skill-engine web
 ```
 
 ## 目录结构
@@ -51,9 +92,9 @@ skill-engine scan-security
 src/skill_engine/
 ├── cli.py                # CLI 入口（typer）
 ├── ui.py                 # Gradio Web UI
-├── config.py             # LLM 配置 + 安全配置
+├── config.py             # LLM 配置 + 安全配置 + MCP 配置
 ├── models/
-│   └── models.py         # Skill / SkillMeta / MatchPlan / Step / MatchResult 等
+│   └── models.py         # Skill / SkillMeta / MatchPlan / Step / RunResult 等
 ├── routing/
 │   ├── router.py         # 三步路由（精确→关键词→LLM）
 │   ├── registry.py       # Skill 注册表 + meta 缓存
@@ -65,13 +106,22 @@ src/skill_engine/
 │   ├── runner.py         # 核心执行器（四路分流 + 审批）
 │   ├── executor.py       # 命令执行（subprocess 沙箱）
 │   ├── assembler.py      # Prompt 编译 + !cmd 预处理
-│   └── orchestrator.py   # 多 skill 编排
+│   ├── steps.py          # Steps DSL 执行器
+│   ├── orchestrator.py   # 多 skill 编排
+│   ├── tool_dispatch.py  # 档位 B LLM 工具循环
+│   ├── tool_defs.py      # 内建工具定义（bash/read/write/search 等）
+│   ├── context_manager.py # token 预算 + 历史压缩
+│   ├── mcp_client.py     # MCP 服务器连接客户端
+│   ├── snapshot.py       # 文件检查点 / 回滚系统
+│   ├── human_io.py       # 人机交互抽象层（CLI / prompt_toolkit）
+│   ├── paste_buffer.py   # 大段内容外置化保存
+│   └── paths.py          # 跨平台路径归一化
 ├── security/
 │   └── scanner.py        # 离线扫描 + 运行时审批
 └── creator/
     ├── creator.py        # Skill 创建
     ├── designer.py       # Skill 设计（LLM prompt）
-    ├── preprocessor.py   # Meta 增量抽取
+    ├── preprocessor.py   # Meta 增量抽取（intention/synonyms/purpose/keywords）
     └── builtins.py       # 内置脚本模板
 ```
 
@@ -111,6 +161,80 @@ runner.run()
    └─ ④ 纯编译（返回 final prompt，pipe 给外部）
 ```
 
+### 档位 B（tool_dispatch）工作流
+
+```
+tool_dispatch_loop()
+   │
+   ├─ 初始化上下文管理器（token 预算）
+   ├─ 连接 MCP 服务器（如有配置）
+   ├─ 循环：
+   │   ├─ LLM 选择工具并生成参数
+   │   ├─ 安全审批检查
+   │   ├─ 执行工具
+   │   ├─ 文件快照（执行前自动备份）
+   │   └─ 结果反馈给 LLM
+   ├─ 达到 max_iterations 或 LLM 返回最终结果时退出
+   └─ 清理 MCP 连接
+```
+
+### 内建工具（tool_dispatch 模式可用）
+
+| 工具 | 功能 |
+|------|------|
+| `bash` | 执行 shell 命令 |
+| `read_file` | 读取文件内容 |
+| `write_file` | 写入文件 |
+| `edit_file` | 编辑文件（行级替换） |
+| `search_files` | 搜索文件内容 |
+| `web_search` | 网络搜索（需配置 Tavily） |
+| `get_current_time` | 获取当前时间 |
+| `stop` | 停止执行 |
+
+可通过 `extra_tools` 和 `mcp_servers` 扩展工具集。
+
+## 元数据预处理
+
+`skill-engine index` 命令会对所有 skill 进行 LLM 驱动的元数据抽取：
+
+```bash
+# 增量预处理（仅处理新 skill）
+skill-engine index
+
+# 全量重建
+skill-engine index --rebuild-meta
+```
+
+抽取的元数据字段：`intention`、`synonyms`、`purpose`、`keywords`，这些信息会参与路由匹配的第二阶段关键词打分。
+
+## MCP 服务器集成
+
+通过 `mcp.json` 配置文件连接外部 MCP 服务器：
+
+```json
+{
+  "mcp_servers": {
+    "my-server": {
+      "command": "node",
+      "args": ["server.js"],
+      "env": {"KEY": "value"}
+    }
+  }
+}
+```
+
+支持 stdio、HTTP、SSE 三种传输方式。
+
+## 多轮 REPL 会话
+
+对同一 skill 发起持续交互式会话：
+
+```bash
+skill-engine session "帮我写代码" --skill leetcode-solution-writer --max-iter 10
+```
+
+支持状态持久化（`--state-path`）和断点恢复（`--resume-from`）。
+
 ## 安全审批
 
 ### 两层架构
@@ -140,6 +264,18 @@ runner.run()
 - `r` — 同命令会话拒绝
 - `A` — 当前会话剩余全部允许
 
+### 自动审批
+
+通过环境变量 `SKILLS_ENGINE_AUTO_APPROVE` 配置：
+
+```ini
+# 全部放行
+SKILLS_ENGINE_AUTO_APPROVE=all
+
+# 指定 skill 的指定命令放行
+SKILLS_ENGINE_AUTO_APPROVE=cleanup-temp:rm
+```
+
 ### 危险命令名单
 
 ```python
@@ -153,7 +289,25 @@ RISKY_BINARIES = {"rm", "cp", "mv", "chmod", "chown", "dd", "mkfs", "python"}
 skill-engine match "查询" [--explain]
 
 # 执行
-skill-engine run "查询" [--llm] [--steps] [--dry-run] [--args "参数"]
+skill-engine run "查询" [--llm] [--steps] [--tool-dispatch]
+                       [--dry-run] [--args "参数"]
+                       [--max-iter <N>] [--non-interactive]
+                       [--working-root <DIR>] [--state-path <PATH>]
+                       [--resume-from <PATH>]
+
+# 多轮会话
+skill-engine session "查询" [--skill <NAME>] [--max-iter <N>]
+                            [--working-root <DIR>] [--state-path <PATH>]
+                            [--resume-from <PATH>]
+
+# 扫描
+skill-engine scan [--root DIR]
+
+# 索引（元数据预处理）
+skill-engine index [--build-meta] [--rebuild-meta]
+
+# 创建 skill（LLM 驱动）
+skill-engine create "生成 vue 组件" [--name <NAME>] [--dry-run]
 
 # 管理
 skill-engine list [-v]
@@ -163,7 +317,7 @@ skill-engine update <name>
 skill-engine uninstall <name>
 
 # 安全
-skill-engine scan-security [name]
+skill-engine scan-security [name] [--deep] [--json]
 
 # 缓存
 skill-engine clear-cache
@@ -180,6 +334,10 @@ name: skill-name
 description: 技能描述
 when_to_use: 触发条件
 groups: [category]
+argument_hint: 参数提示
+allowed_tools: [bash, read_file, write_file]
+mcp_servers: [my-server]
+human_in_loop: true
 ---
 
 ## User Request
@@ -202,6 +360,8 @@ $ARGUMENTS
   output_file: output/result.md
   template: 写入内容
 ```
+
+支持更多元数据字段：`alias`、`shortcuts`、`intent_verbs`、`agent`、`model`、`effort`、`context`（INLINE/FORK）、`turn_policy`、`context_budget`、`disabled_model_invocation`、`user_invocable`、`disallowed_tools` 等。
 
 ## Web UI
 
@@ -235,11 +395,13 @@ uv run pytest tests/ -q
 
 ## 环境变量
 
+完整的环境变量列表见 [.env.example](.env.example)。核心配置项：
+
 ```ini
 # LLM 配置（至少配一个）
-SENSENOVA_MODEL=longcat-2.0-preview
-SENSENOVA_BASE_URL=https://api.example.com/v1
-SENSENOVA_API_KEY=sk-xxx
+LLM_MODEL=gpt-4o
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_API_KEY=sk-xxx
 
 # 安全模式（可选）
 # SKILLS_ENGINE_SECURITY_MODE=permissive
@@ -247,6 +409,12 @@ SENSENOVA_API_KEY=sk-xxx
 
 # 自动审批（可选，跳过弹窗）
 # SKILLS_ENGINE_AUTO_APPROVE=all
+
+# MCP 配置（可选）
+# SKILL_ENGINE_MCP_CONFIG=./mcp.json
+
+# 搜索 API（可选）
+# TAVILY_API_KEY=tvly-xxx
 ```
 
 ## License

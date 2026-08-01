@@ -1,9 +1,8 @@
 """LLM configuration: purpose → model registry.
 
 Reads from .env:
-- AGNES_API_KEY, AGNES_BASE_URL
-- SENSENOVA_API_KEY, SENSENOVA_BASE_URL
-- SENSENOVA_MODEL, SENSENOVA_MODEL1
+- LLM_MODEL, LLM_BASE_URL, LLM_API_KEY
+- LLM_MODEL_ALT, LLM_BASE_URL_ALT, LLM_API_KEY_ALT
 - etc.
 
 业务代码只通过 get_llm(purpose="xxx") 获取模型实例，不关心具体用哪个模型。
@@ -27,17 +26,17 @@ else:
 # 这里只定义"有哪些模型可用"，不决定业务用哪个。
 # PURPOSE_CONFIGS 引用这里的 alias。
 LLM_CONFIGS = {
-    "sensenova-deepseek": {
-        "model": os.getenv("SENSENOVA_MODEL"),
+    "default": {
+        "model": os.getenv("LLM_MODEL"),
         "model_provider": "openai",
-        "base_url": os.getenv("SENSENOVA_BASE_URL"),
-        "api_key": os.getenv("SENSENOVA_API_KEY"),
+        "base_url": os.getenv("LLM_BASE_URL"),
+        "api_key": os.getenv("LLM_API_KEY"),
     },
-    "sensenova": {
-        "model": os.getenv("SENSENOVA_MODEL1"),
+    "secondary": {
+        "model": os.getenv("LLM_MODEL_ALT"),
         "model_provider": "openai",
-        "base_url": os.getenv("SENSENOVA_BASE_URL"),
-        "api_key": os.getenv("SENSENOVA_API_KEY"),
+        "base_url": os.getenv("LLM_BASE_URL_ALT"),
+        "api_key": os.getenv("LLM_API_KEY_ALT"),
     },
 }
 
@@ -46,24 +45,24 @@ LLM_CONFIGS = {
 # 改模型只需改这里，业务代码一行不动。
 PURPOSE_CONFIGS = {
     # === CLI ===
-    "cli-chat":        {"alias": "sensenova-deepseek"},
-    "cli-tool":        {"alias": "sensenova-deepseek"},
-    "cli-index":       {"alias": "sensenova-deepseek"},
-    "cli-create":      {"alias": "sensenova-deepseek"},
-    "cli-security":    {"alias": "sensenova-deepseek"},
+    "cli-chat":        {"alias": "default"},
+    "cli-tool":        {"alias": "default"},
+    "cli-index":       {"alias": "default"},
+    "cli-create":      {"alias": "default"},
+    "cli-security":    {"alias": "default"},
 
     # === 路由 ===
-    "router":          {"alias": "sensenova-deepseek"},
+    "router":          {"alias": "secondary"},
 
     # === Steps DSL ===
-    "steps-llm":       {"alias": "sensenova-deepseek", "temperature": 0.7},
+    "steps-llm":       {"alias": "default", "temperature": 0.7},
 
     # === 编排 ===
-    "orchestrator":    {"alias": "sensenova-deepseek"},
+    "orchestrator":    {"alias": "default"},
 
     # === UI ===
-    "ui-engine":       {"alias": "sensenova-deepseek"},
-    "ui-chat":         {"alias": "sensenova-deepseek"},
+    "ui-engine":       {"alias": "default"},
+    "ui-chat":         {"alias": "default"},
 }
 
 
@@ -122,6 +121,14 @@ SECURITY_MODE = os.getenv("SKILLS_ENGINE_SECURITY_MODE", "strict").strip().lower
 - permissive: tool_dispatch/ctx_relay 降级为 ATTENTION（弹窗确认）
 - off: 所有命令放行
 """
+
+
+# ================================================================
+# MCP 配置
+# ================================================================
+
+MCP_CONFIG_PATH = os.getenv("SKILL_ENGINE_MCP_CONFIG", "")
+"""MCP 服务器配置文件路径（mcp.json）。"""
 
 
 # ================================================================

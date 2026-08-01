@@ -313,7 +313,7 @@ def run(
     # --args 模式：query_or_name 是 skill 名（精确匹配），args 是用户实际请求
     # 否则 query_or_name 是自然语言查询，走三步路由
     # 修复：此处曾有 `llm = _get_llm_client()`，把 --llm 布尔 flag 覆盖成客户端对象，
-    # 导致 ① 不带 --llm 也强制走 LLM 分支；② 无 AGNES_* 配置时纯编译模式也直接退出。
+    # 导致 ① 不带 --llm 也强制走 LLM 分支；② 无 LLM 配置时纯编译模式也直接退出。
     if args:
         # 用 skill 名做匹配（精确命中 name exact 路由），用 args 做 $ARGUMENTS
         plan = router.match(query_or_name)
@@ -355,7 +355,7 @@ def run(
             td_llm = _get_tool_llm_client()
             if not td_llm:
                 print("[ERROR] --tool-dispatch 需要 LLM 配置")
-                print("  请设置环境变量: SENSENOVA_MODEL, SENSENOVA_BASE_URL, SENSENOVA_API_KEY")
+                print("  请设置环境变量: LLM_MODEL, LLM_BASE_URL, LLM_API_KEY")
                 print("  或去掉 --tool-dispatch 使用纯编译模式")
                 raise typer.Exit(code=1)
             print(f"[INFO] 使用 tool_dispatch 模式 (档位 B), 最大迭代 {max_iterations} 次")
@@ -621,7 +621,7 @@ def index(
         llm = get_llm(purpose="cli-index")
     except Exception as e:
         print(f"[ERROR] 获取 LLM 配置失败: {e}")
-        print("  请设置环境变量: SENSENOVA_MODEL, SENSENOVA_BASE_URL, SENSENOVA_API_KEY")
+        print("  请设置环境变量: LLM_MODEL, LLM_BASE_URL, LLM_API_KEY")
         raise typer.Exit(code=1)
 
     # 3. 预处理
@@ -883,7 +883,7 @@ def session(
     td_llm = _get_tool_llm_client()
     if not td_llm:
         print("[ERROR] session 需要 LLM 配置（tool_dispatch 档位 B）")
-        print("  请设置环境变量: SENSENOVA_MODEL, SENSENOVA_BASE_URL, SENSENOVA_API_KEY")
+        print("  请设置环境变量: LLM_MODEL, LLM_BASE_URL, LLM_API_KEY")
         raise typer.Exit(code=1)
 
     print(f"[INFO] 使用 tool_dispatch 模式 (档位 B), 每轮子任务最大迭代 {max_iterations} 次")
