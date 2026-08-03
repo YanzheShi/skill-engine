@@ -401,7 +401,7 @@ TOOL_HANDLERS: dict[str, ToolHandler]   # bash/read_file/.../restore_file 各自
 |---|---|---|---|
 | 2026-08-04 | c3a5c8e | S0-1 FileStateTracker（软/硬约束 + bash 后失效 + session 跨轮）+ S0-4a bash timeout 参数（硬上限 600s） | +16 |
 | 2026-08-04 | ce9dca3 | S0-2 search_files 双实现（ripgrep 优先含 --no-require-git、纯 Python 回退、max_results 参数化）+ S0-3 三级压缩（L1 折叠/L2 中立 schema/L3 截断、中文估算修正、预算默认 32768 可配）+ S0-4b verify_command 自动验证钩子（失败结构化回灌） | +29 |
-| 2026-08-04 | 313bc19 | S1-3 编辑 diff 预览：difflib unified diff + confirm_edits 确认门（'true' 逐次确认 / 'batch' 逐文件确认，首次批准后该文件会话内自动放行；非交互降级仅展示）；code-builder 已声明 batch | +11 |
+| 2026-08-04 | 328c301 | S1-3 编辑 diff 预览：difflib unified diff + confirm_edits 确认门（'true' 逐次确认 / 'batch' 逐文件确认，首次批准后该文件会话内自动放行；非交互降级仅展示）；code-builder 已声明 batch | +11 |
 
 **P0 状态：全部完成（6/6）** —— 编辑一致性、检索、上下文工程、验证闭环、diff 预览均已落地。
 下一步为 P1：todo 工具 / Plan 门闩 / 可写根 containment / 流式与成本统计 / tool_dispatch handler 化重构（见 §6-§7）。
@@ -412,29 +412,31 @@ TOOL_HANDLERS: dict[str, ToolHandler]   # bash/read_file/.../restore_file 各自
 
 ---
 
-## 附录 A：开源前安全清单（2026-08-04 检查结果）
+## 附录 A：开源前安全清单（2026-08-04 检查，08-05 复核修正）
 
-仓库计划由 private 转 public。转可见性本身**不会丢任何 commit/分支/tag/issues**，但检查发现必须先处理的历史泄露问题：
+仓库计划由 private 转 public。初查发现 `.env`（含真实 key：QWEN / DASHSCOPE / AGNES / SENSENOVA 的 `sk-*`、Judge0 密码、ADMIN_PASSWORD、SECRET_KEY_BASE、本地 VAULT_PATH）曾进入 git 对象库（Phase 1 提交 `c8daf3d`，后于 `2488410` 删除文件）。
 
-1. **`.env` 曾带真实密钥进入 git 历史**：Phase 1 提交（`c8daf3d`）引入了含真实 key 的 `.env`（QWEN / DASHSCOPE / AGNES / SENSENOVA 的 `sk-*` key，Judge0 Redis/Postgres 密码、ADMIN_PASSWORD、SECRET_KEY_BASE，以及本地 VAULT_PATH），后续 `2488410` 虽然删除了文件，但**历史快照中仍然存在**。
-2. `.env.example` / `.env.template` 已核实仅含占位符，无需处理；现行 `.gitignore` 已正确排除 `.env`。
-
-**转 public 前必须按序执行**：
+**复核结论（可达性分析）：不构成泄露风险，无需 filter-repo。**
 
 ```bash
-# 0. 先去各家控制台轮换/吊销所有暴露过的 key（不可跳过）
-
-# 1. 在仓库的 fresh clone 上清理历史
-pip install git-filter-repo
-git filter-repo --invert-paths --path .env
-# filter-repo 会移除 remote 配置，需重新添加
-git remote add origin <仓库地址>
-git push origin --force --all && git push origin --force --tags
+git branch -a --contains c8daf3d   # → 空：无任何本地/远程分支包含
+git tag --contains c8daf3d         # → 空：无 tag 包含
+git name-rev c8daf3d               # → stash~22：仅可从 refs/stash 到达
 ```
 
-注意：清理会改变所有 commit 的 hash（内容变 → ID 变，向后传染），故需 `--force` 覆盖推送；操作前备份仓库目录，确认无未 commit 的工作。
+即：含 `.env` 的历史线只被一个 stash（"On feature/skill-creator: temp"，该分支已不存在）锚定在本地对象库，**从未存在于任何已推送分支**。`git push` 只传分支可达对象，`refs/stash` 从不被推送；转 public 后无人能取到该 commit。
 
-```text
-# 2. 转 public 后开启 GitHub secret scanning / push protection（公开仓库免费）
-# 3. 可选：加 gitleaks pre-commit hook 防未来再次提交密钥
-```
+**修正后的操作清单**：
+
+1. 转 public 前在自己机器上刷新远程状态并复验一次：
+   `git fetch --all --prune && git branch -r --contains c8daf3d`（应为空）；
+2. 无需 filter-repo、无需 force push、无需轮换 key（key 从未离开本机；
+   如求绝对稳妥，轮换成本低可自行选择）；
+3. stash 处理二选一：**保留**（它永远不会被推送）；或先
+   `git stash show -p stash@{0}` 确认无价值后 `git stash drop` +
+   `git gc --prune=now` 彻底清除本地痕迹；
+4. 转 public 后开启 GitHub secret scanning / push protection（公开仓库免费）；
+   可选加 gitleaks pre-commit hook。
+
+**方法教训**：扫描要用 `git log --all`（stash/tag 都算暴露面），但定性要看**可达性**
+（`branch/tag --contains`）——"在对象库里"不等于"会被推送"。
