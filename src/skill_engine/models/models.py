@@ -155,6 +155,10 @@ class SkillMetadata(BaseModel):
         default="",
         description="L2 历史压缩的自定义 prompt 模板（空=引擎默认的任务中立模板）",
     )
+    confirm_edits: str = Field(
+        default="",
+        description="编辑 diff 预览：''=关闭（默认）；'true'=每次编辑确认；'batch'=逐文件确认（首次批准后该文件自动放行）",
+    )
 
     # ===== MCP 外部工具（方案 A：全局 mcp.json + 字段引用 server 名）=====
     mcp_servers: list[str] = Field(
@@ -220,6 +224,10 @@ class MergedMeta(BaseModel):
     compress_template: str = Field(
         default="",
         description="L2 历史压缩的自定义 prompt 模板（空=引擎默认的任务中立模板）",
+    )
+    confirm_edits: str = Field(
+        default="",
+        description="编辑 diff 预览：''=关闭（默认）；'true'=每次编辑确认；'batch'=逐文件确认（首次批准后该文件自动放行）",
     )
 
     # ===== MCP 外部工具（方案 A：全局 mcp.json + 字段引用 server 名）=====

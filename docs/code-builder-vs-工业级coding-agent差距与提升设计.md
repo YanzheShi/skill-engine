@@ -400,9 +400,11 @@ TOOL_HANDLERS: dict[str, ToolHandler]   # bash/read_file/.../restore_file 各自
 | 日期 | Commit | 落地内容 | 新增用例 |
 |---|---|---|---|
 | 2026-08-04 | c3a5c8e | S0-1 FileStateTracker（软/硬约束 + bash 后失效 + session 跨轮）+ S0-4a bash timeout 参数（硬上限 600s） | +16 |
-| 2026-08-04 | 本次提交 | S0-2 search_files 双实现（ripgrep 优先含 --no-require-git、纯 Python 回退、max_results 参数化）+ S0-3 三级压缩（L1 折叠/L2 中立 schema/L3 截断、中文估算修正、预算默认 32768 可配）+ S0-4b verify_command 自动验证钩子（失败结构化回灌） | +29 |
+| 2026-08-04 | ce9dca3 | S0-2 search_files 双实现（ripgrep 优先含 --no-require-git、纯 Python 回退、max_results 参数化）+ S0-3 三级压缩（L1 折叠/L2 中立 schema/L3 截断、中文估算修正、预算默认 32768 可配）+ S0-4b verify_command 自动验证钩子（失败结构化回灌） | +29 |
+| 2026-08-04 | 313bc19 | S1-3 编辑 diff 预览：difflib unified diff + confirm_edits 确认门（'true' 逐次确认 / 'batch' 逐文件确认，首次批准后该文件会话内自动放行；非交互降级仅展示）；code-builder 已声明 batch | +11 |
 
-**P0 剩余**：S1-3 编辑 diff 预览（从 P1 提前项，~250 行，opt-in `confirm_edits`）。
+**P0 状态：全部完成（6/6）** —— 编辑一致性、检索、上下文工程、验证闭环、diff 预览均已落地。
+下一步为 P1：todo 工具 / Plan 门闩 / 可写根 containment / 流式与成本统计 / tool_dispatch handler 化重构（见 §6-§7）。
 
 **回归纪律（已执行）**：每次改动在相同条件下分别运行当前树与 HEAD 基线（git archive 导出），
 失败清单逐条 diff——存量失败（过期测试引用已删 API、VM 与 Windows 环境差异）单列，不计回归。

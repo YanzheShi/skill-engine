@@ -65,6 +65,8 @@ def edit_file(path: str, edits: list[dict]) -> str:
     Returns:
         Success: "applied N edits to <path>"
         Failure: "error: <reason>"
+        Rejected: "[用户拒绝了本次编辑] ..." when the skill enables edit
+        confirmation and the user rejects the diff (file stays unchanged).
     """
 
 

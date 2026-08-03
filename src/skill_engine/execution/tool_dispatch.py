@@ -501,6 +501,26 @@ def _run_verification(executor, base_dir: Path, verify_command: str, timeout: in
     return "\n".join(lines)[:4000]
 
 
+
+# ---------------------------------------------------------------------------
+# S1-3：编辑 diff 预览 —— 写盘前用 difflib 生成 unified diff（零依赖），
+# 按 confirm_edits 逐次/逐文件确认。默认关闭，其他 skill 零影响。
+# ---------------------------------------------------------------------------
+_DIFF_MAX_LINES = 200  # diff 超过该长度截断展示（全文重写类的大 diff）
+
+
+def _render_diff(path: str, old: str, new: str) -> str:
+    """生成供展示/确认的 unified diff；过长时截断并附提示。"""
+    import difflib
+    lines = list(difflib.unified_diff(
+        old.splitlines(), new.splitlines(),
+        fromfile=f"{path} (before)", tofile=f"{path} (after)", lineterm=""))
+    total = len(lines)
+    if total > _DIFF_MAX_LINES:
+        lines = lines[:_DIFF_MAX_LINES] + [f"... (diff 共 {total} 行，仅显示前 {_DIFF_MAX_LINES} 行)"]
+    return "\n".join(lines) if lines else "(内容无变化)"
+
+
 class ToolDispatchRunner:
     """档位 B：tool_dispatch 循环（CC 原生 skill 兼容）
 
@@ -527,6 +547,9 @@ class ToolDispatchRunner:
         self.turn_policy = turn_policy
         # 归一化：Windows 下允许用户传 Git Bash / WSL 风格路径（/d/x、/mnt/d/x）
         self.working_root = to_native_path(working_root)
+        # S1-3：batch 模式下会话内已批准的文件（run_repl 复用同一 runner 实例，跨轮存活）
+        self._file_edit_approvals: set = set()
+        self._confirm_edits_mode = "" 
 
     def _truncate_msg(self, content: str, max_chars: int = 5000) -> str:
         """Truncate tool result message content to prevent context overflow.
@@ -571,6 +594,33 @@ class ToolDispatchRunner:
             if not approved:
                 return False, "[用户跳过] 操作已取消"
         return True, ""
+
+    # ---------------- S1-3：编辑 diff 预览与确认（confirm_edits） ----------------
+    def _confirm_edit(self, op: str, filepath: str, diff_text: str) -> bool:
+        """diff 预览门。返回 True=放行落盘，False=用户拒绝。
+
+        模式（frontmatter confirm_edits）：
+        - "true" ：每次编辑都确认
+        - "batch"：逐文件确认——某文件首次编辑询问，批准后本会话内该文件自动放行
+        无 human_io（非交互场景）降级为仅展示、不阻断。
+        """
+        mode = self._confirm_edits_mode
+        if mode == "batch" and filepath in self._file_edit_approvals:
+            print(f"     [diff 预览] {op} → {filepath}（本会话已批准该文件，自动放行）")
+            print(diff_text)
+            return True
+        if self.human_io is None:
+            print(f"     [diff 预览] {op} → {filepath}（非交互模式：仅展示，直接应用）")
+            print(diff_text)
+            return True
+        ask = ("允许吗？(y 允许 / n 拒绝)" if mode != "batch"
+               else "允许吗？(y 允许并记住该文件 / n 拒绝)")
+        self.human_io.emit(f"📝 编辑预览 [{op} → {filepath}]\n{diff_text}\n{ask}")
+        answer = (self.human_io.read() or "").strip().lower()
+        approved = answer in ("y", "yes", "是", "好", "ok")
+        if approved and mode == "batch":
+            self._file_edit_approvals.add(filepath)
+        return approved
 
     def run(
         self,
@@ -628,6 +678,8 @@ class ToolDispatchRunner:
                 strict=bool(getattr(skill.metadata, "strict_file_tracking", False)))
         # P0(S0-4b)：skill 声明的自动验证命令（frontmatter 作者声明，可信）
         verify_command = (getattr(skill.metadata, "verify_command", "") or "").strip()
+        # S1-3：编辑 diff 预览模式（''/off 关闭；'true' 逐次确认；'batch' 逐文件确认）
+        self._confirm_edits_mode = str(getattr(skill.metadata, "confirm_edits", "") or "").strip().lower()
         try:
             verify_timeout = int(getattr(skill.metadata, "verify_timeout", 120) or 120)
         except (TypeError, ValueError):
@@ -1057,6 +1109,20 @@ class ToolDispatchRunner:
                         base_dir = self.working_root or Path(skill.directory)
                         full_path = _resolve_path(filepath, base_dir)
 
+                        # S1-3：diff 预览门（仅 confirm_edits 开启时进入）
+                        if self._confirm_edits_mode in ("true", "batch"):
+                            old_content = full_path.read_text(encoding="utf-8") if full_path.exists() else ""
+                            diff_text = _render_diff(filepath, old_content, content)
+                            if not self._confirm_edit("write_file", str(full_path), diff_text):
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc["id"],
+                                    "name": "write_file",
+                                    "content": "[用户拒绝了本次写入] 文件未变更。请调整方案或与用户澄清需求。",
+                                })
+                                print(f"     WRITE REJECTED by user: {filepath}")
+                                continue
+
                         try:
                             full_path.parent.mkdir(parents=True, exist_ok=True)
                             # P2-2：写回前记录快照（仅已存在文件，避免回滚到"已删除"状态）
@@ -1153,6 +1219,19 @@ class ToolDispatchRunner:
                                 })
                                 print(f"     EDIT FAILED: {err[:80]}")
                                 continue
+
+                            # S1-3：diff 预览门（仅 confirm_edits 开启时进入）
+                            if self._confirm_edits_mode in ("true", "batch"):
+                                diff_text = _render_diff(filepath, content, new_content)
+                                if not self._confirm_edit("edit_file", str(full_path), diff_text):
+                                    messages.append({
+                                        "role": "tool",
+                                        "tool_call_id": tc["id"],
+                                        "name": "edit_file",
+                                        "content": "[用户拒绝了本次编辑] 文件未变更。请调整编辑方案或与用户澄清需求。",
+                                    })
+                                    print(f"     EDIT REJECTED by user: {filepath}")
+                                    continue
 
                             # 写回前记录快照（P2-2：通用文件检查点，仅首次记录进入前状态）
                             self._snapshot.record(full_path, content)
