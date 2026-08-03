@@ -22,7 +22,7 @@ from skill_engine.models import Skill, MatchResult, TurnPolicy, RunResult
 from skill_engine.execution.assembler import Assembler
 from skill_engine.execution.executor import Executor
 from skill_engine.execution.tool_defs import TOOL_REGISTRY, load_skill_tools, load_mcp_tools
-from skill_engine.execution.context_manager import ContextManager
+from skill_engine.execution.context_manager import ContextManager, default_context_budget
 from skill_engine.execution.human_io import HumanIO
 from skill_engine.execution.snapshot import FileSnapshot
 from skill_engine.execution.file_tracker import FileStateTracker
@@ -33,6 +33,8 @@ from langchain_core.tools import tool
 
 import re
 import json
+import shutil
+import subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +342,165 @@ def parse_tool_calls(response) -> list:
     return tool_calls
 
 
+
+# ---------------------------------------------------------------------------
+# P0(S0-2)：search_files 双实现 —— ripgrep 优先（gitignore-aware、毫秒级），
+# 无 rg 二进制时回退纯 Python。独立函数实现，不进巨链（见设计文档 §7）。
+# ---------------------------------------------------------------------------
+_RG_TIMEOUT = 15           # ripgrep 子进程超时（秒）
+_SEARCH_DEFAULT_MAX = 100  # search_files 默认结果上限（旧实现为 50）
+_SEARCH_MAX_CAP = 500      # max_results 硬上限
+
+
+def _format_match(rel: str, lineno, text: str) -> str:
+    """统一的搜索结果行格式：rel:行号: 内容（截 120 字）。"""
+    return f"{rel}:{lineno}: {text.strip()[:120]}"
+
+
+def _run_ripgrep(pattern: str, search_dir: Path, file_glob: str, max_results: int):
+    """ripgrep 实现。返回 None 表示 rg 不可用/执行失败（调用方回退纯 Python）。
+
+    rg 原生尊重 .gitignore；以 search_dir 为 cwd、相对路径 '.' 执行，
+    避免 Windows 绝对路径的盘符冒号破坏 'path:line:text' 解析。
+    """
+    rg = shutil.which("rg")
+    if not rg:
+        return None
+    cmd = [rg, "--line-number", "--no-heading", "--color", "never", "--max-columns", "400",
+           "--no-require-git"]  # 无 git 仓库时也要尊重 .gitignore（rg 默认仅仓库内生效）
+    if file_glob:
+        cmd += ["--glob", file_glob]
+    target = "." if search_dir.is_dir() else search_dir.name
+    try:
+        proc = subprocess.run(
+            cmd + ["--", pattern, target],
+            cwd=str(search_dir if search_dir.is_dir() else search_dir.parent),
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=_RG_TIMEOUT,
+        )
+    except Exception:
+        return None
+    if proc.returncode not in (0, 1):  # 0=有匹配，1=无匹配；其他视为失败 → 回退
+        return None
+    matches, total = [], 0
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            continue
+        rel, lineno, text = parts
+        rel = rel.lstrip("./\\")
+        total += 1
+        if len(matches) < max_results:
+            matches.append(_format_match(rel, lineno, text))
+    if not matches:
+        return "no matches found"
+    out = "\n".join(matches)
+    if total > len(matches):
+        out += f"\n... (已显示 {len(matches)} 条，共 {total} 条匹配；请收窄 pattern 或 path)"
+    return out
+
+
+def _python_search(pattern: str, search_dir: Path, file_glob: str, max_results: int) -> str:
+    """纯 Python 回退实现（无 rg 依赖）：rglob + 逐行正则，语义与旧内联版一致。"""
+    import fnmatch
+    import re as re_module
+    matches = []
+    total_size = 0
+    overflow = False
+    try:
+        files = [search_dir] if search_dir.is_file() else sorted(search_dir.rglob("*"))
+        for f in files:
+            if overflow:
+                break
+            if not f.is_file():
+                continue
+            if any(p.startswith(".") for p in f.parts):
+                continue
+            if file_glob and not fnmatch.fnmatch(f.name, file_glob):
+                continue
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+                for i, line in enumerate(text.splitlines(), 1):
+                    if re_module.search(pattern, line):
+                        if len(matches) < max_results:
+                            rel = f.relative_to(search_dir) if search_dir.is_dir() else f.name
+                            match_line = _format_match(str(rel), i, line)
+                            matches.append(match_line)
+                            total_size += len(match_line) + 1
+                            if total_size > 8000:
+                                overflow = True
+                                break
+                        else:
+                            overflow = True  # 已够数且还有更多 → 记截断
+                            break
+                if overflow:
+                    break
+            except (UnicodeDecodeError, PermissionError, OSError):
+                continue
+    except Exception:
+        pass
+    if not matches:
+        return "no matches found"
+    out = "\n".join(matches)
+    if overflow:
+        out += f"\n... (结果已截断，显示 {len(matches)} 条；请收窄 pattern 或 path)"
+    return out
+
+def _search_files(pattern: str, search_dir: Path, file_glob: str = "", max_results: int = 0) -> str:
+    """search_files 统一入口：ripgrep 优先，失败回退纯 Python。"""
+    mr = max_results if max_results and max_results > 0 else _SEARCH_DEFAULT_MAX
+    mr = min(mr, _SEARCH_MAX_CAP)
+    result = _run_ripgrep(pattern, search_dir, file_glob, mr)
+    if result is None:
+        result = _python_search(pattern, search_dir, file_glob, mr)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# P0(S0-4b)：verify_command 自动验证钩子 —— 轮内写盘完成后跑一次，
+# 失败时把结构化信号回灌 LLM，驱动"改→验→修"闭环（不依赖 prompt 自觉）。
+# 命令来自 frontmatter（作者声明、与 Steps DSL 命令同级可信），不走运行时审批。
+# ---------------------------------------------------------------------------
+def _extract_test_failures(output: str) -> list:
+    """从 pytest 风格输出中提取 FAILED/ERROR 清单行（上限 20 条）。"""
+    fails = []
+    for ln in (output or "").splitlines():
+        s = ln.strip()
+        if s.startswith(("FAILED", "ERROR")):
+            fails.append(s[:200])
+            if len(fails) >= 20:
+                break
+    return fails
+
+
+def _run_verification(executor, base_dir: Path, verify_command: str, timeout: int):
+    """运行 verify_command。成功返回 None；失败返回回灌给 LLM 的反馈文本。"""
+    try:
+        r = executor.run_step(verify_command, cwd=base_dir, timeout=timeout)
+    except Exception as e:
+        return f"[自动验证执行异常] {verify_command}\n{e}"
+    if r.get("exit_code", -1) == 0 and not r.get("timed_out"):
+        return None
+    fails = _extract_test_failures((r.get("stdout") or "") + "\n" + (r.get("stderr") or ""))
+    lines = [
+        f"[自动验证失败] 命令: {verify_command}",
+        f"exit_code: {r.get('exit_code', -1)}" + (" (timed_out)" if r.get("timed_out") else ""),
+        "请根据以下失败信息诊断并修复，然后再次验证。",
+    ]
+    if fails:
+        lines.append("失败清单:")
+        lines.extend(f"  {x}" for x in fails)
+    err = (r.get("stderr") or "").strip()
+    if err:
+        lines.append("stderr:\n" + err[:1500])
+    out = (r.get("stdout") or "").strip()
+    if out:
+        lines.append("stdout(尾部):\n" + out[-1500:])
+    return "\n".join(lines)[:4000]
+
+
 class ToolDispatchRunner:
     """档位 B：tool_dispatch 循环（CC 原生 skill 兼容）
 
@@ -465,6 +626,12 @@ class ToolDispatchRunner:
         else:
             self._file_tracker = FileStateTracker(
                 strict=bool(getattr(skill.metadata, "strict_file_tracking", False)))
+        # P0(S0-4b)：skill 声明的自动验证命令（frontmatter 作者声明，可信）
+        verify_command = (getattr(skill.metadata, "verify_command", "") or "").strip()
+        try:
+            verify_timeout = int(getattr(skill.metadata, "verify_timeout", 120) or 120)
+        except (TypeError, ValueError):
+            verify_timeout = 120
 
         # 合并内建工具 + 该 skill 自带的领域工具，再按 allowed/disallowed 过滤
         skill_tools_map: dict[str, object] = {}
@@ -534,8 +701,13 @@ class ToolDispatchRunner:
         else:
             llm_with_tools = llm
 
-        # 上下文管理：token 预算 + 自动摘要压缩（大项目防止撑爆窗口）
-        ctx = ContextManager(budget=getattr(skill.metadata, "context_budget", 0) or 8192)
+        # 上下文管理：三级渐进压缩（P0 S0-3）。预算默认贴长会话需求
+        # （SKILLS_ENGINE_CONTEXT_BUDGET 可覆盖）；L1 折叠与 L2 压缩模板可按 skill 配置。
+        ctx = ContextManager(
+            budget=getattr(skill.metadata, "context_budget", 0) or default_context_budget(),
+            compact_tool_output=bool(getattr(skill.metadata, "compact_tool_output", True)),
+            summary_prompt=(getattr(skill.metadata, "compress_template", "") or ""),
+        )
         messages = ctx.messages
 
         iterations = 0
@@ -705,6 +877,7 @@ class ToolDispatchRunner:
                     "tool_calls": lc_tool_calls,
                 })
 
+                round_had_write = False
                 for tc in tool_calls:
                     if tc["type"] == "stop":
                         return RunResult(
@@ -892,6 +1065,7 @@ class ToolDispatchRunner:
                             full_path.write_text(content, encoding="utf-8")
                             files_created.append(str(full_path))
                             self._file_tracker.on_write(full_path)
+                            round_had_write = True
                             step_results.append({
                                 "name": f"write_{tc['id']}",
                                 "type": "write_file",
@@ -987,6 +1161,7 @@ class ToolDispatchRunner:
                             full_path.write_text(new_content, encoding="utf-8")
                             files_created.append(str(full_path))
                             self._file_tracker.on_write(full_path)
+                            round_had_write = True
 
                             result_msg = f"applied {len(edits)} edits to {filepath}"
                             if track_msg:
@@ -1037,50 +1212,16 @@ class ToolDispatchRunner:
                             })
                             continue
                         try:
-                            import fnmatch
-                            import re as re_module
-                            matches = []
-                            max_results = 50
-                            total_size = 0
-                            if search_dir.is_file():
-                                files = [search_dir]
-                            else:
-                                files = list(search_dir.rglob("*"))
-                                files.sort()
-                            for f in files:
-                                if len(matches) >= max_results:
-                                    break
-                                if not f.is_file():
-                                    continue
-                                if any(p.startswith(".") for p in f.parts):
-                                    continue
-                                if file_glob and not fnmatch.fnmatch(f.name, file_glob):
-                                    continue
-                                try:
-                                    text = f.read_text(encoding="utf-8", errors="replace")
-                                    for i, line in enumerate(text.splitlines(), 1):
-                                        if re_module.search(pattern, line):
-                                            rel = f.relative_to(search_dir) if search_dir.is_dir() else f.name
-                                            match_line = f"{rel}:{i}: {line.strip()[:120]}"
-                                            matches.append(match_line)
-                                            total_size += len(match_line) + 1
-                                            if total_size > 8000:
-                                                matches.append("... (truncated, too many matches)")
-                                                break
-                                    if total_size > 8000:
-                                        break
-                                except (UnicodeDecodeError, PermissionError, OSError):
-                                    continue
-                            if not matches:
-                                result = "no matches found"
-                            else:
-                                result = "\n".join(matches)
+                            # P0(S0-2)：ripgrep 优先（gitignore-aware），无 rg 自动回退纯 Python
+                            max_results_req = int(tc["input"].get("max_results", 0) or 0)
+                            result = _search_files(pattern, search_dir, file_glob, max_results_req)
+                            n_matches = 0 if result == "no matches found" else result.count("\n") + 1
                             step_results.append({
                                 "name": f"search_{tc['id']}",
                                 "type": "search_files",
                                 "pattern": pattern,
                                 "path": str(search_dir),
-                                "matches": len(matches),
+                                "matches": n_matches,
                             })
                             messages.append({
                                 "role": "tool",
@@ -1088,7 +1229,7 @@ class ToolDispatchRunner:
                                 "name": "search_files",
                                 "content": self._truncate_msg(result),
                             })
-                            print(f"     search '{pattern}' in {search_dir}: {len(matches)} matches")
+                            print(f"     search '{pattern}' in {search_dir}: {n_matches} matches")
                         except Exception as e:
                             messages.append({
                                 "role": "tool",
@@ -1219,6 +1360,18 @@ class ToolDispatchRunner:
                             "tool_call_id": tc["id"],
                             "content": f"[未知工具类型: {tc['type']}]",
                         })
+
+                # P0(S0-4b)：轮内写/改完成后跑一次声明的验证命令，
+                # 只在失败时回灌结构化信号，驱动"改→验→修"闭环。
+                if verify_command and round_had_write:
+                    feedback = _run_verification(
+                        self.executor, self.working_root or Path(skill.directory),
+                        verify_command, verify_timeout)
+                    if feedback:
+                        messages.append({"role": "user", "content": feedback})
+                        print("     VERIFY FAILED → 失败信号已回灌")
+                    else:
+                        print("     verify passed")
 
         # 达到最大迭代次数
             result = RunResult(

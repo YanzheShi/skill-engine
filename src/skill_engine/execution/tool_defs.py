@@ -69,17 +69,20 @@ def edit_file(path: str, edits: list[dict]) -> str:
 
 
 @tool
-def search_files(pattern: str, path: str = ".", file_glob: str = "") -> str:
+def search_files(pattern: str, path: str = ".", file_glob: str = "", max_results: int = 0) -> str:
     """Search for a regex pattern in files within a directory.
 
-    Uses Python's re module for pattern matching. Returns matching files
-    with line numbers and context. This is a pure tool (no bash dependency),
-    so it works even when bash is blocked.
+    Uses ripgrep when available (fast, respects .gitignore), with a
+    pure-Python fallback. Returns matching files with line numbers.
+    This is a pure tool (no bash dependency), so it works even when
+    bash is blocked.
 
     Args:
         pattern: Regex pattern to search for.
         path: Directory to search in (absolute, or relative to working directory).
         file_glob: Optional file filter (e.g. "*.py" to only search Python files).
+        max_results: Optional result cap. 0 = default (100). If more matches
+            exist, the output says so — narrow your pattern or path instead.
 
     Returns:
         Matching lines with file paths and line numbers, or "no matches found".
@@ -255,4 +258,4 @@ def parse_named_params(query: str) -> dict:
         value = match.group(2).rstrip(',;')
         if key not in params:
             params[key] = value
-    return params
+    return params

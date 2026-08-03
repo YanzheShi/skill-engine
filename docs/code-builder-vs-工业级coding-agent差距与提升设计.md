@@ -395,6 +395,21 @@ TOOL_HANDLERS: dict[str, ToolHandler]   # bash/read_file/.../restore_file 各自
 
 ---
 
+## 10. 实施进度（P0）
+
+| 日期 | Commit | 落地内容 | 新增用例 |
+|---|---|---|---|
+| 2026-08-04 | c3a5c8e | S0-1 FileStateTracker（软/硬约束 + bash 后失效 + session 跨轮）+ S0-4a bash timeout 参数（硬上限 600s） | +16 |
+| 2026-08-04 | 本次提交 | S0-2 search_files 双实现（ripgrep 优先含 --no-require-git、纯 Python 回退、max_results 参数化）+ S0-3 三级压缩（L1 折叠/L2 中立 schema/L3 截断、中文估算修正、预算默认 32768 可配）+ S0-4b verify_command 自动验证钩子（失败结构化回灌） | +29 |
+
+**P0 剩余**：S1-3 编辑 diff 预览（从 P1 提前项，~250 行，opt-in `confirm_edits`）。
+
+**回归纪律（已执行）**：每次改动在相同条件下分别运行当前树与 HEAD 基线（git archive 导出），
+失败清单逐条 diff——存量失败（过期测试引用已删 API、VM 与 Windows 环境差异）单列，不计回归。
+两轮 P0 切片均为零新增回归。
+
+---
+
 ## 附录 A：开源前安全清单（2026-08-04 检查结果）
 
 仓库计划由 private 转 public。转可见性本身**不会丢任何 commit/分支/tag/issues**，但检查发现必须先处理的历史泄露问题：

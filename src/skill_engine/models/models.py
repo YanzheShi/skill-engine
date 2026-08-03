@@ -133,11 +133,27 @@ class SkillMetadata(BaseModel):
     )
     context_budget: int = Field(
         default=0,
-        description="档位 B 上下文 token 预算；0=引擎默认(8192)",
+        description="档位 B 上下文 token 预算；0=引擎默认(32768，可被 SKILLS_ENGINE_CONTEXT_BUDGET 覆盖)",
     )
     strict_file_tracking: bool = Field(
         default=False,
         description="编辑前一致性硬约束：未读/外部已变的文件拒绝 edit（默认软约束仅提示）",
+    )
+    verify_command: str = Field(
+        default="",
+        description="自动验证命令：每轮写/改完成后执行一次，失败输出回灌驱动修复（如 'pytest -x -q'）；空=关闭",
+    )
+    verify_timeout: int = Field(
+        default=120,
+        description="verify_command 超时（秒）",
+    )
+    compact_tool_output: bool = Field(
+        default=True,
+        description="允许上下文 L1 微压缩：折叠旧轮次的大块工具输出",
+    )
+    compress_template: str = Field(
+        default="",
+        description="L2 历史压缩的自定义 prompt 模板（空=引擎默认的任务中立模板）",
     )
 
     # ===== MCP 外部工具（方案 A：全局 mcp.json + 字段引用 server 名）=====
@@ -183,11 +199,27 @@ class MergedMeta(BaseModel):
     )
     context_budget: int = Field(
         default=0,
-        description="档位 B 上下文 token 预算；0=引擎默认(8192)",
+        description="档位 B 上下文 token 预算；0=引擎默认(32768，可被 SKILLS_ENGINE_CONTEXT_BUDGET 覆盖)",
     )
     strict_file_tracking: bool = Field(
         default=False,
         description="编辑前一致性硬约束：未读/外部已变的文件拒绝 edit（默认软约束仅提示）",
+    )
+    verify_command: str = Field(
+        default="",
+        description="自动验证命令：每轮写/改完成后执行一次，失败输出回灌驱动修复（如 'pytest -x -q'）；空=关闭",
+    )
+    verify_timeout: int = Field(
+        default=120,
+        description="verify_command 超时（秒）",
+    )
+    compact_tool_output: bool = Field(
+        default=True,
+        description="允许上下文 L1 微压缩：折叠旧轮次的大块工具输出",
+    )
+    compress_template: str = Field(
+        default="",
+        description="L2 历史压缩的自定义 prompt 模板（空=引擎默认的任务中立模板）",
     )
 
     # ===== MCP 外部工具（方案 A：全局 mcp.json + 字段引用 server 名）=====
