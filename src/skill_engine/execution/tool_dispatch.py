@@ -25,6 +25,7 @@ from skill_engine.execution.tool_defs import TOOL_REGISTRY, load_skill_tools, lo
 from skill_engine.execution.context_manager import ContextManager
 from skill_engine.execution.human_io import HumanIO
 from skill_engine.execution.snapshot import FileSnapshot
+from skill_engine.execution.file_tracker import FileStateTracker
 from skill_engine.execution.paths import to_native_path
 from skill_engine.security.scanner import should_approve
 from skill_engine.config import TAVILY_API_KEY
@@ -34,6 +35,10 @@ import re
 import json
 
 logger = logging.getLogger(__name__)
+
+# bash 工具超时参数硬上限：测试/构建等长命令由 LLM 按需传 timeout，
+# 引擎守住上限，防止失控命令拖垮会话（P0 S0-4）。
+BASH_MAX_TIMEOUT = 600
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +421,7 @@ class ToolDispatchRunner:
         initial_messages: Optional[list] = None,
         session_mode: bool = False,
         snapshot: Optional[FileSnapshot] = None,
+        file_tracker: Optional[FileStateTracker] = None,
     ) -> dict:
         """执行 tool_dispatch 循环
 
@@ -433,6 +439,9 @@ class ToolDispatchRunner:
             snapshot: 可选，外部注入的 FileSnapshot 实例。不传则每次 run() 新建
                 （检查点=本次运行起点）；session 模式由 run_repl 传入同一实例，
                 使 restore_file 能回滚到整个会话的起点而非本轮起点。
+            file_tracker: 可选，外部注入的 FileStateTracker 实例。不传则每次 run()
+                新建（软/硬约束由 skill 的 strict_file_tracking 决定）；session 模式
+                由 run_repl 传入同一实例，使"已读"登记跨轮有效。
 
         Returns:
             执行结果 dict
@@ -449,6 +458,13 @@ class ToolDispatchRunner:
         # 复用外部快照时，_recorded 集合得以跨轮保留，第 2 轮的首次写入不会
         # 覆盖第 1 轮记录的 .bak（否则只能回滚到本轮起点）。
         self._snapshot = snapshot if snapshot is not None else FileSnapshot(base_dir)
+        # P0(S0-1)：文件状态跟踪（read-before-write）。外部注入时跨轮复用（session）；
+        # 否则本次运行新建。软约束为默认，skill 可声明 strict_file_tracking 升级硬约束。
+        if file_tracker is not None:
+            self._file_tracker = file_tracker
+        else:
+            self._file_tracker = FileStateTracker(
+                strict=bool(getattr(skill.metadata, "strict_file_tracking", False)))
 
         # 合并内建工具 + 该 skill 自带的领域工具，再按 allowed/disallowed 过滤
         skill_tools_map: dict[str, object] = {}
@@ -746,9 +762,18 @@ class ToolDispatchRunner:
                                 print(f"     REJECTED by user: {cmd[:80]}")
                                 continue
                         # SAFE 或审批通过：执行命令
+                        # P0(S0-4)：LLM 可为测试/构建等长命令传 timeout（秒），
+                        # 引擎钳制到 BASH_MAX_TIMEOUT；不传则沿用 Executor 默认。
+                        try:
+                            req_timeout = int(tc["input"].get("timeout", 0) or 0)
+                        except (TypeError, ValueError):
+                            req_timeout = 0
+                        exec_timeout = min(req_timeout, BASH_MAX_TIMEOUT) if req_timeout > 0 else None
                         try:
                             base_dir = self.working_root or Path(skill.directory)
-                            exec_result = self.executor.run_step(cmd, cwd=base_dir)
+                            exec_result = self.executor.run_step(cmd, cwd=base_dir, timeout=exec_timeout)
+                            # P0(S0-1)：bash 可能改过任何文件 → 保守失效文件读取登记
+                            self._file_tracker.invalidate_all()
                             obs = format_observation(cmd, exec_result)
                             step_results.append({
                                 "name": f"bash_{tc['id']}",
@@ -806,6 +831,8 @@ class ToolDispatchRunner:
 
                         try:
                             content = full_path.read_text(encoding="utf-8")
+                            # P0(S0-1)：登记"已读版本"，供后续 edit 一致性校验
+                            self._file_tracker.on_read(full_path)
                             formatted = _read_file_with_lines(content, offset, limit)
                             step_results.append({
                                 "name": f"read_{tc['id']}",
@@ -864,6 +891,7 @@ class ToolDispatchRunner:
                                 self._snapshot.record(full_path, full_path.read_text(encoding="utf-8"))
                             full_path.write_text(content, encoding="utf-8")
                             files_created.append(str(full_path))
+                            self._file_tracker.on_write(full_path)
                             step_results.append({
                                 "name": f"write_{tc['id']}",
                                 "type": "write_file",
@@ -924,6 +952,19 @@ class ToolDispatchRunner:
                             print(f"     FILE NOT FOUND: {filepath}")
                             continue
 
+                        # P0(S0-1)：编辑前一致性校验。软约束（默认）注入提示不阻断；
+                        # 硬约束（strict_file_tracking）拒绝执行，引导 LLM 重读后重试。
+                        track_ok, track_msg = self._file_tracker.check_editable(full_path)
+                        if not track_ok:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "edit_file",
+                                "content": track_msg,
+                            })
+                            print(f"     EDIT BLOCKED (file tracker): {filepath}")
+                            continue
+
                         try:
                             content = full_path.read_text(encoding="utf-8")
 
@@ -934,7 +975,7 @@ class ToolDispatchRunner:
                                     "role": "tool",
                                     "tool_call_id": tc["id"],
                                     "name": "edit_file",
-                                    "content": err,
+                                    "content": err + (f"\nhint: {track_msg}" if track_msg else ""),
                                 })
                                 print(f"     EDIT FAILED: {err[:80]}")
                                 continue
@@ -945,8 +986,11 @@ class ToolDispatchRunner:
                             # 写回文件
                             full_path.write_text(new_content, encoding="utf-8")
                             files_created.append(str(full_path))
+                            self._file_tracker.on_write(full_path)
 
                             result_msg = f"applied {len(edits)} edits to {filepath}"
+                            if track_msg:
+                                result_msg += f"\n{track_msg}"
                             step_results.append({
                                 "name": f"edit_{tc['id']}",
                                 "type": "edit_file",

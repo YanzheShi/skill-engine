@@ -12,7 +12,7 @@ from langchain_core.tools import tool, BaseTool
 
 
 @tool
-def bash(command: str) -> str:
+def bash(command: str, timeout: int = 0) -> str:
     """Execute a shell command and return stdout.
 
     Note: On Windows the runtime is cmd.exe, not bash.
@@ -20,6 +20,11 @@ def bash(command: str) -> str:
     - Do NOT use `mkdir -p`, just `mkdir`.
     - Paths with spaces must be quoted.
     - Do NOT use multi-line `python -c` commands.
+
+    Args:
+        timeout: Optional per-command timeout in seconds. 0 = engine default.
+                 Raise it for long-running commands (test suites, builds),
+                 e.g. timeout=300. The engine clamps it to a hard maximum.
     """  # noqa: E501
 
 
@@ -250,4 +255,4 @@ def parse_named_params(query: str) -> dict:
         value = match.group(2).rstrip(',;')
         if key not in params:
             params[key] = value
-    return params
+    return params

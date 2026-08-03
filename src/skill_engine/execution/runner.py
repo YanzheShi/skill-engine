@@ -78,6 +78,8 @@ class SkillSession:
     - state_path: 落盘路径；缺省落到 <working_root>/.workbuddy/sessions/<skill>.session.json
     - snapshot: 会话级文件检查点。整个 session 共用一个 FileSnapshot 实例，
       使 restore_file 能回滚到「会话起点」而非「本轮起点」。
+    - file_tracker: 会话级文件状态跟踪。整个 session 共用一个 FileStateTracker
+      实例，使"已读"登记跨轮有效（与 snapshot 同级同生命周期）。
     """
 
     def __init__(
@@ -87,6 +89,8 @@ class SkillSession:
         state_path: Optional[str] = None,
         messages: Optional[list] = None,
         snapshot=None,
+        file_tracker=None,
+        strict_file_tracking: bool = False,
     ):
         self.skill_name = skill_name
         self.working_root = working_root
@@ -100,6 +104,10 @@ class SkillSession:
             from skill_engine.execution.snapshot import FileSnapshot
             snapshot = FileSnapshot(Path(working_root) if working_root else Path.cwd())
         self.snapshot = snapshot
+        if file_tracker is None:
+            from skill_engine.execution.file_tracker import FileStateTracker
+            file_tracker = FileStateTracker(strict=strict_file_tracking)
+        self.file_tracker = file_tracker
 
     def append_user(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})
@@ -523,7 +531,8 @@ class Runner:
         if not wr_native.is_dir():
             print(f"[ERROR] 工作目录不存在: {working_root}\n        {native_path_hint(working_root)}")
             return _session_result(skill.metadata.name, "invalid_working_root")
-        session = SkillSession(skill_name=skill.metadata.name, working_root=wr, state_path=state_path)
+        session = SkillSession(skill_name=skill.metadata.name, working_root=wr, state_path=state_path,
+                               strict_file_tracking=bool(getattr(skill.metadata, "strict_file_tracking", False)))
 
         # 2. 续接
         resumed = False
@@ -676,6 +685,7 @@ class Runner:
                     mr, llm, max_iterations=max_iterations,
                     state_path=save, initial_messages=initial_messages,
                     session_mode=True, snapshot=session.snapshot,
+                    file_tracker=session.file_tracker,
                 )
             except KeyboardInterrupt:
                 print(f"[session] 已被 Ctrl+C 中断，状态已落盘（{save}），可用 --resume-from 续接。")

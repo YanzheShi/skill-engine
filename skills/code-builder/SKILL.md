@@ -5,6 +5,7 @@ groups:
 - development
 - coding
 human_in_loop: true
+strict_file_tracking: true
 extra_tools:
 - tools.py
 turn_policy:
@@ -144,6 +145,7 @@ arguments:
 
 ### edit_file 使用要点
 
+- **编辑前一致性校验（本 skill 为硬约束）** — 引擎要求目标文件已在本次会话 `read_file` 读取过、且读取后未被外部修改；若返回"[一致性校验未通过]"，先 `read_file`（重新）读取该文件，再重新提交 edit_file。执行过 bash 后登记会失效，之后的首个 edit 也可能要求重读——照做即可。
 - **oldText 必须唯一** — 精确出现 1 次，否则报错。如果返回"oldText 出现 N 次"，重新读取文件确认上下文，在 oldText 前后加更多行来唯一标识。
 - **oldText 不存在** — 先判断文件是否已被其他 edit 修改过，再重新读取文件确认实际内容，按新内容重新提交。
 - **多 edit 的顺序** — 所有 edit 按 oldText 在原文中的位置排序后依次应用。如果要改的区域有重叠，尽量合并成一个 edit 而不是拆成多个。

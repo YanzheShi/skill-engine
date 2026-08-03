@@ -135,6 +135,10 @@ class SkillMetadata(BaseModel):
         default=0,
         description="档位 B 上下文 token 预算；0=引擎默认(8192)",
     )
+    strict_file_tracking: bool = Field(
+        default=False,
+        description="编辑前一致性硬约束：未读/外部已变的文件拒绝 edit（默认软约束仅提示）",
+    )
 
     # ===== MCP 外部工具（方案 A：全局 mcp.json + 字段引用 server 名）=====
     mcp_servers: list[str] = Field(
@@ -180,6 +184,10 @@ class MergedMeta(BaseModel):
     context_budget: int = Field(
         default=0,
         description="档位 B 上下文 token 预算；0=引擎默认(8192)",
+    )
+    strict_file_tracking: bool = Field(
+        default=False,
+        description="编辑前一致性硬约束：未读/外部已变的文件拒绝 edit（默认软约束仅提示）",
     )
 
     # ===== MCP 外部工具（方案 A：全局 mcp.json + 字段引用 server 名）=====

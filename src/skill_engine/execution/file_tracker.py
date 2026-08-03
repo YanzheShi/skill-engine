@@ -1,0 +1,130 @@
+"""文件状态跟踪器（FileStateTracker）—— read-before-write 一致性机制。
+
+解决长会话下的"凭记忆编辑"翻车链：上下文压缩把文件原文摘要掉后，
+LLM 凭印象发 edit_file，oldText 对不上或模糊匹配错 → 空转甚至错改。
+本模块在编辑前校验"该文件是否读过、读后是否被改过"，把 SKILL.md 里
+"edit_file 前先 read_file"的软约定变成引擎级机制。
+
+设计纪律（见 docs/code-builder-vs-工业级coding-agent差距与提升设计.md §3.1/§4.3）：
+- 通用能力，沉引擎核心，不绑定任何领域；任何写文件的 skill 都受益。
+- **默认软约束**：校验不通过只注入提示、不阻断——"不读直接改"的小 skill 不受影响；
+  code-builder 等可声明 frontmatter `strict_file_tracking: true` 升级为硬约束（拒绝执行）。
+- **bash 执行后保守全失效**（invalidate_all）：命令可能改过任何文件而 tracker 无从得知，
+  宁可提示重读，不误信陈旧内容。
+- 一切异常吞掉：tracker 失败绝不影响主执行流程（与 FileSnapshot 同一纪律）。
+
+判定基于 mtime_ns + size（比整文件哈希便宜，代码文件足够可靠）：
+外部改动哪怕内容相同，最多换来一次无害的重读提示。
+"""
+
+import logging
+from pathlib import Path
+from typing import Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+
+class FileStateTracker:
+    """跟踪 session 内每个文件的"已知版本"，供 edit 前置校验使用。
+
+    生命周期：
+    - 非 session 运行：每次 ToolDispatchRunner.run() 新建（检查点=本次运行起点）；
+    - session 运行：由 SkillSession 持有同一实例跨轮复用（与 FileSnapshot 同级），
+      使"读过"的登记跨轮有效。状态不落盘：resume 后从空白起步，
+      第一次 edit 会触发提示/拒绝重读——保守且安全。
+    """
+
+    def __init__(self, strict: bool = False):
+        """
+        Args:
+            strict: True=硬约束（校验失败拒绝编辑）；False=软约束（仅注入提示）
+        """
+        self.strict = strict
+        # resolved posix 路径 -> {"mtime_ns": int, "size": int}
+        self._known: dict[str, dict] = {}
+
+    # ---- 内部工具 ----
+
+    @staticmethod
+    def _key(path) -> Optional[str]:
+        try:
+            return Path(path).resolve().as_posix()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _stat(path: Path) -> Optional[dict]:
+        try:
+            st = path.stat()
+            return {"mtime_ns": st.st_mtime_ns, "size": st.st_size}
+        except OSError:
+            return None
+
+    # ---- 登记 ----
+
+    def on_read(self, path) -> None:
+        """read_file 成功后登记该文件的当前版本。"""
+        try:
+            p = Path(path).resolve()
+            st = self._stat(p)
+            if st is not None:
+                self._known[self._key(p)] = st
+        except Exception:
+            pass
+
+    def on_write(self, path) -> None:
+        """write_file / edit_file 写盘后更新登记（自己写的也算已知版本）。"""
+        self.on_read(path)
+
+    def invalidate_all(self) -> None:
+        """bash 执行后保守失效全部登记：命令可能改过任何文件，tracker 无从得知。
+
+        代价只是后续的 edit 会收到一次"建议重读"提示（软）或被要求重读（硬），
+        换来的是不会基于 bash 之前的陈旧认知做编辑。
+        """
+        self._known.clear()
+
+    # ---- 校验 ----
+
+    def check_editable(self, path) -> Tuple[bool, str]:
+        """编辑前一致性校验。
+
+        Returns:
+            (True, "")       已读且未见变化
+            (True, 提示)     软约束：未读/疑似已变，注入提示但不阻断
+            (False, 错误)    硬约束：拒绝本次编辑，引导 LLM 重读后重试
+        """
+        key = self._key(path)
+        if key is None:
+            return True, ""
+        try:
+            p = Path(path).resolve()
+            name = p.name
+            recorded = self._known.get(key)
+
+            if recorded is None:
+                msg = (f"提示: {name} 未在本次会话中 read_file 读取过"
+                       f"（或读取登记已被其后的 bash 执行失效），"
+                       f"建议先 read_file 确认最新内容再编辑。")
+                if self.strict:
+                    return False, (f"[一致性校验未通过] {name} 未在本次会话中读取，"
+                                   f"请先用 read_file 读取该文件，再重新提交编辑。")
+                return True, msg
+
+            st = self._stat(p)
+            if st is None:
+                # 文件已不存在（可能被外部删除）——交给 edit_file 自己的
+                # 存在性检查报错，不在这里误伤
+                return True, ""
+            if st["mtime_ns"] != recorded["mtime_ns"] or st["size"] != recorded["size"]:
+                msg = (f"提示: {name} 在你上次读取后发生了变化"
+                       f"（可能被外部进程或 bash 命令修改），"
+                       f"建议先 read_file 重新读取再编辑。")
+                if self.strict:
+                    return False, (f"[一致性校验未通过] {name} 在上次读取后已变化，"
+                                   f"请先用 read_file 重新读取该文件，再重新提交编辑。")
+                return True, msg
+            return True, ""
+        except Exception:
+            # tracker 失败绝不阻断主流程
+            return True, ""
