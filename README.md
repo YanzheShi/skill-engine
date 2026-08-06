@@ -22,16 +22,40 @@
 
 ## 安装
 
+本项目用 [uv](https://docs.astral.sh/uv/) 管理依赖（也兼容 pip）。`skill-engine` 是一个带命令行入口（`skill-engine`）的可安装包，要求 **Python >= 3.12**。
+
+### 方式一：用 uv 安装（推荐，开发者）
+
 ```bash
-# 基础安装
-uv sync
+# 1. 安装 uv（若未装）
+curl -LsSf https://astral.sh/uv/install.sh | sh        # macOS / Linux
+# Windows (PowerShell): irm https://astral.sh/uv/install.ps1 | iex
 
-# 安装 Web UI
-uv sync --extra ui
-
-# 安装 tokenize（中文分词）
-uv sync --extra tokenize
+# 2. 克隆并安装（含所有可选依赖）
+git clone https://github.com/YanzheShi/skill-engine.git
+cd skill-engine
+uv sync --all-extras          # 等价于旧文档里的 ui / tokenize 等
 ```
+
+### 方式二：用 pip 安装（通用）
+
+```bash
+pip install -e .              # 可编辑安装（开发用，改代码即时生效）
+# 或装成普通包
+pip install .
+```
+
+### 方式三：一行装到全局 PATH（uv tool，适合纯使用者）
+
+把 `skill-engine` 命令直接装进隔离环境并加入 PATH，装一次到处能用：
+
+```bash
+uv tool install git+https://github.com/YanzheShi/skill-engine.git
+# 升级
+uv tool upgrade skill-engine
+```
+
+> 区别：`uv sync` 是**开发态**命令（建 `.venv`、锁依赖、便于改代码）；`uv tool install` / `pip install` 是把包装进隔离或当前环境，更适合"只用命令行"的人。
 
 ## 环境变量配置
 
@@ -416,6 +440,64 @@ LLM_API_KEY=sk-xxx
 # 搜索 API（可选）
 # TAVILY_API_KEY=tvly-xxx
 ```
+
+## 在其他环境中使用
+
+### 作为库集成到你的 Python 项目
+
+```python
+from skill_engine import Router, Runner
+from skill_engine.cli import app
+```
+
+### 容器化（Docker）
+
+适合 CI、服务器，或"不想配 Python 环境"的场景。最小 `Dockerfile`：
+
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+RUN pip install --no-cache-dir uv
+COPY . .
+RUN uv sync --all-extras
+ENTRYPOINT ["uv", "run", "skill-engine"]
+```
+
+构建运行：
+
+```bash
+docker build -t skill-engine .
+docker run --rm -v "$PWD/skills:/app/skills" -e LLM_API_KEY=sk-xxx skill-engine list
+```
+
+### 打包成单文件可执行程序（PyInstaller）
+
+适合分发给"完全不想装 Python"的人。在仓库根目录执行：
+
+```bash
+uv pip install pyinstaller
+pyinstaller --name skill-engine --onefile \
+  --hidden-import skill_engine.cli \
+  --collect-submodules skill_engine \
+  src/skill_engine/cli.py
+```
+
+产物在 `dist/skill-engine[.exe]`，可直接拷贝到其他同系统机器运行（无需 Python）。
+
+> 注意：`gradio`（Web UI）和 `jieba`（分词）在单文件打包时需额外 `--collect-data`；若只发 CLI，可省去 `--extra ui` 以减小体积。
+
+## 开源发布清单
+
+- [ ] `LICENSE` 已添加（MIT）
+- [ ] `README.md` 含安装、快速开始、配置说明
+- [ ] `.env.example` 已提交，真实 `.env` 已被 gitignore 忽略（本项目已满足）
+- [ ] `.gitignore` 覆盖 venv / 构建产物 / 运行时产物 / 密钥（本项目已满足）
+- [ ] `pyproject.toml` 的 `dependencies` 无私有 / 内部依赖
+- [ ] 代码无硬编码密钥、内网地址
+- [ ] 测试可跑：`uv run pytest tests/ -q`
+- [ ] GitHub 仓库设为 **Public**，并填好 About / Topics
+- [ ] 打 release tag 并写 GitHub Release Note（如 `git tag v0.1.0 && git push --tags`）
+- [ ] （可选）`CONTRIBUTING.md`、`CHANGELOG.md`、CI（GitHub Actions）
 
 ## License
 

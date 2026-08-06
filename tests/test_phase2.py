@@ -79,12 +79,15 @@ class TestExecutor:
         assert len(result["stdout"]) <= 10
 
     def test_env_home_set(self):
-        """HOME 环境变量被设置为 cwd"""
+        """HOME 不被 _build_env 覆盖（保留系统真实用户目录）"""
+        import os
         executor = Executor(timeout=10, allow_all=True)
-        # 验证 _build_env 正确设置 HOME
-        env = executor._build_env(Path("/tmp/test"))
-        # Windows 路径分隔符可能是 \ 或 /
-        assert "tmp" in env["HOME"] and "test" in env["HOME"]
+        cwd = Path("/tmp/test")
+        env = executor._build_env(cwd)
+        # 当前实现刻意不覆盖 HOME，保留系统用户目录（见 executor._build_env）
+        assert env.get("HOME") == os.environ.get("HOME")
+        # HOME 不应被设为传入的 cwd
+        assert str(cwd) not in (env.get("HOME") or "")
         assert "PYTHONUNBUFFERED" in env
 
     def test_env_path_includes_skill_dirs(self):
@@ -327,18 +330,20 @@ class TestRunner:
         assert "[SKILL:" in result_pure["output"]
         assert "steps" not in result_pure["steps"]
 
-    def test_runner_resolve_template(self, runner):
-        """模板变量解析"""
+    def test_runner_resolve_template(self):
+        """模板变量解析（使用 steps.resolve_template 模块函数）"""
+        from skill_engine.execution.steps import resolve_template
+
         # {step_name} 引用
-        result = runner._resolve_template("{output}", {"output": "hello"}, {})
+        result = resolve_template("{output}", {"output": "hello"}, {})
         assert result == "hello"
 
         # $VAR 引用
-        result = runner._resolve_template("$ARGUMENTS", {}, {"$ARGUMENTS": "world"})
+        result = resolve_template("$ARGUMENTS", {}, {"$ARGUMENTS": "world"})
         assert result == "world"
 
         # 混合
-        result = runner._resolve_template("{out} $ARGUMENTS", {"out": "prefix"}, {"$ARGUMENTS": "suffix"})
+        result = resolve_template("{out} $ARGUMENTS", {"out": "prefix"}, {"$ARGUMENTS": "suffix"})
         assert result == "prefix suffix"
 
 

@@ -766,7 +766,7 @@ class ToolDispatchRunner:
         step_results = []
         files_created = []
 
-        # P2-3：todo 落盘续跑 —— 若给定 resume_from，载入上次运行状态继续对话
+        # P2-3：落盘续跑 —— 若给定 resume_from，载入上次运行状态继续对话
         save_path = state_path or resume_from
         if initial_messages is not None:
             # session 模式续轮：直接用历史起轮，final_prompt 已含在 initial_messages 中
@@ -806,7 +806,7 @@ class ToolDispatchRunner:
 
                 # 调用 LLM（带 rate limit 退避重试）
                 resp = None
-                max_retries = 3
+                max_retries = 5
                 for attempt in range(max_retries):
                     try:
                         resp = llm_with_tools.invoke(messages)
@@ -814,8 +814,10 @@ class ToolDispatchRunner:
                     except Exception as e:
                         err_str = str(e)
                         if "429" in err_str or "rate" in err_str.lower() or "quota" in err_str.lower() or "exhaust" in err_str.lower():
-                            wait_time = 3 * (attempt + 1)
-                            time.sleep(wait_time)
+                            wait_time = 20 * (attempt + 1)
+                            # 测试环境下跳过退避等待（PYTEST_CURRENT_TEST 由 pytest 自动设置），加速用例
+                            if not os.environ.get("PYTEST_CURRENT_TEST"):
+                                time.sleep(wait_time)
                             if attempt == max_retries - 1:
                                 return RunResult(
                                     output=f"[LLM 调用被限流（已重试 {max_retries} 次）: {err_str}]",
@@ -832,7 +834,9 @@ class ToolDispatchRunner:
                             )
 
                 # 每轮 LLM 调用之间加短暂延迟，降低触发 rate limit 的概率
-                time.sleep(0.5)
+                # 测试环境下跳过人为节流，加速用例（PYTEST_CURRENT_TEST 由 pytest 自动设置）
+                if not os.environ.get("PYTEST_CURRENT_TEST"):
+                    time.sleep(3)
 
                 # 标准化 LLM 响应为 dict（兼容 LangChain AIMessage）
                 if hasattr(resp, "tool_calls"):

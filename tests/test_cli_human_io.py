@@ -9,7 +9,8 @@ from skill_engine.execution.human_io import CliHumanIO
 
 
 def _fake_session(returning):
-    return type("FakeSession", (), {"prompt": lambda self, p: returning})()
+    # prompt 接受任意额外关键字（如 pre_run），与生产 PromptSession.prompt 签名解耦
+    return type("FakeSession", (), {"prompt": lambda self, p, **kw: returning})()
 
 
 def test_small_input_passthrough(monkeypatch):

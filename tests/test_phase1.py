@@ -196,7 +196,8 @@ class TestRouter:
     """测试 Router V0.3（三步路由）"""
 
     @pytest.fixture
-    def router(self):
+    def router(self, monkeypatch):
+        monkeypatch.setattr("skill_engine.routing.router.get_llm", lambda **kw: None)
         index = discover(roots=[FIXTURES_DIR])
         registry = Registry(index)
         return Router(registry)

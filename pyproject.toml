@@ -24,7 +24,6 @@ langchain = [
     "langchain-openai>=1.3.0,<2.0.0",
     "langgraph>=1.2.0,<2.0.0",
     "langgraph-checkpoint-sqlite>=2.0.0",
-    "asyncio>=4.0.0",
 ]
 llm = [
     "httpx>=0.27",
@@ -56,12 +55,8 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+addopts = ["-p", "no:capture"]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 120
-
-[dependency-groups]
-dev = [
-    "pytest>=9.1.1",
-]

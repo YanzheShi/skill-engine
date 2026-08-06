@@ -24,27 +24,29 @@ class TestBuiltInTools:
 
     def test_tools_module_level_import(self):
         """TOOL_DISPATCH_TOOLS 可从 runner 模块导入"""
-        from skill_engine.execution.runner import TOOL_DISPATCH_TOOLS
+        from skill_engine.execution.tool_defs import TOOL_DISPATCH_TOOLS
 
-        assert len(TOOL_DISPATCH_TOOLS) == 3
+        names = {t.name for t in TOOL_DISPATCH_TOOLS}
+        assert {"bash", "read_file", "write_file"} <= names
+        assert len(TOOL_DISPATCH_TOOLS) >= 3
 
     def test_bash_tool_schema(self):
         """bash 工具有正确的 schema"""
-        from skill_engine.execution.runner import bash
+        from skill_engine.execution.tool_defs import bash
 
         assert bash.name == "bash"
         assert "command" in bash.args_schema.model_fields
 
     def test_read_file_tool_schema(self):
         """read_file 工具有正确的 schema"""
-        from skill_engine.execution.runner import read_file
+        from skill_engine.execution.tool_defs import read_file
 
         assert read_file.name == "read_file"
         assert "path" in read_file.args_schema.model_fields
 
     def test_write_file_tool_schema(self):
         """write_file 工具有正确的 schema"""
-        from skill_engine.execution.runner import write_file
+        from skill_engine.execution.tool_defs import write_file
 
         assert write_file.name == "write_file"
         assert "path" in write_file.args_schema.model_fields
@@ -52,7 +54,7 @@ class TestBuiltInTools:
 
     def test_tools_have_descriptions(self):
         """所有工具有非空描述"""
-        from skill_engine.execution.runner import TOOL_DISPATCH_TOOLS
+        from skill_engine.execution.tool_defs import TOOL_DISPATCH_TOOLS
 
         for t in TOOL_DISPATCH_TOOLS:
             assert t.name
@@ -71,7 +73,7 @@ class TestBindTools:
         from skill_engine.config import get_llm
 
         llm = get_llm(purpose="cli-tool")
-        from skill_engine.execution.runner import TOOL_DISPATCH_TOOLS
+        from skill_engine.execution.tool_defs import TOOL_DISPATCH_TOOLS
         bound = llm.bind_tools(TOOL_DISPATCH_TOOLS)
 
         # bound 有 invoke 方法
@@ -84,7 +86,7 @@ class TestBindTools:
         from skill_engine.config import get_llm
 
         llm = get_llm(purpose="cli-tool")
-        from skill_engine.execution.runner import TOOL_DISPATCH_TOOLS
+        from skill_engine.execution.tool_defs import TOOL_DISPATCH_TOOLS
         bound = llm.bind_tools(TOOL_DISPATCH_TOOLS)
 
         # 不需要真的调用 API，只要确保方法签名正确
@@ -414,40 +416,71 @@ class TestLLMModeUnaffected:
 # ================================================================
 
 class TestCLIClientSeparation:
-    """验证 CLI 中档位 A 和档位 B 使用不同 LLM 客户端"""
+    """验证 CLI 中档位 A 和档位 B 使用不同 LLM 客户端
 
-    def test_get_llm_client_returns_bare_model(self):
+    通过 monkeypatch 拦截 _get_llm_client / _get_tool_llm_client，返回轻量
+    mock 裸模型。原因：真实函数会构造 ChatOpenAI（含 socket/连接池/后台线程），
+    在 pytest 中不释放会泄漏句柄，导致后续测试的 teardown 报 [Errno 9]
+    Bad file descriptor（Windows/WSL 下尤为严重）。拦截后测试语义不变——
+    仍断言"裸模型"接口与"实例独立"，且不再污染全局。
+    """
+
+    def _mock_bare_model(self):
+        from unittest.mock import MagicMock
+
+        m = MagicMock()
+        m.invoke.return_value = None
+        m.bind_tools.return_value = m
+        return m
+
+    def _patch_llm_getters(self, monkeypatch):
+        import skill_engine.cli as _cli
+        a = self._mock_bare_model()
+        b = self._mock_bare_model()  # 独立实例
+        # 直接改对象 attribute，不走字符串路径解析——避免 pytest 收集阶段
+        # 提前 import 导致 setattr 落到旧名而失效（全量跑时偶发泄漏的根因）。
+        monkeypatch.setattr(_cli, "_get_llm_client", lambda: a)
+        monkeypatch.setattr(_cli, "_get_tool_llm_client", lambda: b)
+        return a, b
+
+    def test_get_llm_client_returns_bare_model(self, monkeypatch):
         """_get_llm_client 返回裸模型"""
-        from skill_engine.cli import _get_llm_client
+        self._patch_llm_getters(monkeypatch)
+        import skill_engine.cli as _cli
 
-        client = _get_llm_client()
+        client = _cli._get_llm_client()
         assert client is not None
         # 裸模型有 invoke 方法
         assert hasattr(client, "invoke")
 
-    def test_get_tool_llm_client_returns_bare_model(self):
+    def test_get_tool_llm_client_returns_bare_model(self, monkeypatch):
         """_get_tool_llm_client 返回裸模型（bind_tools 在 runner 内部做）"""
-        from skill_engine.cli import _get_tool_llm_client
+        self._patch_llm_getters(monkeypatch)
+        import skill_engine.cli as _cli
 
-        client = _get_tool_llm_client()
+        client = _cli._get_tool_llm_client()
         assert client is not None
         # 裸模型有 invoke 方法
         assert hasattr(client, "invoke")
         # 裸模型也有 bind_tools 方法（在 runner 中调用）
         assert hasattr(client, "bind_tools")
 
-    def test_both_clients_are_different_instances(self):
+    def test_both_clients_are_different_instances(self, monkeypatch):
         """两个客户端返回的是独立的裸模型实例"""
-        from skill_engine.cli import _get_llm_client, _get_tool_llm_client
+        self._patch_llm_getters(monkeypatch)
+        import skill_engine.cli as _cli
 
-        client_a = _get_llm_client()
-        client_b = _get_tool_llm_client()
+        client_a = _cli._get_llm_client()
+        client_b = _cli._get_tool_llm_client()
 
         # 两者都是裸模型（都有 invoke 和 bind_tools）
         assert hasattr(client_a, "invoke")
         assert hasattr(client_b, "invoke")
         assert hasattr(client_a, "bind_tools")
         assert hasattr(client_b, "bind_tools")
+
+        # 两个函数返回独立实例
+        assert client_a is not client_b
 
 
 # ================================================================

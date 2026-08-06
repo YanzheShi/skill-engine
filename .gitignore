@@ -55,6 +55,22 @@ ${ANALYSIS_OUTPUT_DIR}/
 fix_indent.py
 .workbuddy/
 
+# --- Runtime artifacts (never commit) ---
+.skill_engine_snapshots/
+pastes/
+sessions/
+junit.xml
+junit_full.xml
+demo/
+logs_*.log
+_approval_debug.log
+bt.log
+p6.log
+pt_result.log
+
+# Isolated venv used by some scripts (already self-ignored, belt-and-suspenders)
+active/
+
 # .env files may contain API keys
 .env
 .env.*

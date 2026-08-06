@@ -269,15 +269,19 @@ def test_keyboard_interrupt_marks_interrupted_and_persists(tmp_path):
     assert Path(sp).exists(), "中断时状态未落盘，无法 --resume-from 续接"
 
 
-def test_max_iterations_returns_to_caller(tmp_path):
-    """轮内一直调工具直到达到 max_iterations：run_repl 不再继续等指令，直接返回结果。"""
+def test_max_iterations_does_not_exit_session(tmp_path):
+    """轮内一直调工具直到达到 max_iterations：本轮被中断，但会话不退出、继续等下条指令
+    （d8da353 引入的"达到最大循环后不退出会话"特性）。用户随后可用 /exit 正常结束。"""
     loop_resp = {"content": "", "tool_calls": [
         {"name": "no_such_tool", "args": {}, "id": "x"}]}
     result, llm, hio = _run_session(
-        tmp_path, [loop_resp, loop_resp], io_queue=[], max_iterations=2)
+        tmp_path, [loop_resp, loop_resp], io_queue=["/exit"], max_iterations=2)
 
-    assert result.get("stopped_by") == "max_iterations"
+    # 内层被 max_iterations 限制，只跑了 2 轮工具循环（不会无限循环）
     assert len(llm.calls) == 2
+    # 达到 max_iterations 后本轮中断但会话继续，最终由用户 /exit 结束
+    # （若旧行为"直接以 max_iterations 退出"，stopped_by 会是 "max_iterations" 而非 "user_exit"）
+    assert result.get("stopped_by") == "user_exit"
 
 
 def test_multiple_ask_user_in_one_turn(tmp_path):
@@ -426,14 +430,23 @@ def _make_rich_skill(tmp_path):
     )
 
 
-def test_session_without_query_shows_hint_and_waits(tmp_path, capsys):
+def test_session_without_query_shows_hint_and_waits(tmp_path):
     """不传初始 query：先打印 skill 用法提示，不自动起轮，等用户第一条指令。"""
-    skill = _make_rich_skill(tmp_path)
-    result, llm, hio = _run_session(
-        tmp_path, [{"content": "done"}], io_queue=["加一个 greet 函数", "/exit"],
-        skill=skill, query="",
-    )
-    out = capsys.readouterr().out
+    import io
+    import sys
+    import contextlib
+    _old = sys.stdout
+    buf = io.StringIO()
+    sys.stdout = buf
+    try:
+        skill = _make_rich_skill(tmp_path)
+        result, llm, hio = _run_session(
+            tmp_path, [{"content": "done"}], io_queue=["加一个 greet 函数", "/exit"],
+            skill=skill, query="",
+        )
+    finally:
+        sys.stdout = _old
+    out = buf.getvalue()
 
     # 提示内容：名称 / 用途 / 适用 / 参数 / 命名参数 / 会话命令
     assert "code-builder" in out
@@ -450,12 +463,20 @@ def test_session_without_query_shows_hint_and_waits(tmp_path, capsys):
     assert result.get("stopped_by") == "user_exit"
 
 
-def test_session_without_query_empty_input_reprompts(tmp_path, capsys):
+def test_session_without_query_empty_input_reprompts(tmp_path):
     """无 query 且无历史时直接回车：重新提示，不空跑一轮 LLM。"""
-    result, llm, hio = _run_session(
-        tmp_path, [{"content": "done"}], io_queue=["", "", "/exit"], query="",
-    )
-    out = capsys.readouterr().out
+    import io
+    import sys
+    _old = sys.stdout
+    buf = io.StringIO()
+    sys.stdout = buf
+    try:
+        result, llm, hio = _run_session(
+            tmp_path, [{"content": "done"}], io_queue=["", "", "/exit"], query="",
+        )
+    finally:
+        sys.stdout = _old
+    out = buf.getvalue()
 
     assert out.count("请输入一条指令") == 2
     assert len(llm.calls) == 0, "无历史的空输入不应触发 LLM"
@@ -467,7 +488,10 @@ def test_skill_hint_tolerates_missing_fields(tmp_path):
     from skill_engine.execution.runner import Runner
 
     text = Runner._format_skill_hint(_make_skill(tmp_path))
-    assert "demo" in text
+
+    # 不硬判 "demo" —— name 走 pyfiglet ASCII art 标题区，不会以原样
+    # 字符串出现在纯文本里。这里只校验：渲染不出错、必要 UI 文案在。
     assert "/exit" in text
+    assert "用途" in text
     assert "命名参数" not in text  # 未配置命名参数时不渲染该行
 

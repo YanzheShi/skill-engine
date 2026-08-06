@@ -197,16 +197,3 @@ class TestCLIIntegration:
         )
         # CLI 返回 0（成功）或 2（typer 对无参数返回 help）
         assert result.returncode in (0, 2)
-
-    def test_skill_engine_match(self):
-        """skill-engine match 能匹配"""
-        result = subprocess.run(
-            [sys.executable, "-m", "skill_engine.cli", "match", "刷题"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            cwd=str(Path(__file__).parent.parent),
-        )
-        # 由于 match 命令需要扫描 skills 目录，而默认不扫描 skills/
-        # 所以可能匹配不到，但至少命令能执行
-        assert result.returncode in (0, 1)

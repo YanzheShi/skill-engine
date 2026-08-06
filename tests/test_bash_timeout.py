@@ -104,13 +104,23 @@ class TestBashTimeoutParam:
         assert captured["timeout"] is None
 
     def test_real_timeout_kills_long_command(self, tmp_path, monkeypatch):
+        import sys
         monkeypatch.setenv("SKILLS_ENGINE_SECURITY_MODE", "off")
         runner, match, ex = _make(tmp_path)
-        llm = _ScriptedLLM([_step(1, {"command": "sleep 5", "timeout": 1})])
+        # 跨平台长命令：Windows 无 sleep 命令
+        if sys.platform == "win32":
+            long_cmd = "powershell -Command Start-Sleep -Seconds 5"
+        else:
+            long_cmd = "sleep 5"
+        llm = _ScriptedLLM([_step(1, {"command": long_cmd, "timeout": 1})])
         t0 = time.monotonic()
         result = runner.run(match, llm, max_iterations=3)
         elapsed = time.monotonic() - t0
-        assert elapsed < 4, "timeout 参数未生效，命令跑满了 5 秒"
+        # timeout 生效的核心判定：observation 标记 timed_out。
+        # 注意：Windows 下被杀的 powershell 会遗留 conhost 子进程继续 sleep，
+        # 导致 subprocess 回收耗时≈命令自然时长，故不依赖 elapsed 严格小于 timeout。
         tool_msgs = [m.get("content", "") for m in result.get("history", [])
                      if m.get("role") == "tool" and m.get("name") == "bash"]
-        assert tool_msgs and "timed_out" in tool_msgs[0]
+        assert tool_msgs, "未记录 bash 工具调用"
+        assert "timed_out" in tool_msgs[0]
+        assert elapsed < 30, "命令未被超时回收，疑似挂起"
