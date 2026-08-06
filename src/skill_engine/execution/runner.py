@@ -76,7 +76,7 @@ class SkillSession:
     不含执行逻辑（执行统一在 ToolDispatchRunner.run）。
 
     - messages: 跨轮累积的完整对话历史（含 system/user/assistant/tool）
-    - state_path: 落盘路径；缺省落到 <working_root>/.workbuddy/sessions/<skill>.session.json
+    - state_path: 落盘路径；缺省落到 <working_root>/sessions/<skill-name>/<yyyy-MM-dd_HH-mm-ss>.json
     - snapshot: 会话级文件检查点。整个 session 共用一个 FileSnapshot 实例，
       使 restore_file 能回滚到「会话起点」而非「本轮起点」。
     - file_tracker: 会话级文件状态跟踪。整个 session 共用一个 FileStateTracker
@@ -98,8 +98,10 @@ class SkillSession:
         if state_path:
             self.state_path = state_path
         else:
+            from datetime import datetime
             base = Path(working_root) if working_root else Path.cwd()
-            self.state_path = str(base / ".workbuddy" / "sessions" / f"{skill_name}.session.json")
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            self.state_path = str(base / "sessions" / skill_name / f"{timestamp}.json")
         self.messages: list = list(messages or [])
         if snapshot is None:
             from skill_engine.execution.snapshot import FileSnapshot
