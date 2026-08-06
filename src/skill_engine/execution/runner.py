@@ -15,6 +15,7 @@ Runner — Skill 执行器，三路分流
 """
 
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -27,6 +28,13 @@ from skill_engine.execution import steps as steps_runner
 from skill_engine.execution.tool_defs import parse_named_params
 from skill_engine.execution.paths import to_native_path, native_path_hint
 from skill_engine.execution.paste_buffer import resolve_refs, save_paste
+
+# ANSI 颜色常量（零依赖，纯转义码）
+_C_RESET = "\033[0m"
+_C_BOLD = "\033[1m"
+_C_CYAN = "\033[36m"
+_C_GREEN = "\033[32m"
+_C_YELLOW = "\033[33m"
 
 
 # ── REPL 元命令辅助（与终端能力无关，解决 input() 回退时多行粘贴被拆分的问题）──
@@ -619,7 +627,29 @@ class Runner:
         # 底部边框：╰──────────────────────────────────────────────╯
         bottom = "╰" + "─" * (w - 2) + "╯"
 
-        return "\n".join([top] + padded + [bottom])
+        # ── 着色 ──────────────────────────────────────────────────
+        # 把边框、ASCII art、正文分别上色，全部在 padding 计算之后做
+        # 注意：ANSI 码不占视觉宽度，不影响对齐
+        art_section_count = len(ascii_art.rstrip('\n').split('\n')) + 2 if ascii_art else 0
+        result_lines = [top] + padded + [bottom]
+        colored = []
+        for i, line in enumerate(result_lines):
+            if i == 0 or i == len(result_lines) - 1:
+                # 顶 / 底边框 ── 青色
+                colored.append(f"{_C_CYAN}{line}{_C_RESET}")
+            elif ascii_art and 0 < i <= art_section_count:
+                # ASCII art 区域（含上下空行）── 绿色 + 粗体
+                # 原格式：│ {content}{padding}│
+                colored.append(
+                    f"{_C_CYAN}│{_C_RESET} {_C_BOLD}{_C_GREEN}{line[2:-1]}{_C_RESET}{_C_CYAN}│{_C_RESET}"
+                )
+            else:
+                # 正文区域 ── 默认色，左右边框用青色
+                # 原格式：│ {content}{padding}│
+                colored.append(
+                    f"{_C_CYAN}│{_C_RESET} {line[2:-1]}{_C_CYAN}│{_C_RESET}"
+                )
+        return "\n".join(colored)
 
     @staticmethod
     def _format_skill_hint(skill) -> str:
@@ -652,6 +682,15 @@ class Runner:
         hint = getattr(m, "argument_hint", "")
         body.append(f"  {hint}" if hint else "  给 src/xxx.py 加一个 foo() 函数并补上测试")
         body.append("会话内命令：/exit 或 /done 退出 · 直接回车 = 沿用上文继续 · :paste 多行输入 · :load <文件> 读取本地文件")
+
+        # ── 关键词高亮 ──
+        # ── 关键词高亮（单次替换，避免重叠匹配）──
+        _KW = re.compile(
+            "|".join(re.escape(k) for k in (
+                "命名参数", "会话内命令", "用途", "适用", "参数",
+            ))
+        )
+        body = [_KW.sub(lambda m: f"{_C_YELLOW}{m.group()}{_C_RESET}", l) for l in body]
 
         # 尝试生成 ASCII art 标题
         ascii_art = None
