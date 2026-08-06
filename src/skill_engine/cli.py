@@ -895,7 +895,7 @@ def session(
     )
 
     stopped = result.get("stopped_by")
-    if stopped in ("error", "rate_limited", "no_match", "load_failed"):
+    if stopped in ("error", "no_match", "load_failed"):
         print(f"[session] 异常退出（{stopped}）: {result.get('output', '')}")
 
 

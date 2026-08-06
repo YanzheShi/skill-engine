@@ -771,9 +771,11 @@ class Runner:
                 last_output = out
                 print(f"[{skill.metadata.name}] {out}")
             stopped = result.get("stopped_by")
-            if stopped in ("error", "rate_limited", "max_iterations", "no_match", "load_failed"):
+            if stopped in ("error", "no_match", "load_failed"):
                 return result
-            # session_turn_end / tool_stop → 继续等待下条指令
+            if stopped in ("max_iterations", "rate_limited"):
+                print(f"[session] 本轮因 {stopped} 中断，但会话仍在继续。输入新指令继续，/exit 退出。")
+            # session_turn_end / tool_stop / max_iterations / rate_limited → 继续等待下条指令
             continue
 
     def _parse_tool_calls(self, response) -> list:
