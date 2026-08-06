@@ -15,6 +15,7 @@ Runner — Skill 执行器，三路分流
 """
 
 import os
+import shutil
 from pathlib import Path
 from typing import Optional
 from skill_engine.models import Skill, MatchResult, Step
@@ -552,9 +553,8 @@ class Runner:
             turn_policy=None, working_root=wr,
         )
 
-        print(f"[session] 进入 {skill.metadata.name} 持续会话（输入 /exit 或 /done 退出）")
-        # 未给初始 query 且非续接：先打印该 skill 的用法提示，再等待用户第一条指令
-        if not (query or "").strip() and not resumed:
+        # 未给初始 query：先打印该 skill 的用法提示（含 ASCII art），再等待用户第一条指令
+        if not (query or "").strip():
             print(self._format_skill_hint(skill))
         save = state_path or session.state_path
 
@@ -570,19 +570,73 @@ class Runner:
     _CONTINUE_HINT = "继续（沿用上文，接着往下做；不要重头开始）"
 
     @staticmethod
+    def _draw_border_box(title: str, body_lines: list[str], width: int | None = None,
+                         ascii_art: str | None = None) -> str:
+        """绘制带标题或 ASCII art 的边框盒子（Claude Code CLI 风格）。
+
+        ╭─── <title> ────────────────────────────────────────────────╮
+        │  content                                                   │
+        ╰────────────────────────────────────────────────────────────╯
+
+        如果提供 ascii_art，则顶部边框无标题，ascii_art 行插入正文最前面。
+
+        Args:
+            title: 标题文字（显示在顶部边框中间左侧；ascii_art 时忽略）
+            body_lines: 正文行列表，每行不加前缀后缀，函数自动加 │ 包裹
+            width: 总宽度（含边框字符），默认取终端宽度，最少 60 字符
+            ascii_art: 可选的 ASCII art 文本，提供时顶部边框改为纯横线，
+                       art 行插入正文最前面（上下各空一行）
+        """
+        terminal_w = shutil.get_terminal_size((80, 20)).columns
+        w = max(min(width or terminal_w, terminal_w), 60)
+        inner_w = w - 2  # 去掉左右 │ 后的可用宽度
+
+        # 准备正文行
+        body = list(body_lines)
+
+        if ascii_art:
+            # 在 body 最前面插入空行 + art 行 + 空行
+            art_lines = ascii_art.rstrip('\n').split('\n')
+            art_padded = [""] + art_lines + [""]
+            body = art_padded + body
+            # 顶部边框：无标题，纯横线
+            top = "╭" + "─" * (w - 2) + "╮"
+        else:
+            # 顶部边框：╭─── <title> ─────────────────────────────────╮
+            title_part = f"─── {title} ───"
+            dash_count = w - 1 - len(title_part) - 1
+            top = "╭" + title_part + "─" * max(dash_count, 1) + "╮"
+
+        # 正文行：│  <content>  <padding>  │
+        padded = []
+        for line in body:
+            display_len = sum(2 if ord(c) > 0x2e80 else 1 for c in line)
+            pad = max(0, inner_w - display_len)
+            padded.append(f"│ {line}{' ' * pad}│")
+
+        # 底部边框：╰──────────────────────────────────────────────╯
+        bottom = "╰" + "─" * (w - 2) + "╯"
+
+        return "\n".join([top] + padded + [bottom])
+
+    @staticmethod
     def _format_skill_hint(skill) -> str:
-        """渲染 skill 的用法提示（session 未带初始 query 时展示）。
+        """渲染 skill 的用法提示（session 未带初始 query 时展示），带边框盒子。
 
         全部字段用 getattr 兜底：不同 skill 的 frontmatter 填写程度不一，
         缺字段只是少一行提示，不应让会话起不来。
         """
         m = getattr(skill, "metadata", None)
         name = getattr(m, "name", "skill")
-        lines = [f"─── {name} ───"]
+        body = []
 
         def _add(label, value):
             if value:
-                lines.append(f"  {label}: {value}")
+                lines = value.split("\n")
+                body.append(f"{label}: {lines[0]}")
+                for l in lines[1:]:
+                    if l.strip():
+                        body.append(f"  {l.strip()}")
 
         _add("用途", getattr(m, "description", ""))
         _add("适用", getattr(m, "when_to_use", ""))
@@ -590,17 +644,37 @@ class Runner:
         named = getattr(m, "arguments", None) or []
         if named:
             _add("命名参数", "  ".join(f"--{a}=<值>" for a in named))
-        tools = list(getattr(m, "allowed_tools", None) or [])
-        mcp = list(getattr(m, "mcp_servers", None) or [])
-        _add("预授权工具", ", ".join(tools) if tools else "")
-        _add("MCP", ", ".join(mcp) if mcp else "")
 
-        lines.append("")
-        lines.append("  直接用自然语言描述要做的事即可，例如：")
+        body.append("")
+        body.append("直接用自然语言描述要做的事即可，例如：")
         hint = getattr(m, "argument_hint", "")
-        lines.append(f"    {hint}" if hint else "    给 src/xxx.py 加一个 foo() 函数并补上测试")
-        lines.append("  会话内命令：/exit 或 /done 退出 · 直接回车 = 沿用上文继续 · :paste 多行输入 · :load <文件> 读取本地文件")
-        return "\n".join(lines)
+        body.append(f"  {hint}" if hint else "  给 src/xxx.py 加一个 foo() 函数并补上测试")
+        body.append("会话内命令：/exit 或 /done 退出 · 直接回车 = 沿用上文继续 · :paste 多行输入 · :load <文件> 读取本地文件")
+
+        # 尝试生成 ASCII art 标题
+        ascii_art = None
+        box_width = None
+        try:
+            import pyfiglet
+            # 先根据 body 内容宽度确定盒子宽度
+            content_w = max(
+                (sum(2 if ord(c) > 0x2e80 else 1 for c in l) for l in body),
+                default=0,
+            )
+            terminal_w = shutil.get_terminal_size((80, 20)).columns
+            box_width = min(max(content_w + 2, 60), terminal_w)
+            # 以盒子内宽渲染 pyfiglet，让 art 自动换行适应盒子
+            inner_w = box_width - 2
+            ascii_art = pyfiglet.figlet_format(
+                f"Skill Engine: {name}", font="slant", width=inner_w
+            )
+            # 去掉尾部空格
+            art_lines = [l.rstrip() for l in ascii_art.rstrip('\n').split('\n')]
+            ascii_art = '\n'.join(art_lines)
+        except ImportError:
+            pass
+
+        return Runner._draw_border_box(name, body, width=box_width, ascii_art=ascii_art)
 
     def _resolve_session_skill(self, plan, registry, query: str):
         """从 plan 解析出 session 要跑的单个 skill。
@@ -645,7 +719,7 @@ class Runner:
                 initial_messages = None
             else:
                 # 无初始 query / 续接首轮 / 后续各轮：等待用户下条指令
-                user_cmd = hio.read(prompt=f"[{skill.metadata.name}] > ")
+                user_cmd = hio.read(prompt=f"│ {skill.metadata.name} > ")
                 # 终端无关的元命令：解决 input() 回退时多行粘贴被按行拆分的问题
                 if user_cmd.startswith(":load "):
                     loaded = _load_file_as_paste(user_cmd[6:].strip(), os.path.join(wr, "pastes"))

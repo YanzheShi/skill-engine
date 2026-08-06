@@ -825,7 +825,7 @@ def session(
     query_or_name: Optional[str] = typer.Argument(
         None, help="初始请求；配合 --skill 时可省略（进入会话后先看 skill 用法提示）"),
     skill: Optional[str] = typer.Option(None, "--skill", "-s", help="直接指定 skill 名称（跳过路由匹配）"),
-    max_iterations: int = typer.Option(30, "--max-iter", help="每轮子任务最大迭代次数"),
+    max_iterations: int = typer.Option(50, "--max-iter", help="每轮子任务最大迭代次数"),
     working_root: Optional[str] = typer.Option(None, "--working-root", "-w", help="要修改的目标项目目录（默认引擎 cwd）"),
     state_path: Optional[str] = typer.Option(None, "--state-path", help="会话状态落盘路径（每轮写入）"),
     resume_from: Optional[str] = typer.Option(None, "--resume-from", "-r", help="从指定会话状态文件续接"),
