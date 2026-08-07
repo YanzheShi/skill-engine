@@ -61,12 +61,16 @@ class Assembler:
         self,
         skill: Skill,
         arguments: Optional[dict] = None,
+        plain_text: bool = False,
     ) -> str:
         """编译 skill 为 final prompt
 
         Args:
             skill: 完整的 Skill 对象
             arguments: 解析后的参数
+            plain_text: 纯文本终端模式。为 True 时注入「不要使用 Markdown 语法」约束，
+                适用于 CLI 等不渲染 Markdown 的输出环境；Web UI 等支持 Markdown 渲染的
+                场景应保持默认 False。
 
         Returns:
             编译后的 final prompt 字符串
@@ -99,6 +103,19 @@ class Assembler:
                 "- 使用 `dir` 而不是 `ls` 列出目录\n"
                 "- 使用 `python` 而不是 `python3` 运行脚本\n"
                 "- 路径使用反斜杠 \\ 或正斜杠 / 均可\n"
+            )
+
+        # 5.7 注入输出格式约束（纯文本终端场景）
+        if plain_text:
+            body += (
+                "\n\n## 输出格式要求\n"
+                "注意：当前运行环境是纯文本终端（CLI），**不支持 Markdown 渲染**，"
+                "你的输出会被原样打印。\n"
+                "- 禁止使用 Markdown 语法：`# 标题`、`**加粗**`、`` `行内代码` ``、"
+                "`| 表格 |`、`- 列表项`、`> 引用` 等标记都不会被渲染。\n"
+                "- 用纯文本 + 缩进 + 空行组织内容；需要强调时用【】或全角括号标注。\n"
+                "- 表格类信息改用「键：值」逐行罗列，或简单对齐的纯文本。\n"
+                "- 这是硬性约束：违反会让终端直接显示 Markdown 原始标记，严重损害可读性。\n"
             )
 
         # 6. 包装

@@ -140,6 +140,7 @@ class Runner:
         llm_api_base: Optional[str] = None,
         llm_api_key: Optional[str] = None,
         llm_model: str = "",
+        plain_text: bool = False,
 
     ):
         self.assembler = assembler
@@ -147,6 +148,7 @@ class Runner:
         self.llm_api_base = llm_api_base
         self.llm_api_key = llm_api_key
         self.llm_model = llm_model
+        self.plain_text = plain_text  # CLI 纯文本终端：禁用 Markdown 输出
         self._session_approvals: dict[str, bool] = {}  # op_str → True(允许) / False(拒绝)
         self._session_allow_all: bool = False  # 全部允许（A 键）
 
@@ -166,7 +168,7 @@ class Runner:
         适用于：leetcode-solution-writer 原版（fetch → LLM compose → save）
         不适用于：grill-me / algorithm-interviewer（需要 tool_dispatch loop）
         """
-        final_prompt = self.assembler.assemble(skill, arguments)
+        final_prompt = self.assembler.assemble(skill, arguments, plain_text=self.plain_text)
 
         try:
             resp = llm.invoke(final_prompt)
@@ -490,6 +492,7 @@ class Runner:
             human_io=human_io,
             turn_policy=turn_policy,
             working_root=working_root,
+            plain_text=self.plain_text,
         )
         return td_runner.run(match_result, llm, max_iterations,
                               state_path=state_path, resume_from=resume_from)
@@ -561,6 +564,7 @@ class Runner:
             executor=self.executor, assembler=self.assembler,
             approval_fn=self._check_approval, human_io=hio,
             turn_policy=None, working_root=wr,
+            plain_text=self.plain_text,
         )
 
         # 未给初始 query：先打印该 skill 的用法提示（含 ASCII art），再等待用户第一条指令

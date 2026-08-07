@@ -539,6 +539,7 @@ class ToolDispatchRunner:
         human_io: Optional[HumanIO] = None,
         turn_policy: Optional[TurnPolicy] = None,
         working_root: Optional[str] = None,
+        plain_text: bool = False,
     ):
         self.executor = executor
         self.assembler = assembler
@@ -547,6 +548,7 @@ class ToolDispatchRunner:
         self.turn_policy = turn_policy
         # 归一化：Windows 下允许用户传 Git Bash / WSL 风格路径（/d/x、/mnt/d/x）
         self.working_root = to_native_path(working_root)
+        self.plain_text = plain_text  # CLI 纯文本终端：禁用 Markdown 输出
         # S1-3：batch 模式下会话内已批准的文件（run_repl 复用同一 runner 实例，跨轮存活）
         self._file_edit_approvals: set = set()
         self._confirm_edits_mode = "" 
@@ -658,7 +660,8 @@ class ToolDispatchRunner:
             执行结果 dict
         """
         skill = match_result.skill
-        final_prompt = self.assembler.assemble(skill, match_result.arguments)
+        final_prompt = self.assembler.assemble(
+            skill, match_result.arguments, plain_text=self.plain_text)
 
         # P2-2：通用文件快照（检查点），记录写文件前的原始内容供回滚
         base_dir = self.working_root or Path(skill.directory)

@@ -334,7 +334,7 @@ def run(
     # 3. 编译 + 执行
     executor = Executor(timeout=30, allow_all=True)
     assembler = Assembler(executor=executor, command_timeout=30)
-    runner = Runner(assembler, executor)
+    runner = Runner(assembler, executor, plain_text=True)
 
     if dry_run:
         # 只编译，不执行
@@ -878,7 +878,7 @@ def session(
 
     executor = Executor(timeout=30, allow_all=True)
     assembler = Assembler(executor=executor, command_timeout=30)
-    runner = Runner(assembler, executor)
+    runner = Runner(assembler, executor, plain_text=True)
 
     td_llm = _get_tool_llm_client()
     if not td_llm:
