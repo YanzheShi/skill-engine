@@ -888,7 +888,7 @@ def session(
         print("  请设置环境变量: LLM_MODEL, LLM_BASE_URL, LLM_API_KEY")
         raise typer.Exit(code=1)
 
-    print(f"[INFO] 使用 tool_dispatch 模式 (档位 B), 每轮子任务最大迭代 {max_iterations} 次")
+    print(f"[INFO] 使用 tool_dispatch 模式, 每轮子任务最大迭代 {max_iterations} 次")
     result = runner.run_repl(
         plan, registry, query=match_query, llm=td_llm,
         max_iterations=max_iterations,

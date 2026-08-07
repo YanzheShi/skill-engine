@@ -641,8 +641,9 @@ class Runner:
         # 正文行：│  <content>  <padding>  │
         padded = []
         for line in body:
-            display_len = sum(2 if ord(c) > 0x2e80 else 1 for c in line)
-            pad = max(0, inner_w - display_len)
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", line)
+            display_len = sum(2 if ord(c) > 0x2e80 else 1 for c in plain)
+            pad = max(0, inner_w - 1 - display_len)
             padded.append(f"│ {line}{' ' * pad}│")
 
         # 底部边框：╰──────────────────────────────────────────────╯
@@ -673,6 +674,35 @@ class Runner:
         return "\n".join(colored)
 
     @staticmethod
+    def _disp_w(text: str) -> int:
+        """显示宽度：CJK 按 2 列，其余按 1 列。"""
+        return sum(2 if ord(c) > 0x2e80 else 1 for c in text)
+
+    @staticmethod
+    def _wrap_wide(text: str, width: int, cont_indent: int = 0) -> list[str]:
+        """按显示宽度折行（CJK 算 2 列）；续行以 cont_indent 个空格缩进。"""
+        indent = " " * min(cont_indent, max(width - 2, 0))
+        out: list[str] = []
+        for para in text.split("\n"):
+            if not para.strip():
+                out.append("")
+                continue
+            cur = ""
+            cur_w = 0
+            for ch in para:
+                w = 2 if ord(ch) > 0x2e80 else 1
+                if cur_w + w > width:
+                    out.append(cur)
+                    cur = indent + ch
+                    cur_w = len(indent) + w
+                else:
+                    cur += ch
+                    cur_w += w
+            if cur:
+                out.append(cur)
+        return out
+
+    @staticmethod
     def _format_skill_hint(skill) -> str:
         """渲染 skill 的用法提示（session 未带初始 query 时展示），带边框盒子。
 
@@ -683,13 +713,16 @@ class Runner:
         name = getattr(m, "name", "skill")
         body = []
 
+        terminal_w = shutil.get_terminal_size((80, 20)).columns
+        # 盒子最大内宽（内容区 = 盒子宽 - 3：左右边框 + 左空格）：长描述折行，不撑满终端
+        inner_w = max(min(terminal_w - 3, 97), 40)
+
         def _add(label, value):
             if value:
-                lines = value.split("\n")
-                body.append(f"{label}: {lines[0]}")
-                for l in lines[1:]:
-                    if l.strip():
-                        body.append(f"  {l.strip()}")
+                prefix = f"{label}: "
+                text = " ".join(l.strip() for l in value.split("\n") if l.strip())
+                body.extend(Runner._wrap_wide(
+                    prefix + text, inner_w, cont_indent=Runner._disp_w(prefix)))
 
         _add("用途", getattr(m, "description", ""))
         _add("适用", getattr(m, "when_to_use", ""))
@@ -704,8 +737,10 @@ class Runner:
         body.append(f"  {hint}" if hint else "  给 src/xxx.py 加一个 foo() 函数并补上测试")
         body.append("会话内命令：/exit 或 /done 退出 · 直接回车 = 沿用上文继续 · :paste 多行输入 · :load <文件> 读取本地文件")
 
-        # ── 关键词高亮 ──
-        # ── 关键词高亮（单次替换，避免重叠匹配）──
+        # 固定文案也按内宽折行
+        body = [l for line in body for l in Runner._wrap_wide(line, inner_w)]
+
+        # ── 关键词高亮（在折行之后做，避免 ANSI 码撑大显示宽度）──
         _KW = re.compile(
             "|".join(re.escape(k) for k in (
                 "命名参数", "会话内命令", "用途", "适用", "参数",
@@ -718,17 +753,13 @@ class Runner:
         box_width = None
         try:
             import pyfiglet
-            # 先根据 body 内容宽度确定盒子宽度
-            content_w = max(
-                (sum(2 if ord(c) > 0x2e80 else 1 for c in l) for l in body),
-                default=0,
-            )
-            terminal_w = shutil.get_terminal_size((80, 20)).columns
-            box_width = min(max(content_w + 2, 60), terminal_w)
-            # 以盒子内宽渲染 pyfiglet，让 art 自动换行适应盒子
-            inner_w = box_width - 2
+            content_w = max((Runner._disp_w(l) for l in body), default=0)
+            # 盒子总宽 = 内容宽 + 3（左右边框 + 左空格）。内容更窄时加宽到 63
+            box_width = min(max(content_w + 3, 63), terminal_w)
+            inner_w = box_width - 3  # 内容区实际可用宽度
+            # 以内容区内宽渲染 pyfiglet，让 art 自动换行适应盒子
             ascii_art = pyfiglet.figlet_format(
-                f"Skill Engine: {name}", font="slant", width=inner_w
+                f"Skill Engine: {name}", font="slant", width=max(inner_w, 10)
             )
             # 去掉尾部空格
             art_lines = [l.rstrip() for l in ascii_art.rstrip('\n').split('\n')]
