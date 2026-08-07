@@ -281,6 +281,7 @@ def run(
     state_path: Optional[str] = typer.Option(None, "--state-path", "-s", help="P2-3 运行状态落盘路径（支持断点续跑）"),
     resume_from: Optional[str] = typer.Option(None, "--resume-from", "-r", help="P2-3 从指定状态文件续跑"),
     args: str = typer.Option("", "--args", "-a", help="用户实际请求参数（当指定 skill name 时使用）"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="显示引擎调试日志（迭代/历史条数/LLM 响应）"),
 ):
     """执行 skill
 
@@ -334,7 +335,7 @@ def run(
     # 3. 编译 + 执行
     executor = Executor(timeout=30, allow_all=True)
     assembler = Assembler(executor=executor, command_timeout=30)
-    runner = Runner(assembler, executor, plain_text=True)
+    runner = Runner(assembler, executor, plain_text=True, verbose=verbose)
 
     if dry_run:
         # 只编译，不执行
@@ -829,6 +830,7 @@ def session(
     working_root: Optional[str] = typer.Option(None, "--working-root", "-w", help="要修改的目标项目目录（默认引擎 cwd）"),
     state_path: Optional[str] = typer.Option(None, "--state-path", help="会话状态落盘路径（每轮写入）"),
     resume_from: Optional[str] = typer.Option(None, "--resume-from", "-r", help="从指定会话状态文件续接"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="显示引擎调试日志（迭代/历史条数/LLM 响应）"),
 ):
     """进入单 skill 持续会话（REPL 模式）
 
@@ -878,7 +880,7 @@ def session(
 
     executor = Executor(timeout=30, allow_all=True)
     assembler = Assembler(executor=executor, command_timeout=30)
-    runner = Runner(assembler, executor, plain_text=True)
+    runner = Runner(assembler, executor, plain_text=True, verbose=verbose)
 
     td_llm = _get_tool_llm_client()
     if not td_llm:

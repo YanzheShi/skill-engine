@@ -90,15 +90,16 @@ class _FakeHumanIO:
 
 
 def _run_session(tmp_path, responses, io_queue, resume_from=None, state_path=None,
-                 max_iterations=5, skill=None, llm=None, query="do X"):
+                 max_iterations=5, skill=None, llm=None, query="do X", assembler=None):
     from skill_engine.execution.runner import Runner
 
     skill = skill or _make_skill(tmp_path)
     registry = _make_registry(skill)
     plan = _make_plan(skill)
     executor = MagicMock()
-    assembler = MagicMock()
-    assembler.assemble.return_value = "FINAL_PROMPT"
+    if assembler is None:
+        assembler = MagicMock()
+        assembler.assemble.return_value = "FINAL_PROMPT"
     runner = Runner(assembler, executor)
     llm = llm or _FakeLLM(responses)
     hio = _FakeHumanIO(io_queue)
@@ -440,9 +441,17 @@ def test_session_without_query_shows_hint_and_waits(tmp_path):
     sys.stdout = buf
     try:
         skill = _make_rich_skill(tmp_path)
+
+        # 真实 Assembler 会把用户指令经 $ARGUMENTS 替换进 final_prompt；
+        # 用等价 mock 模拟（旧行为把裸指令当历史，新行为走 $ARGUMENTS 注入）
+        mock_assembler = MagicMock()
+        mock_assembler.assemble.side_effect = (
+            lambda skill_, args_, plain_text=False:
+            "FINAL_PROMPT|" + (args_ or {}).get("$ARGUMENTS", "")
+        )
         result, llm, hio = _run_session(
             tmp_path, [{"content": "done"}], io_queue=["加一个 greet 函数", "/exit"],
-            skill=skill, query="",
+            skill=skill, query="", assembler=mock_assembler,
         )
     finally:
         sys.stdout = _old
@@ -494,4 +503,80 @@ def test_skill_hint_tolerates_missing_fields(tmp_path):
     assert "/exit" in text
     assert "用途" in text
     assert "命名参数" not in text  # 未配置命名参数时不渲染该行
+
+
+def test_first_turn_injects_skill_prompt(tmp_path):
+    """回归：交互式 session 首轮必须把组装好的 skill 指令（final_prompt）
+    传给 LLM，而不是只传用户裸指令导致模型看不到技能上下文。
+
+    复现路径：没有初始 query、也没有续接历史时，首条用户指令曾以
+    initial_messages=[裸指令] 起轮，tool_dispatch 直接丢弃组装好的
+    final_prompt → 只产生工具调用、看不到思考/指令。
+    """
+    from skill_engine.execution.runner import Runner
+
+    skill = _make_rich_skill(tmp_path)
+    registry = _make_registry(skill)
+
+    # final_prompt 会被解析拼进 content；必须能取到 Plan 内部跑的路径
+    executor = MagicMock()
+    mock_assembler = MagicMock()
+    mock_assembler.assemble.return_value = "FINAL_SKILL_PROMPT"
+    runner = Runner(mock_assembler, executor)
+    llm = _FakeLLM([{"content": "ok"}])
+    hio = _FakeHumanIO(["帮我加个函数", "/exit"])
+    result = runner.run_repl(
+        _make_plan(skill), registry, query="", llm=llm,
+        max_iterations=5, working_root=str(tmp_path),
+        state_path=str(tmp_path / "fresh.json"), human_io=hio,
+    )
+
+    assert len(llm.calls) == 1
+    first = llm.calls[0]
+    joined = " ".join(str(m.get("content", "")) for m in first)
+    assert "FINAL_SKILL_PROMPT" in joined, "首轮未注入组装好的 skill 指令"
+    assert result.get("stopped_by") == "user_exit"
+
+
+def test_run_plan_multi_no_selected_score(tmp_path):
+    """回归：multi 协同 run_plan 不再因 SelectedSkill 缺 score 字段而崩溃。
+
+    之前 runner.run_plan 访问 selected.score（SelectedSkill 只有
+    name/role/args_override）→ AttributeError，多 skill 协同完全不可用。
+    修复后应以 plan.score 兜底，整体返回 all_outputs。
+    """
+    from unittest.mock import patch
+    from skill_engine.models import SelectedSkill
+    from skill_engine.execution.runner import Runner
+
+    class _Plan:
+        mode = "multi"
+        selections = [SelectedSkill(name="demo")]
+        primary = SelectedSkill(name="demo")
+        score = 0.9
+        method = "llm"
+        reason = ""
+        uncertain = False
+
+    skill = _make_skill(tmp_path)
+    registry = _make_registry(skill)
+    executor = MagicMock()
+    assembler = MagicMock()
+    assembler.assemble.return_value = "FINAL_MULTI"
+    llm = _FakeLLM([{"content": "run1"}])
+    runner = Runner(assembler, executor)
+
+    def _noop_run(mr, *a, **kw):
+        return {"output": "ran", "iterations": 1, "stopped_by": "tool_stop",
+                "steps": [], "files_created": [], "skill_name": mr.skill.metadata.name}
+
+    with patch.object(runner, "run", MagicMock(side_effect=_noop_run)) as mock_run:
+        result = runner.run_plan(
+            _Plan(), registry, query="do multi", llm=llm,
+            tool_dispatch=llm, max_iterations=2, working_root=str(tmp_path),
+        )
+
+    assert mock_run.called, "multi 分支应逐个 skill 调 run()"
+    assert result.get("all_outputs"), "修复后应产出 all_outputs"
+    assert result["all_outputs"][0]["skill_name"] == "demo"
 

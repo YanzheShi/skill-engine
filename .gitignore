@@ -74,7 +74,6 @@ active/
 # .env files may contain API keys
 .env
 .env.*
-!.env.template
 !.env.example
 
 # Skill install target

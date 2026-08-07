@@ -540,6 +540,7 @@ class ToolDispatchRunner:
         turn_policy: Optional[TurnPolicy] = None,
         working_root: Optional[str] = None,
         plain_text: bool = False,
+        verbose: bool = False,
     ):
         self.executor = executor
         self.assembler = assembler
@@ -549,6 +550,7 @@ class ToolDispatchRunner:
         # 归一化：Windows 下允许用户传 Git Bash / WSL 风格路径（/d/x、/mnt/d/x）
         self.working_root = to_native_path(working_root)
         self.plain_text = plain_text  # CLI 纯文本终端：禁用 Markdown 输出
+        self.verbose = verbose  # 是否显示引擎内部调试态（迭代/历史条数/LLM 响应）
         # S1-3：batch 模式下会话内已批准的文件（run_repl 复用同一 runner 实例，跨轮存活）
         self._file_edit_approvals: set = set()
         self._confirm_edits_mode = "" 
@@ -561,6 +563,37 @@ class ToolDispatchRunner:
         if len(content) <= max_chars:
             return content
         return content[:max_chars] + f"\n...(truncated, {len(content)} chars total, showing first {max_chars})"
+
+    # ---- 用户态执行轨迹：语义化输出（步骤 1+2 重构）----
+    # 统一经 human_io 的 emit_* 语义通道；human_io 为 None（非交互/Web）或
+    # 未实现新语义方法（如旧版 Fake/测试替身）时，回退为纯文本 print，
+    # 保持与原有无条件 print 行为一致，不破坏 Web 端/测试。
+    def _emit_tool(self, label: str, detail: str = "") -> None:
+        m = getattr(self.human_io, "emit_tool", None) if self.human_io is not None else None
+        if callable(m):
+            m(label, detail)
+        else:
+            print(f"  🔧 {label}  {detail}" if detail else f"  🔧 {label}")
+
+    def _emit_result(self, out: str) -> None:
+        m = getattr(self.human_io, "emit_result", None) if self.human_io is not None else None
+        if callable(m):
+            m(out)
+        elif out:
+            # 回退路径（human_io 无 emit_result）：按 2 行截断，与 CliHumanIO 行为一致
+            lines = out.splitlines()
+            for line in lines[:2]:
+                print(f"  {line}")
+            if len(lines) > 2:
+                print(f"  ...(还有 {len(lines) - 2} 行未显示，共 {len(lines)} 行)")
+
+    def _emit_thinking(self, text: str) -> None:
+        """模型本轮的「思考文字」（content）实时展示给用户（步骤 4）。"""
+        m = getattr(self.human_io, "emit_thinking", None) if self.human_io is not None else None
+        if callable(m):
+            m(text)
+        elif text:
+            print(f"\n{text}")
 
     def _check_file_safety(self, op_type: str, filepath: str, skill: Skill) -> tuple[bool, str]:
         """检查文件操作的安全性
@@ -797,12 +830,22 @@ class ToolDispatchRunner:
             messages.append({"role": "user", "content": final_prompt})
 
         result = None
+        # 执行开始标题头（语义通道；无 human_io 时静默——Web 端/测试回退默认实现）
+        if self.human_io is not None:
+            hdr = getattr(self.human_io, "emit_header", None)
+            if callable(hdr):
+                hdr(f"Running in {skill.metadata.name} @ {base_dir}")
         try:
             for i in range(max_iterations):
                 iterations += 1
 
-                print(f"\n=== Iteration {iterations}/{max_iterations} ===")
-                print(f"  Messages in history: {len(messages)} items")
+                # 隐藏迭代轮次计数（正常输出不显示）；每轮之间用空行分割，方便观察。
+                # 仅在 --verbose 调试模式保留「迭代 N/max」与历史条数。
+                if self.verbose:
+                    print(f"  ▶ 迭代 {iterations}/{max_iterations}")
+                    print(f"  Messages in history: {len(messages)} items")
+                elif iterations > 1:
+                    print()
 
                 # 上下文压缩：接近 token 预算时自动摘要压缩旧历史（保持首条与最近轮次）
                 ctx.maybe_compress(llm)
@@ -841,22 +884,45 @@ class ToolDispatchRunner:
                 if not os.environ.get("PYTEST_CURRENT_TEST"):
                     time.sleep(3)
 
-                # 标准化 LLM 响应为 dict（兼容 LangChain AIMessage）
+                # 标准化 LLM 响应为 dict（兼容 LangChain AIMessage）。
+                # 关键：保留推理字段 reasoning_content —— 推理模型（DeepSeek-R1 /
+                # V4-thinking / Qwen-thinking 等）把"思考过程"吐在的独立字段，
+                # LangChain ChatOpenAI 将其放在 additional_kwargs 里；flash 等非
+                # 推理模型通常不返回，此时 reasoning 为空，无思考可展示（正常现象）。
+                reasoning = ""
+                if isinstance(resp, dict):
+                    reasoning = resp.get("reasoning_content") or resp.get("reasoning") or ""
+                elif hasattr(resp, "additional_kwargs"):
+                    ak = resp.additional_kwargs or {}
+                    reasoning = ak.get("reasoning_content") or ak.get("reasoning") or ""
                 if hasattr(resp, "tool_calls"):
                     resp = {
                         "content": resp.content if hasattr(resp, "content") else str(resp),
                         "tool_calls": list(resp.tool_calls) if resp.tool_calls else [],
+                        "reasoning": reasoning,
                     }
                 elif not isinstance(resp, dict):
-                    resp = {"content": str(resp), "tool_calls": []}
+                    resp = {"content": str(resp), "tool_calls": [], "reasoning": ""}
+                else:
+                    resp.setdefault("reasoning", "")
 
                 # 解析 tool_calls
                 tool_calls = parse_tool_calls(resp)
 
-                print(f"  LLM response: content={len(resp.get('content', ''))} chars, tool_calls={len(tool_calls)}")
-                if tool_calls:
-                    for tc in tool_calls:
-                        print(f"    - {tc['type']}: {tc['input']}")
+                # 模型本轮的「思考文字」：实时展示。
+                # 优先级：reasoning_content（推理模型思考）→ content（模型写在工具调用前的说明）。
+                # 两者皆空 → 该模型在调工具时不输出思考（如 DeepSeek-v4-flash），属正常现象，
+                # 无内容可展示。仅在有 tool_calls 时 emit，避免与最终回答（无 tool_calls 的
+                # content）重复打印。
+                thinking = resp.get("reasoning") or resp.get("content", "")
+                if thinking and tool_calls:
+                    self._emit_thinking(thinking)
+
+                # 内部调试态仅在 --verbose 显示；工具调用改走语义通道 emit_tool
+                if self.verbose:
+                    print(f"  LLM response: content={len(resp.get('content', ''))} chars, tool_calls={len(tool_calls)}")
+                for tc in tool_calls:
+                    self._emit_tool(tc['type'], str(tc['input']))
 
                 if not tool_calls:
                     text = resp.get("content", "")
@@ -1019,11 +1085,8 @@ class ToolDispatchRunner:
                                 "name": "bash",
                                 "content": self._truncate_msg(obs),
                             })
-                            obs_lines = obs.split("\n")
-                            print(f"     {obs_lines[0]}")
-                            for ol in obs_lines[1:]:
-                                if ol.strip():
-                                    print(f"      {ol}")
+                            # 步骤 2：bash 真实输出改走语义通道（行截断），替代原先裸 print 全打
+                            self._emit_result(obs)
                         except Exception as e:
                             step_results.append({
                                 "name": f"bash_{tc['id']}",
@@ -1078,7 +1141,9 @@ class ToolDispatchRunner:
                                 "name": "read_file",
                                 "content": self._truncate_msg(formatted),
                             })
-                            print(f"     read {len(formatted)} chars from {filepath}")
+                            # 步骤 2：原只打 "read N chars"，现展示真实文件内容（超长截断）
+                            self._emit_tool(f"read_file {filepath}")
+                            self._emit_result(self._truncate_msg(formatted, max_chars=800))
                         except FileNotFoundError:
                             messages.append({
                                 "role": "tool",
@@ -1438,7 +1503,11 @@ class ToolDispatchRunner:
                                 "name": tc["type"],
                                 "content": self._truncate_msg(content),
                             })
-                            print(f"     skill tool {tc['type']}: {len(content)} chars")
+                            # 步骤 2：技能注入工具的真实输出原本只打 "N chars"，
+                            # 现改走语义通道，展示实际内容（超长截断）而非仅字符数。
+                            display = self._truncate_msg(content, max_chars=800)
+                            self._emit_tool(tc['type'])
+                            self._emit_result(display)
                             continue
                         # 既不是内建工具，也不是 skill 注入工具 → 真正未知
                         messages.append({

@@ -141,6 +141,7 @@ class Runner:
         llm_api_key: Optional[str] = None,
         llm_model: str = "",
         plain_text: bool = False,
+        verbose: bool = False,
 
     ):
         self.assembler = assembler
@@ -149,6 +150,7 @@ class Runner:
         self.llm_api_key = llm_api_key
         self.llm_model = llm_model
         self.plain_text = plain_text  # CLI 纯文本终端：禁用 Markdown 输出
+        self.verbose = verbose  # 是否显示引擎内部调试态（--verbose）
         self._session_approvals: dict[str, bool] = {}  # op_str → True(允许) / False(拒绝)
         self._session_allow_all: bool = False  # 全部允许（A 键）
 
@@ -428,7 +430,8 @@ class Runner:
                             if not skill:
                                 continue
                             mr = MatchResult(
-                                skill=skill, score=selected.score or plan.score or 1.0,
+                                # SelectedSkill 只有 name/role/args_override，没有 score 字段
+                                skill=skill, score=plan.score or 1.0,
                                 method=plan.method, arguments={"$ARGUMENTS": query, "$0": query, **parse_named_params(query)},
                             )
                             result = self.run(
@@ -484,6 +487,13 @@ class Runner:
         if match_result.skill.metadata.human_in_loop:
             human_io = CliHumanIO()
             turn_policy = TurnPolicy(**(match_result.skill.metadata.turn_policy or {}))
+        if human_io is not None:
+            sv = getattr(human_io, "set_verbose", None)
+            if callable(sv):
+                sv(self.verbose)
+            sp = getattr(human_io, "set_plain_text", None)
+            if callable(sp):
+                sp(self.plain_text)
 
         td_runner = tool_dispatch.ToolDispatchRunner(
             executor=self.executor,
@@ -493,6 +503,7 @@ class Runner:
             turn_policy=turn_policy,
             working_root=working_root,
             plain_text=self.plain_text,
+            verbose=self.verbose,
         )
         return td_runner.run(match_result, llm, max_iterations,
                               state_path=state_path, resume_from=resume_from)
@@ -559,12 +570,18 @@ class Runner:
 
         # 3. 构造 runner：session 模式 human_io 始终提供（供 ask_user），turn_policy=None 禁用内部循环
         hio = human_io or CliHumanIO(paste_dir=os.path.join(wr, "pastes"))
+        sv = getattr(hio, "set_verbose", None)
+        if callable(sv):
+            sv(self.verbose)
+        sp = getattr(hio, "set_plain_text", None)
+        if callable(sp):
+            sp(self.plain_text)
         print(f"[session] 输入模式: {getattr(hio, 'input_mode', lambda: '未知')()}")
         td_runner = tool_dispatch.ToolDispatchRunner(
             executor=self.executor, assembler=self.assembler,
             approval_fn=self._check_approval, human_io=hio,
             turn_policy=None, working_root=wr,
-            plain_text=self.plain_text,
+            plain_text=self.plain_text, verbose=self.verbose,
         )
 
         # 未给初始 query：先打印该 skill 的用法提示（含 ASCII art），再等待用户第一条指令
@@ -786,9 +803,10 @@ class Runner:
                 cmd = cmd.strip()
                 if paste_paths:
                     print(f"[session] 已接管 {len(paste_paths)} 个粘贴片段（已落盘，agent 将读取）")
+                had_history = bool(session.messages)
                 if cmd:
                     session.append_user(cmd)
-                elif session.messages:
+                elif had_history:
                     # 空输入：让 LLM 基于历史续写，而非重跑原始 query
                     session.append_user(self._CONTINUE_HINT)
                 else:
@@ -796,7 +814,11 @@ class Runner:
                     print("[session] 请输入一条指令（/exit 或 /done 退出）")
                     iteration -= 1
                     continue
-                initial_messages = session.messages
+                # 全新会话的首条指令（无历史）不传 initial_messages 历史列表：
+                # 让 ToolDispatchRunner.run 组装包含 skill 指令/环境头/plain_text 叙述
+                # 约束的 final_prompt。否则 tool_dispatch 因 initial_messages 已提供
+                # 而直接丢弃 final_prompt，模型看不到 skill 指令 → 只输出工具调用、无思考。
+                initial_messages = None if not had_history else session.messages
                 mr = build_match_result(skill, score, method, cmd or query)
 
             try:
@@ -814,7 +836,8 @@ class Runner:
             out = result.get("output", "")
             if out:
                 last_output = out
-                print(f"[{skill.metadata.name}] {out}")
+                # 经 emit 输出：plain_text 模式下自动剥离 Markdown，保证终端纯文本
+                hio.emit(f"[{skill.metadata.name}] {out}")
             stopped = result.get("stopped_by")
             if stopped in ("error", "no_match", "load_failed"):
                 return result
