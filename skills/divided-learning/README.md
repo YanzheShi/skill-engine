@@ -19,7 +19,7 @@
 将以下内容发送给 AI：
 
 ```
-请加载 skill-divided-learning v2，按流程启动新会话。
+请加载 divided-learning v2，按流程启动新会话。
 
 目标模块：<你的模块名>
 启用扩展角色：测试视角, SRE视角, 安全视角

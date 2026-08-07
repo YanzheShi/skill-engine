@@ -7,6 +7,7 @@ description: >
   适用于代码复盘、架构评审、面试备战、安全审计、运维加固场景。
 version: 2.0.0
 author: user
+argument_hint: 你来扮演「代码讲解者」，给我详细讲一下 /xx/xx/xx 的代码吧
 license: MIT
 metadata:
   hermes:
@@ -103,7 +104,7 @@ metadata:
 ### 启动一个新学习会话
 
 ```
-请按照 skill-divided-learning v2 的流程，启动一个新会话。
+请按照 divided-learning v2 的流程，启动一个新会话。
 
 目标模块：<模块名/文件路径>
 我的角色：代码开发者和维护者，负责需求和架构设计
@@ -139,7 +140,7 @@ metadata:
 ## 文件结构
 
 ```
-skill-divided-learning/
+divided-learning/
 ├── SKILL.md                    ← 本文件，系统入口与总纲
 ├── README.md                   ← 快速上手指南
 ├── roles/
