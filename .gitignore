@@ -76,6 +76,16 @@ active/
 .env.*
 !.env.example
 
+# config.yml 是统一配置源，可能含明文密钥（取代分散的 .env 与 models.yaml）
+config.yml
+config.yml.*
+!config.yml.example
+
+# 旧式模型配置文件（已被 config.yml 取代，保留忽略以防残留）
+models.yaml
+models.yaml.*
+!models.yaml.example
+
 # Skill install target
 ~/.skills/
 

@@ -45,17 +45,58 @@ pip install -e .              # 可编辑安装（开发用，改代码即时生
 pip install .
 ```
 
-### 方式三：一行装到全局 PATH（uv tool，适合纯使用者）
+### 方式三：一行装成自包含 CLI（uv tool，推荐给使用者）
 
-把 `skill-engine` 命令直接装进隔离环境并加入 PATH，装一次到处能用：
+把 `skill-engine` 命令直接装进**隔离环境**并加入 PATH，装一次到处能用，**命令脚本本身不再依赖本仓库目录**：
 
 ```bash
+# 从本地仓库安装（开发机 / 本机）
+uv tool install . --upgrade
+# 或从 GitHub 安装（他人机器，无需克隆）
 uv tool install git+https://github.com/YanzheShi/skill-engine.git
 # 升级
 uv tool upgrade skill-engine
 ```
 
+> ⚠️ **冲突警告（重要）**：如果你之前在本仓库跑过 `pip install -e .`（可编辑安装），Python 会在 `site-packages` 留一个 `.pth` 软链直接指向本仓库源码（如 `_editable_impl_skill_engine.pth`）。这会导致 `skill-engine` 命令**仍绑定仓库目录**——删掉仓库命令就废。装 uv tool 版前务必先卸掉可编辑安装：
+> ```bash
+> pip uninstall -e .
+> # 若卸载被拦截（如沙箱 safe-delete），手动删：
+> #   site-packages/_editable_impl_skill_engine.pth
+> #   site-packages/skill_engine-0.1.0.dist-info/
+> #   Scripts/skill-engine.exe  (Windows)
+> ```
+> 装完后用 `where skill-engine`（Windows）/ `which skill-engine`（macOS/Linux）确认解析到的是 uv tool 路径（如 `~/.local/bin/skill-engine` 或 `%LOCALAPPDATA%\uv\bin\skill-engine`），而不是 Python 的 `Scripts\skill-engine`。
+
 > 区别：`uv sync` 是**开发态**命令（建 `.venv`、锁依赖、便于改代码）；`uv tool install` / `pip install` 是把包装进隔离或当前环境，更适合"只用命令行"的人。
+
+## 部署后：脱离仓库目录运行（使用者必读）
+
+`skill-engine` 用方式三装成全局工具后，**命令脚本本身已脱离仓库目录**，可在任意目录直接执行（无需 `cd` 进仓库）。但运行时仍有两处"位置依赖"需要理解，否则会误以为命令坏了：
+
+### 1. Skills 从哪来
+
+CLI 默认只扫描 `当前工作目录下的 skills/` 子目录。因此：
+
+- **用法 A（项目内）**：`cd` 进一个有 `skills/` 子目录的项目，再执行 `skill-engine list` / `run`；
+- **用法 B（全局常驻，推荐）**：把 skills 放到用户级目录 `~/.skill-engine/skills/`（Windows：`C:\Users\<你>\.skill-engine\skills\`），任意目录都能 `list` 到，无需 `cd`；
+- **用法 C（临时指定）**：用 `--root` / `-w` 显式指定根目录，例如 `skill-engine scan --root D:/你的项目`、`skill-engine run "生成题解" -w D:/目标目录`。
+
+> 引擎还会扫描 `~/.agents/skills/`、`~/.claude/skills/`（Claude Code 生态兼容），通过相应开关开启 `extend_skills`。
+
+### 2. LLM / MCP 配置从哪来
+
+`config.py` 固定优先读取**仓库根目录**的 `.env`；脱离仓库后该文件不存在，会依次 fallback 到「当前工作目录的 `.env`」→「系统环境变量」。
+
+**最稳的做法**：把 LLM 配置设为 **Windows 系统环境变量**（设置 → 系统 → 关于 → 高级系统设置 → 环境变量 → 用户变量），彻底不依赖任何 `.env` 文件：
+
+```
+SKILL_ENGINE_LLM_MODEL=gpt-4o
+SKILL_ENGINE_LLM_BASE_URL=https://api.openai.com/v1
+SKILL_ENGINE_LLM_API_KEY=sk-xxx
+```
+
+MCP 配置同理，可用环境变量指定：`SKILL_ENGINE_MCP_CONFIG=D:/path/to/mcp.json`。
 
 ## 环境变量配置
 
@@ -68,9 +109,9 @@ cp .env.example .env
 最小配置只需要一个 LLM 提供商（OpenAI 兼容 API）：
 
 ```ini
-LLM_MODEL=gpt-4o
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_API_KEY=sk-your-api-key
+SKILL_ENGINE_LLM_MODEL=gpt-4o
+SKILL_ENGINE_LLM_BASE_URL=https://api.openai.com/v1
+SKILL_ENGINE_LLM_API_KEY=sk-your-api-key
 ```
 
 支持任何 OpenAI 兼容的 API 提供商，包括：
@@ -423,9 +464,9 @@ uv run pytest tests/ -q
 
 ```ini
 # LLM 配置（至少配一个）
-LLM_MODEL=gpt-4o
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_API_KEY=sk-xxx
+SKILL_ENGINE_LLM_MODEL=gpt-4o
+SKILL_ENGINE_LLM_BASE_URL=https://api.openai.com/v1
+SKILL_ENGINE_LLM_API_KEY=sk-xxx
 
 # 安全模式（可选）
 # SKILLS_ENGINE_SECURITY_MODE=permissive
@@ -467,7 +508,7 @@ ENTRYPOINT ["uv", "run", "skill-engine"]
 
 ```bash
 docker build -t skill-engine .
-docker run --rm -v "$PWD/skills:/app/skills" -e LLM_API_KEY=sk-xxx skill-engine list
+docker run --rm -v "$PWD/skills:/app/skills" -e SKILL_ENGINE_LLM_API_KEY=sk-xxx skill-engine list
 ```
 
 ### 打包成单文件可执行程序（PyInstaller）

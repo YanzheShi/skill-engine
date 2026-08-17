@@ -168,7 +168,7 @@ def _do_run_skill(skill_name: str, query: str, mode: str, runner, registry, asse
         progress(0.3, desc="正在初始化 LLM...")
         llm = _get_llm_client()
         if not llm:
-            return "## 档位 A 需要 LLM 配置\n\n请设置环境变量:\n- LLM_MODEL\n- LLM_BASE_URL\n- LLM_API_KEY"
+            return "## 档位 A 需要 LLM 配置\n\n请设置环境变量:\n- SKILL_ENGINE_LLM_MODEL\n- SKILL_ENGINE_LLM_BASE_URL\n- SKILL_ENGINE_LLM_API_KEY"
         progress(0.5, desc="正在调用 LLM...")
         result = runner.run_plan(plan, registry, query=query, llm=llm)
         progress(1.0, desc="完成")

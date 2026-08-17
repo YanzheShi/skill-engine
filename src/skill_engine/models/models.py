@@ -249,6 +249,41 @@ class SelectedSkill(BaseModel):
     args_override: Optional[dict] = Field(default=None, description="参数覆盖")
 
 
+@dataclass
+class MoaAgent:
+    """MOA 中的一个成员（模型 + skill + 任务指示）。
+
+    MOA（Mixture of Agents）把一个任务拆给多个 agent 协作：每个 agent 由
+    「一个模型 profile × 一个 skill × 一段任务指示」组成，由一个指挥官（也是
+    MoaAgent，但 role="commander"）决定下一轮由谁行动。
+
+    - alias:        简短代号，如 "A1" / "A2" / "A3" / "C"（指挥官）。交互时用户
+                    用它来引用某个 agent，避免每次复述完整配置。
+    - model_profile: config.MODEL_PROFILES 的 key（如 "default" / "gpt4o"）。
+    - skill_name:   skill 名称；可为空字符串——空表示"不挂 skill，仅用模型 +
+                    instruction 当纯决策/对话大脑"（指挥官常用此形态）。
+    - instruction:  该 agent 的专属任务指示（用户填写）。
+    - role:         "worker"（工作 agent）/ "commander"（指挥官），仅作语义标记。
+    - llm:          运行时实例化的模型客户端（由 get_llm_by_profile 延迟创建），
+                    不参与序列化，默认 None。
+    """
+
+    alias: str
+    model_profile: str
+    skill_name: str = ""
+    instruction: str = ""
+    role: str = "worker"          # "worker" | "commander"
+    llm: object = None            # 运行时填充，不序列化
+
+    def summary(self, width: int = 60) -> str:
+        """生成一行人类可读摘要（向导与最终报告复用）。"""
+        skill = self.skill_name or "（内置/无 skill）"
+        instr = (self.instruction or "").strip().replace("\n", " ")
+        if len(instr) > width:
+            instr = instr[:width - 1] + "…"
+        return f"{self.alias} [{self.role}] {self.model_profile} × {skill} :: {instr}"
+
+
 class MatchPlan(BaseModel):
     """Router 最终输出"""
     mode: Literal["single", "multi"] = "single"
