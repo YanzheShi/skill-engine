@@ -352,6 +352,11 @@ def run(
                 print(prompt[:2000])
         return
 
+    # v3: baseline run -td 埋 token（与 MOA 同款 CountingLLM 透明包装）。
+    # 仅 tool_dispatch 分支（即 --tool-dispatch，基线对比走的路径）统计；
+    # 计数值经 counter dict 传出，run_plan 结束后打印，供 code-agent-eval driver 解析。
+    td_counter = None
+
     if tool_dispatch:
             td_llm = _get_tool_llm_client()
             if not td_llm:
@@ -361,6 +366,9 @@ def run(
                 raise typer.Exit(code=1)
             print(f"[INFO] 使用 tool_dispatch 模式 (档位 B), 最大迭代 {max_iterations} 次")
             from pathlib import Path as _Path
+            from .execution.counting_llm import CountingLLM
+            td_counter = {"calls": 0, "prompt": 0, "completion": 0, "total": 0}
+            td_llm = CountingLLM(td_llm, td_counter)
             result = runner.run_plan(plan, registry, query=match_query, tool_dispatch=td_llm,
                                       max_iterations=max_iterations,
                                       working_root=working_root or str(_Path.cwd()),
@@ -375,6 +383,13 @@ def run(
                                  working_root=working_root, state_path=state_path, resume_from=resume_from)
     else:
         result = runner.run_plan(plan, registry, query=match_query)
+
+    # v3: baseline run -td 的 token 用量（与 MOA cli 同格式，driver 统一解析）
+    if td_counter is not None:
+        print(f"\n{'='*60}")
+        print(f"  LLM 调用: {td_counter['calls']}  ·  "
+              f"Token: {td_counter['total']} "
+              f"(in={td_counter['prompt']}, out={td_counter['completion']})")
 
     # 输出结果（多 skill 时显示 all_outputs）
     print(f"\n{'='*60}")
