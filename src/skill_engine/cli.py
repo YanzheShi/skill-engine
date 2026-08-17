@@ -1042,7 +1042,9 @@ def moa(
         commander = MoaAgent(alias=c.get("alias", "C"), model_profile=c["model_profile"],
                              skill_name=c.get("skill_name", ""), instruction=c.get("instruction", ""),
                              role="commander")
-        q = cfg.get("query", query or "")
+        # plan.query 为空（未配置或显式 ""）时，回退到位置参数 query（driver 注入的 task.prompt）；
+        # 不能用 cfg.get("query", query or "")，否则 plan 里写了 query:"" 会掩盖位置参数。
+        q = cfg.get("query") or (query or "")
         opts = cfg.get("options", {})
         _moa_execute(registry, workers, commander, q, working_root,
                      max_rounds=opts.get("max_rounds", max_rounds),
