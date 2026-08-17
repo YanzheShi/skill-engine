@@ -356,7 +356,7 @@ def run(
             td_llm = _get_tool_llm_client()
             if not td_llm:
                 print("[ERROR] --tool-dispatch 需要 LLM 配置")
-                print("  请设置环境变量: LLM_MODEL, LLM_BASE_URL, LLM_API_KEY")
+                print("  请设置环境变量: SKILL_ENGINE_LLM_MODEL, SKILL_ENGINE_LLM_BASE_URL, SKILL_ENGINE_LLM_API_KEY")
                 print("  或去掉 --tool-dispatch 使用纯编译模式")
                 raise typer.Exit(code=1)
             print(f"[INFO] 使用 tool_dispatch 模式 (档位 B), 最大迭代 {max_iterations} 次")
@@ -899,6 +899,278 @@ def session(
     stopped = result.get("stopped_by")
     if stopped in ("error", "no_match", "load_failed"):
         print(f"[session] 异常退出（{stopped}）: {result.get('output', '')}")
+
+
+def _moa_menu(hio, title: str, options: list, allow_done: bool = False,
+              done_label: str = "完成配置（进入指挥官）") -> object:
+    """通用编号选择菜单。options: list of (value, label)。
+
+    allow_done=True 时额外提供 `d` 选项，返回 None 作为"完成"哨兵。
+    支持直接输入 value 原文（大小写不敏感）匹配，便于脚本/记忆。
+    """
+    while True:
+        print(f"\n{title}")
+        for i, (val, label) in enumerate(options, 1):
+            print(f"  {i}. {label}")
+        if allow_done:
+            print(f"  d. {done_label}")
+        choice = (hio.read(prompt="选择> ") or "").strip().lower()
+        if allow_done and choice in ("d", "done", "完成"):
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(options):
+            return options[int(choice) - 1][0]
+        for val, _ in options:
+            if str(val).lower() == choice:
+                return val
+        print("  [无效选择，请重选]")
+
+
+def _moa_read_instruction(hio, paste_dir: str, prompt: str) -> str:
+    """读取一段自由文本指示，复用 session 的 :paste / :load 多行输入能力。"""
+    from .execution.runner import _load_file_as_paste, _capture_paste
+    raw = hio.read(prompt=prompt)
+    if raw.startswith(":load "):
+        loaded = _load_file_as_paste(raw[6:].strip(), paste_dir)
+        if loaded.startswith("[session] :load 失败"):
+            print(loaded)
+            return ""
+        return loaded
+    if raw.strip() == ":paste":
+        return _capture_paste(hio, paste_dir)
+    return raw
+
+
+def _moa_banner() -> None:
+    print("\n" + "═" * 64)
+    print("  MOA · Mixture of Agents — 多模型 / 多 skill 协作")
+    print("═" * 64)
+    print("  两种协作模式（配置方式不同，编排逻辑一致）：")
+    print("    [模式 A] 多 skill 协作：A1/A2/A3 各挂不同 skill")
+    print("             （如 VLM 审查 + 代码开发 + 测试），模型也可不同")
+    print("    [模式 B] 多模型互审：A1/A2/A3 挂同一 skill、不同模型，")
+    print("             互相讨论 / 监督 / 复核")
+    print("  你将依次配置 worker（A1..A3）与指挥官（C），每个单元 =")
+    print("  「一个模型 × 一个 skill × 一段任务指示」，并用代号引用。")
+    print("═" * 64)
+
+
+def _moa_summary_block(workers: list, commander, query: str) -> None:
+    print("\n" + "─" * 64)
+    print("  当前 MOA 配置：")
+    print(f"  总任务: {query or '（未填）'}")
+    for a in workers:
+        print(f"   · {a.summary()}")
+    print(f"   · {commander.summary()}")
+    print("─" * 64)
+
+
+@app.command()
+def moa(
+    query: Optional[str] = typer.Argument(
+        None, help="原始任务描述；交互模式下可留空，向导内再填"),
+    plan: Optional[str] = typer.Option(None, "--plan", "-p", help="非交互：从 JSON 文件加载 MOA 配置（agents/commander/query/options）"),
+    list_models: bool = typer.Option(False, "--list-models", "-L", help="仅列出当前可用的模型 profile 并退出"),
+    max_rounds: int = typer.Option(8, "--max-rounds", help="指挥官决策轮数上限（防死循环闸 #1）"),
+    max_iterations: int = typer.Option(12, "--max-iter", help="单个 worker 内层 tool_dispatch 迭代上限（闸 #2）"),
+    max_llm_calls: int = typer.Option(60, "--max-llm-calls", help="全局 LLM 调用次数上限（闸 #3）"),
+    working_root: Optional[str] = typer.Option(None, "--working-root", "-w", help="目标项目目录（默认引擎 cwd）"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="显示引擎调试日志"),
+):
+    """进入 MOA 多模型 / 多 skill 协作（向导式引导配置 + 指挥官驱动执行）
+
+    交互引导：先为每个 worker 选「模型 → skill → 任务指示」（代号 A1..A3），
+    再为指挥官选「模型 → skill → 指示」（代号 C），确认后由指挥官逐轮指派
+    下一个行动的 agent，直到它判定任务完成或触达防死循环上限。
+
+    非交互：用 --plan <file.json> 直接加载配置（适合 CI / 脚本）。
+    查看可配置的模型：--list-models。
+    """
+    from pathlib import Path
+    from .routing.discovery import discover
+    from .routing.registry import Registry
+    from .execution.assembler import Assembler
+    from .execution.executor import Executor
+    from .execution.runner import Runner
+    from .execution.human_io import CliHumanIO
+    from .execution.moa import MoaOrchestrator, MoaAgent
+    from .config import list_model_profiles
+
+    working_root = _normalize_working_root(working_root)
+
+    project_skills = Path.cwd() / "skills"
+    roots = [str(project_skills)] if project_skills.exists() else []
+    index = discover(roots=roots)
+    registry = Registry(index)
+
+    profiles = list_model_profiles()
+    if not profiles:
+        print("[ERROR] 未配置任何可用模型。请在 .env 设置 SKILL_ENGINE_LLM_MODEL "
+              "（default）或 SKILL_ENGINE_MODELS 声明多个模型。")
+        raise typer.Exit(code=1)
+
+    if list_models:
+        print("\n可用的模型 profile：")
+        for name, cfg in profiles.items():
+            print(f"  · {name}: model={cfg['model']} provider={cfg['model_provider']} "
+                  f"base_url={cfg['base_url'] or '默认'}")
+        return
+
+    # ── 非交互：从 JSON 加载 ──
+    if plan:
+        import json as _json
+        try:
+            cfg = _json.loads(Path(plan).read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"[ERROR] 无法读取 plan 文件: {e}")
+            raise typer.Exit(code=1)
+        if not cfg.get("agents"):
+            print("[ERROR] plan 文件未配置任何 worker（agents 为空）")
+            raise typer.Exit(code=1)
+        if any(not a.get("model_profile") for a in cfg["agents"]):
+            print("[ERROR] plan 文件存在缺少 model_profile 字段的 worker")
+            raise typer.Exit(code=1)
+        workers = [
+            MoaAgent(alias=a.get("alias", f"A{i+1}"), model_profile=a["model_profile"],
+                     skill_name=a.get("skill_name", ""), instruction=a.get("instruction", ""),
+                     role="worker")
+            for i, a in enumerate(cfg.get("agents", []))
+        ]
+        c = cfg.get("commander", {})
+        if not c or not c.get("model_profile"):
+            print("[ERROR] plan 文件缺少 commander 配置（需含 model_profile 字段）")
+            raise typer.Exit(code=1)
+        commander = MoaAgent(alias=c.get("alias", "C"), model_profile=c["model_profile"],
+                             skill_name=c.get("skill_name", ""), instruction=c.get("instruction", ""),
+                             role="commander")
+        q = cfg.get("query", query or "")
+        opts = cfg.get("options", {})
+        _moa_execute(registry, workers, commander, q, working_root,
+                     max_rounds=opts.get("max_rounds", max_rounds),
+                     max_agent_iterations=opts.get("max_agent_iterations", max_iterations),
+                     max_llm_calls=opts.get("max_llm_calls", max_llm_calls),
+                     verbose=verbose)
+        return
+
+    # ── 交互向导 ──
+    hio = CliHumanIO(paste_dir=str(Path(working_root or Path.cwd()) / "pastes"))
+    _moa_banner()
+
+    active_skills = registry.list_active()
+    if not active_skills:
+        print("[WARN] 当前未发现任何 skill（cwd/skills 为空）。worker 仍可选「内置(无 skill)」做纯模型任务。")
+
+    workers: list[MoaAgent] = []
+    q = query or ""
+    for i in range(1, 4):  # 最多 3 个 worker：A1, A2, A3
+        alias = f"A{i}"
+        _moa_summary_block(workers, MoaAgent(alias="C", model_profile="?", role="commander"), q)
+        print(f"\n── 配置 Worker {alias} ──")
+        # 1) 选模型
+        model_opts = [(name, f"{name}  ({cfg['model']})") for name, cfg in profiles.items()]
+        model_profile = _moa_menu(hio, f"[Worker {alias}] 选择模型：", model_opts)
+        # 2) 选 skill（含内置选项）
+        skill_opts = [("", "内置（无 skill，纯模型任务）")] + [(n, n) for n in active_skills]
+        skill_name = _moa_menu(hio, f"[Worker {alias}] 选择 skill：", skill_opts)
+        # 3) 填指示
+        instr = _moa_read_instruction(
+            hio, str(Path(working_root or Path.cwd()) / "pastes"),
+            prompt=f"[Worker {alias}] 该模型+skill 要做什么？（可 :paste 多行 / :load <文件>）\n你> ")
+        if not instr.strip():
+            print("  [指示为空，已跳过本 worker]")
+            break
+        if i == 1 and not q.strip():
+            # 首个 worker 时顺带问总任务（避免额外一步）
+            q = _moa_read_instruction(
+                hio, str(Path(working_root or Path.cwd()) / "pastes"),
+                prompt="[总任务] 这次 MOA 要解决的原始任务是什么？\n你> ")
+        workers.append(MoaAgent(alias=alias, model_profile=model_profile,
+                                skill_name=skill_name or "", instruction=instr, role="worker"))
+        # 完成配置？A1 之后允许进入指挥官
+        if i < 3:
+            cont = _moa_menu(hio, f"继续添加下一个 Worker（A{i+1}）？",
+                             [("next", "继续添加"), ("done", "完成配置，进入指挥官")])
+            if cont == "done":
+                break
+
+    if not workers:
+        print("[ERROR] 未配置任何 worker，退出。")
+        raise typer.Exit(code=1)
+
+    # ── 指挥官 ──
+    _moa_summary_block(workers, MoaAgent(alias="C", model_profile="?", role="commander"), q)
+    print("\n── 配置指挥官（Commander） ──")
+    c_model = _moa_menu(hio, "[指挥官] 选择模型：", model_opts)
+    c_skill = _moa_menu(hio, "[指挥官] 选择 skill（推荐 moa-commander；也可选内置）：",
+                        [("", "内置（无 skill，纯决策大脑）")] + [(n, n) for n in active_skills])
+    c_instr = _moa_read_instruction(
+        hio, str(Path(working_root or Path.cwd()) / "pastes"),
+        prompt="[指挥官] 它的指挥策略 / 终止条件是什么？（如：达到质量门禁即 STOP）\n你> ")
+    commander = MoaAgent(alias="C", model_profile=c_model, skill_name=c_skill or "",
+                         instruction=c_instr, role="commander")
+
+    # ── 确认 ──
+    while True:
+        _moa_summary_block(workers, commander, q)
+        print(f"\n  防死循环上限：{max_rounds} 轮 / {max_llm_calls} 次 LLM 调用 / "
+              f"单 worker {max_iterations} 迭代")
+        decision = _moa_menu(hio, "确认开始任务？",
+                             [("start", "开始执行 (y)"), ("reconfig", "重新配置 (r)"),
+                              ("exit", "退出 (e)")])
+        if decision == "exit":
+            print("已退出。")
+            return
+        if decision == "reconfig":
+            # 重新进入向导
+            return moa(query=q, working_root=working_root, max_rounds=max_rounds,
+                       max_iterations=max_iterations, max_llm_calls=max_llm_calls,
+                       verbose=verbose)
+        if decision == "start":
+            break
+
+    _moa_execute(registry, workers, commander, q, working_root,
+                 max_rounds=max_rounds, max_agent_iterations=max_iterations,
+                 max_llm_calls=max_llm_calls, verbose=verbose)
+
+
+def _moa_execute(registry, workers: list, commander, query: str,
+                 working_root: Optional[str], max_rounds: int,
+                 max_agent_iterations: int, max_llm_calls: int, verbose: bool) -> None:
+    """构造运行环境并执行 MOA，打印最终报告。"""
+    from .execution.assembler import Assembler
+    from .execution.executor import Executor
+    from .execution.runner import Runner
+    from .execution.moa import MoaOrchestrator
+
+    executor = Executor(timeout=30, allow_all=True)
+    assembler = Assembler(executor=executor, command_timeout=30)
+    runner = Runner(assembler, executor, plain_text=True, verbose=verbose)
+
+    orch = MoaOrchestrator(
+        executor=executor, assembler=assembler,
+        approval_fn=runner._check_approval,
+        human_io=None,   # 执行期进度已由 orchestrator 经 print/emit 输出；交互在向导阶段完成
+        working_root=working_root or str(Path.cwd()),
+        plain_text=True, verbose=verbose,
+    )
+    result = orch.run(
+        workers, commander, registry, query=query or "",
+        max_rounds=max_rounds, max_agent_iterations=max_agent_iterations,
+        max_llm_calls=max_llm_calls,
+    )
+
+    print("\n" + "═" * 64)
+    print("  MOA 执行结果")
+    print("═" * 64)
+    print(f"  轮次: {result['rounds']}  ·  LLM 调用: {result['llm_calls']}  ·  "
+          f"Token: {result.get('tokens_total', 0)} "
+          f"(in={result.get('tokens_prompt', 0)}, out={result.get('tokens_completion', 0)})  ·  "
+          f"停止原因: {result['stopped_by']}")
+    if result.get("files_created"):
+        print(f"  产出文件: {len(result['files_created'])} 个")
+        for f in result["files_created"][:20]:
+            print(f"    - {f}")
+    print(f"\n{result.get('output', '')}")
+    print()
 
 
 def main() -> None:
