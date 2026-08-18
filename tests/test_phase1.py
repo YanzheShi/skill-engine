@@ -69,8 +69,9 @@ class TestDiscoverSkillDir:
         index = _discover_skill_dir(Path("/nonexistent/path"), priority=10)
         assert index == {}
 
-    def test_discover_empty_dir(self):
-        tmpdir = Path(__file__).parent / "fixtures" / "empty"
+    def test_discover_empty_dir(self, tmp_path):
+        # 用 tmp_path 而非仓库内 fixtures 目录：避免清理时触发沙箱 safe-delete 拦截 rmdir
+        tmpdir = tmp_path / "empty"
         tmpdir.mkdir(exist_ok=True)
         index = _discover_skill_dir(tmpdir, priority=10)
         assert index == {}

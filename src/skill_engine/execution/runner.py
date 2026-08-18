@@ -712,6 +712,10 @@ class Runner:
         m = getattr(skill, "metadata", None)
         name = getattr(m, "name", "skill")
         body = []
+        # skill 名称始终可见：作为正文首行（ASCII art 之后）显示，
+        # 避免被 pyfiglet 按宽度截断的 "Skill Engine: {name}" art 吞掉，
+        # 也避免 ascii_art 存在时顶栏 title 被 suppress 导致名字不落屏。
+        body.append(f"Skill: {name}")
 
         terminal_w = shutil.get_terminal_size((80, 20)).columns
         # 盒子最大内宽（内容区 = 盒子宽 - 3：左右边框 + 左空格）：长描述折行，不撑满终端
@@ -743,7 +747,7 @@ class Runner:
         # ── 关键词高亮（在折行之后做，避免 ANSI 码撑大显示宽度）──
         _KW = re.compile(
             "|".join(re.escape(k) for k in (
-                "命名参数", "会话内命令", "用途", "适用", "参数",
+                "Skill", "命名参数", "会话内命令", "用途", "适用", "参数",
             ))
         )
         body = [_KW.sub(lambda m: f"{_C_YELLOW}{m.group()}{_C_RESET}", l) for l in body]

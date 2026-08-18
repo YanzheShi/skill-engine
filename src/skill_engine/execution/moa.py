@@ -24,9 +24,9 @@ skill-engine 原本的执行核心是单一的 ``ToolDispatchRunner.run(skill, l
 
 防死循环（四道闸）
 ------------------
-1. ``max_rounds``：commander 决策轮数硬上限（默认 8）。
-2. ``max_agent_iterations``：单个 worker 内层 tool_dispatch 迭代上限（默认 12）。
-3. ``max_llm_calls``：全局 LLM 调用次数上限（``CountingLLM`` 计数，默认 60）。
+1. ``max_rounds``：commander 决策轮数硬上限（默认 20）。
+2. ``max_agent_iterations``：单个 worker 内层 tool_dispatch 迭代上限（默认 60）。
+3. ``max_llm_calls``：全局 LLM 调用次数上限（``CountingLLM`` 计数，默认 500）。
 4. 反震荡强制停止：同一 agent 连续命中 ``max_consecutive_same_agent``(默认 3)
    次且黑板无变化 → 强制 STOP，避免 commander 在两个 agent 间无限乒乓。
 
@@ -350,9 +350,9 @@ class MoaOrchestrator:
         commander: MoaAgent,
         registry,
         query: str = "",
-        max_rounds: int = 8,
-        max_agent_iterations: int = 12,
-        max_llm_calls: int = 60,
+        max_rounds: int = 20,
+        max_agent_iterations: int = 60,
+        max_llm_calls: int = 500,
         max_consecutive_same_agent: int = 3,
         final_synthesis: bool = True,
     ) -> dict:

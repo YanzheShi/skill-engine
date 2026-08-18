@@ -573,7 +573,7 @@ class ToolDispatchRunner:
         if callable(m):
             m(label, detail)
         else:
-            print(f"  🔧 {label}  {detail}" if detail else f"  🔧 {label}")
+            print(f"  [tool] {label}  {detail}" if detail else f"  [tool] {label}")
 
     def _emit_result(self, out: str) -> None:
         m = getattr(self.human_io, "emit_result", None) if self.human_io is not None else None
@@ -842,7 +842,7 @@ class ToolDispatchRunner:
                 # 隐藏迭代轮次计数（正常输出不显示）；每轮之间用空行分割，方便观察。
                 # 仅在 --verbose 调试模式保留「迭代 N/max」与历史条数。
                 if self.verbose:
-                    print(f"  ▶ 迭代 {iterations}/{max_iterations}")
+                    print(f"  > 迭代 {iterations}/{max_iterations}")
                     print(f"  Messages in history: {len(messages)} items")
                 elif iterations > 1:
                     print()

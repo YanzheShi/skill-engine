@@ -985,9 +985,9 @@ def moa(
         None, help="原始任务描述；交互模式下可留空，向导内再填"),
     plan: Optional[str] = typer.Option(None, "--plan", "-p", help="非交互：从 JSON 文件加载 MOA 配置（agents/commander/query/options）"),
     list_models: bool = typer.Option(False, "--list-models", "-L", help="仅列出当前可用的模型 profile 并退出"),
-    max_rounds: int = typer.Option(8, "--max-rounds", help="指挥官决策轮数上限（防死循环闸 #1）"),
-    max_iterations: int = typer.Option(12, "--max-iter", help="单个 worker 内层 tool_dispatch 迭代上限（闸 #2）"),
-    max_llm_calls: int = typer.Option(60, "--max-llm-calls", help="全局 LLM 调用次数上限（闸 #3）"),
+    max_rounds: int = typer.Option(20, "--max-rounds", help="指挥官决策轮数上限（防死循环闸 #1）"),
+    max_iterations: int = typer.Option(60, "--max-iter", help="单个 worker 内层 tool_dispatch 迭代上限（闸 #2）"),
+    max_llm_calls: int = typer.Option(500, "--max-llm-calls", help="全局 LLM 调用次数上限（闸 #3）"),
     working_root: Optional[str] = typer.Option(None, "--working-root", "-w", help="目标项目目录（默认引擎 cwd）"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="显示引擎调试日志"),
 ):
@@ -1153,6 +1153,7 @@ def _moa_execute(registry, workers: list, commander, query: str,
                  working_root: Optional[str], max_rounds: int,
                  max_agent_iterations: int, max_llm_calls: int, verbose: bool) -> None:
     """构造运行环境并执行 MOA，打印最终报告。"""
+    from pathlib import Path
     from .execution.assembler import Assembler
     from .execution.executor import Executor
     from .execution.runner import Runner
