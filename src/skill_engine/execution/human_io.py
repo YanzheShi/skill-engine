@@ -62,6 +62,17 @@ def strip_markdown(text: str) -> str:
     return text.strip()
 
 
+# 工具调用参数展示长度上限（仅展示层，模型上下文不受影响）
+_DETAIL_MAX_CHARS = 100
+
+
+def _truncate_detail(detail: str, max_chars: int = _DETAIL_MAX_CHARS) -> str:
+    """工具调用 detail 过长时只保留头部，附截断说明。"""
+    if len(detail) <= max_chars:
+        return detail
+    return detail[:max_chars] + f"…(截断，共 {len(detail)} 字符)"
+
+
 class HumanIO(ABC):
     """人机交互抽象层
 
@@ -70,7 +81,7 @@ class HumanIO(ABC):
     """
 
     @abstractmethod
-    def emit(self, text: str) -> None:
+    def emit(self, text: str, label: str = "[AI] ") -> None:
         ...
 
     @abstractmethod
@@ -137,9 +148,12 @@ class HumanIO(ABC):
                 print(f"  {line}")
 
     def emit_tool(self, label: str, detail: str = "") -> None:
-        """一次工具调用的摘要（类型 + 参数），人类可读（替代 '- type: input'）。"""
+        """一次工具调用的摘要（类型 + 参数），人类可读（替代 '- type: input'）。
+
+        参数过长时截断到头部（展示层限制，模型上下文的完整参数不受影响）。
+        """
         if detail:
-            print(f"  🔧 {label}  {detail}")
+            print(f"  🔧 {label}  {_truncate_detail(detail)}")
         else:
             print(f"  🔧 {label}")
 
@@ -161,6 +175,8 @@ class CliHumanIO(HumanIO):
         self._suppress_change = False
         # 非 TTY（管道/测试/CI）不输出 ANSI 转义，避免乱码；Web 端同理
         self._color = sys.stdout.isatty()
+        # 非 TTY 同时降级 emoji 为 ASCII 标签（GBK 管道输出会因 emoji 崩溃）
+        self._emoji = sys.stdout.isatty()
         self.verbose = False
         self.plain_text = False  # CLI 纯文本终端：输出时剥离 Markdown 语法
 
@@ -199,10 +215,10 @@ class CliHumanIO(HumanIO):
             buf.cursor_position = len(token)
             self._suppress_change = False
 
-    def emit(self, text: str):
+    def emit(self, text: str, label: str = "[AI] "):
         if self.plain_text:
             text = strip_markdown(text)
-        print(f"\n[AI] {text}")
+        print(f"\n{label}{text}")
 
     # ---- 用户态执行轨迹：CLI 带 ANSI 着色实现 ----
     def _c(self, code: str) -> str:
@@ -224,13 +240,14 @@ class CliHumanIO(HumanIO):
         if self.plain_text:
             text = strip_markdown(text)
         R, T = self._c("\033[0m"), self._c("\033[35m\033[3m")  # 品红斜体：思考专属
+        sym = "💭" if self._emoji else ">"
         lines = text.splitlines()
         shown = []
         for i, line in enumerate(lines[:max_lines]):
-            shown.append(f"💭 {line}")
+            shown.append(f"{sym} {line}")
         if len(lines) > max_lines:
             shown.append(
-                f"💭 ...(思考过程还有 {len(lines) - max_lines} 行未显示，"
+                f"{sym} ...(思考过程还有 {len(lines) - max_lines} 行未显示，"
                 f"完整内容已用于决策)"
             )
         print("\n" + "\n".join(f"{T}{ln}{R}" for ln in shown) + "\n")
@@ -254,10 +271,11 @@ class CliHumanIO(HumanIO):
 
     def emit_tool(self, label: str, detail: str = "") -> None:
         R, Y = self._c("\033[0m"), self._c("\033[33m")  # 黄色工具
+        sym = "🔧" if self._emoji else "[tool]"
         if detail:
-            print(f"  {Y}🔧 {label}{R}  {detail}")
+            print(f"  {Y}{sym} {label}{R}  {_truncate_detail(detail)}")
         else:
-            print(f"  {Y}🔧 {label}{R}")
+            print(f"  {Y}{sym} {label}{R}")
 
     def input_mode(self) -> str:
         """返回当前输入模式，供启动诊断显示（精准区分回退原因）。"""

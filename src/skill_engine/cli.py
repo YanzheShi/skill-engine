@@ -917,11 +917,14 @@ def session(
 
 
 def _moa_menu(hio, title: str, options: list, allow_done: bool = False,
-              done_label: str = "完成配置（进入指挥官）") -> object:
+              done_label: str = "完成配置（进入指挥官）",
+              keys: Optional[list] = None) -> object:
     """通用编号选择菜单。options: list of (value, label)。
 
     allow_done=True 时额外提供 `d` 选项，返回 None 作为"完成"哨兵。
     支持直接输入 value 原文（大小写不敏感）匹配，便于脚本/记忆。
+    keys: 与 options 等长的快捷键列表（如 ["y","x","r","e"]），输入对应
+    字母直接选中该选项——让 label 里标注的 (y)/(x)/(r)/(e) 真正生效。
     """
     while True:
         print(f"\n{title}")
@@ -934,10 +937,36 @@ def _moa_menu(hio, title: str, options: list, allow_done: bool = False,
             return None
         if choice.isdigit() and 1 <= int(choice) <= len(options):
             return options[int(choice) - 1][0]
+        if keys:
+            for k, (val, _) in zip(keys, options):
+                if str(k).lower() == choice:
+                    return val
         for val, _ in options:
             if str(val).lower() == choice:
                 return val
         print("  [无效选择，请重选]")
+
+
+def _moa_pick_commander_skill(hio, active_skills: list) -> str:
+    """指挥官 skill 只能从固定白名单 MOA_COMMANDER_SKILLS 中选择（问题 3）。
+
+    白名单当前只有一个（moa-commander）→ 不弹菜单，直接使用并给出友好提示；
+    未来扩展为多个后自动变为菜单选择；白名单不在 active_skills（off/不存在）
+    时回退到「内置 / 任意 skill」菜单。
+    """
+    from .execution.moa import MOA_COMMANDER_SKILLS
+    candidates = [n for n in MOA_COMMANDER_SKILLS if n in active_skills]
+    if len(candidates) == 1:
+        print(f"  [指挥官] 使用固定指挥官 skill: {candidates[0]}"
+              f"（当前唯一，无需选择；后续可扩展）")
+        return candidates[0]
+    if len(candidates) > 1:
+        return _moa_menu(hio, "[指挥官] 选择指挥官 skill（仅限固定白名单）：",
+                         [(n, n) for n in candidates])
+    print("  [WARN] 固定指挥官 skill 均不可用（未安装或 state=off），"
+          "可选内置纯决策大脑或任意 skill。")
+    return _moa_menu(hio, "[指挥官] 选择 skill：",
+                     [("", "内置（无 skill，纯决策大脑）")] + [(n, n) for n in active_skills])
 
 
 def _moa_read_instruction(hio, paste_dir: str, prompt: str) -> str:
@@ -977,6 +1006,35 @@ def _moa_summary_block(workers: list, commander, query: str) -> None:
         print(f"   · {a.summary()}")
     print(f"   · {commander.summary()}")
     print("─" * 64)
+
+
+def _moa_export_config(workers: list, commander, query: str,
+                       max_rounds: int, max_agent_iterations: int, max_llm_calls: int,
+                       out_dir: str, source: str = "wizard") -> str:
+    """把当前 MOA 配置序列化为兼容 --plan 的 JSON 文件，返回写入路径。"""
+    from datetime import datetime
+    from pathlib import Path
+    cfg = {
+        "agents": [
+            {"alias": a.alias, "model_profile": a.model_profile,
+             "skill_name": a.skill_name, "instruction": a.instruction}
+            for a in workers
+        ],
+        "commander": {"alias": commander.alias, "model_profile": commander.model_profile,
+                      "skill_name": commander.skill_name,
+                      "instruction": commander.instruction},
+        "query": query or "",
+        "options": {
+            "max_rounds": max_rounds,
+            "max_agent_iterations": max_agent_iterations,
+            "max_llm_calls": max_llm_calls,
+        },
+        "meta": {"source": source,
+                 "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+    }
+    out = Path(out_dir) / f"moa_config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    out.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(out)
 
 
 @app.command()
@@ -1026,8 +1084,9 @@ def moa(
     if list_models:
         print("\n可用的模型 profile：")
         for name, cfg in profiles.items():
+            vision = " · 支持视觉" if cfg.get("vision") else ""
             print(f"  · {name}: model={cfg['model']} provider={cfg['model_provider']} "
-                  f"base_url={cfg['base_url'] or '默认'}")
+                  f"base_url={cfg['base_url'] or '默认'}{vision}")
         return
 
     # ── 非交互：从 JSON 加载 ──
@@ -1065,7 +1124,8 @@ def moa(
                      max_rounds=opts.get("max_rounds", max_rounds),
                      max_agent_iterations=opts.get("max_agent_iterations", max_iterations),
                      max_llm_calls=opts.get("max_llm_calls", max_llm_calls),
-                     verbose=verbose)
+                     verbose=verbose, export_after=True, export_source="plan",
+                     trusted_root=working_root)
         return
 
     # ── 交互向导 ──
@@ -1076,18 +1136,27 @@ def moa(
     if not active_skills:
         print("[WARN] 当前未发现任何 skill（cwd/skills 为空）。worker 仍可选「内置(无 skill)」做纯模型任务。")
 
-    workers: list[MoaAgent] = []
+    # 1) 先定总任务（问题 1：先任务后模型，避免配置完模型才想起没填任务）
     q = query or ""
+    if not q.strip():
+        q = _moa_read_instruction(
+            hio, str(Path(working_root or Path.cwd()) / "pastes"),
+            prompt="[总任务] 这次 MOA 要解决的原始任务是什么？\n你> ")
+    print(f"  总任务已记录: {q[:60]}{'…' if len(q) > 60 else ''}")
+
+    workers: list[MoaAgent] = []
     for i in range(1, 4):  # 最多 3 个 worker：A1, A2, A3
         alias = f"A{i}"
         _moa_summary_block(workers, MoaAgent(alias="C", model_profile="?", role="commander"), q)
         print(f"\n── 配置 Worker {alias} ──")
         # 1) 选模型
-        model_opts = [(name, f"{name}  ({cfg['model']})") for name, cfg in profiles.items()]
+        model_opts = [(name, f"{name}  ({cfg['model']})"
+                       + (" · 支持视觉" if cfg.get("vision") else ""))
+                      for name, cfg in profiles.items()]
         model_profile = _moa_menu(hio, f"[Worker {alias}] 选择模型：", model_opts)
         # 2) 选 skill（含内置选项）
-        skill_opts = [("", "内置（无 skill，纯模型任务）")] + [(n, n) for n in active_skills]
-        skill_name = _moa_menu(hio, f"[Worker {alias}] 选择 skill：", skill_opts)
+        skill_opts = [("", "内置（无 skill，按描述自动匹配 / 纯模型）")] + [(n, n) for n in active_skills]
+        skill_name = _moa_menu(hio, f"[Worker {alias}] 选择 skill（留空=按指示自动匹配）：", skill_opts)
         # 3) 填指示
         instr = _moa_read_instruction(
             hio, str(Path(working_root or Path.cwd()) / "pastes"),
@@ -1095,11 +1164,6 @@ def moa(
         if not instr.strip():
             print("  [指示为空，已跳过本 worker]")
             break
-        if i == 1 and not q.strip():
-            # 首个 worker 时顺带问总任务（避免额外一步）
-            q = _moa_read_instruction(
-                hio, str(Path(working_root or Path.cwd()) / "pastes"),
-                prompt="[总任务] 这次 MOA 要解决的原始任务是什么？\n你> ")
         workers.append(MoaAgent(alias=alias, model_profile=model_profile,
                                 skill_name=skill_name or "", instruction=instr, role="worker"))
         # 完成配置？A1 之后允许进入指挥官
@@ -1117,8 +1181,7 @@ def moa(
     _moa_summary_block(workers, MoaAgent(alias="C", model_profile="?", role="commander"), q)
     print("\n── 配置指挥官（Commander） ──")
     c_model = _moa_menu(hio, "[指挥官] 选择模型：", model_opts)
-    c_skill = _moa_menu(hio, "[指挥官] 选择 skill（推荐 moa-commander；也可选内置）：",
-                        [("", "内置（无 skill，纯决策大脑）")] + [(n, n) for n in active_skills])
+    c_skill = _moa_pick_commander_skill(hio, active_skills)
     c_instr = _moa_read_instruction(
         hio, str(Path(working_root or Path.cwd()) / "pastes"),
         prompt="[指挥官] 它的指挥策略 / 终止条件是什么？（如：达到质量门禁即 STOP）\n你> ")
@@ -1131,10 +1194,18 @@ def moa(
         print(f"\n  防死循环上限：{max_rounds} 轮 / {max_llm_calls} 次 LLM 调用 / "
               f"单 worker {max_iterations} 迭代")
         decision = _moa_menu(hio, "确认开始任务？",
-                             [("start", "开始执行 (y)"), ("reconfig", "重新配置 (r)"),
-                              ("exit", "退出 (e)")])
+                             [("start", "开始执行 (y)"), ("export", "仅导出配置 JSON (x)"),
+                              ("reconfig", "重新配置 (r)"), ("exit", "退出 (e)")],
+                             keys=["y", "x", "r", "e"])
         if decision == "exit":
             print("已退出。")
+            return
+        if decision == "export":
+            path = _moa_export_config(
+                workers, commander, q, max_rounds, max_iterations, max_llm_calls,
+                working_root or str(Path.cwd()), source="wizard")
+            print(f"[INFO] 配置已导出（未执行任何任务）: {path}")
+            print(f'[INFO] 复用方式: skill-engine moa --plan "{path}"')
             return
         if decision == "reconfig":
             # 重新进入向导
@@ -1146,29 +1217,44 @@ def moa(
 
     _moa_execute(registry, workers, commander, q, working_root,
                  max_rounds=max_rounds, max_agent_iterations=max_iterations,
-                 max_llm_calls=max_llm_calls, verbose=verbose)
+                 max_llm_calls=max_llm_calls, verbose=verbose,
+                 export_after=True, export_source="wizard",
+                 trusted_root=working_root)
 
 
 def _moa_execute(registry, workers: list, commander, query: str,
                  working_root: Optional[str], max_rounds: int,
-                 max_agent_iterations: int, max_llm_calls: int, verbose: bool) -> None:
-    """构造运行环境并执行 MOA，打印最终报告。"""
+                 max_agent_iterations: int, max_llm_calls: int, verbose: bool,
+                 export_after: bool = False, export_source: str = "executed",
+                 trusted_root: Optional[str] = None) -> None:
+    """构造运行环境并执行 MOA，打印最终报告；export_after 时导出配置 JSON。
+
+    trusted_root：用户显式指定的受信任工作目录（-w 非空时启用）——其内的文件
+    读写自动放行免审批；目录外操作维持原审批。未指定时为 None（不启用）。
+    """
     from pathlib import Path
     from .execution.assembler import Assembler
     from .execution.executor import Executor
     from .execution.runner import Runner
     from .execution.moa import MoaOrchestrator
+    from .execution.human_io import CliHumanIO
 
     executor = Executor(timeout=30, allow_all=True)
     assembler = Assembler(executor=executor, command_timeout=30)
     runner = Runner(assembler, executor, plain_text=True, verbose=verbose)
 
+    # 执行期复用 CliHumanIO 语义通道（颜色/图标/截断），与 session 模式观感一致；
+    # 交互已在向导阶段完成，这里仅用于输出（emit 系），不读输入。
+    hio = CliHumanIO(paste_dir=str(Path(working_root or Path.cwd()) / "pastes"))
+    hio.set_plain_text(True)
+
     orch = MoaOrchestrator(
         executor=executor, assembler=assembler,
         approval_fn=runner._check_approval,
-        human_io=None,   # 执行期进度已由 orchestrator 经 print/emit 输出；交互在向导阶段完成
+        human_io=hio,
         working_root=working_root or str(Path.cwd()),
         plain_text=True, verbose=verbose,
+        trusted_root=trusted_root,
     )
     result = orch.run(
         workers, commander, registry, query=query or "",
@@ -1189,6 +1275,13 @@ def _moa_execute(registry, workers: list, commander, query: str,
             print(f"    - {f}")
     print(f"\n{result.get('output', '')}")
     print()
+
+    if export_after:
+        path = _moa_export_config(
+            workers, commander, query, max_rounds, max_agent_iterations,
+            max_llm_calls, working_root or str(Path.cwd()), source=export_source)
+        print(f"[INFO] 本次 MOA 配置已导出: {path}")
+        print(f'[INFO] 复用方式: skill-engine moa --plan "{path}"')
 
 
 def main() -> None:

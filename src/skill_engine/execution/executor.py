@@ -23,12 +23,32 @@ import sys
 import os
 import locale
 import shlex
+import signal
 from pathlib import Path
 from typing import Optional
 
 from .paths import to_native_path, native_path_hint
 
 shell_quote = shlex.quote
+
+
+def _kill_process_tree(pid: int) -> None:
+    """强杀进程树（含孙进程）。
+
+    - Windows：taskkill /T /F（cmd → findstr 等子进程一并清除）；
+    - POSIX：向进程组发 SIGKILL（配合 start_new_session 使用）。
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/pid", str(pid), "/T", "/F"],
+                           capture_output=True, timeout=10)
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
 
 
 class Executor:
@@ -175,40 +195,42 @@ class Executor:
                 # WSL bash：所有 Unix 路径语法直接工作
                 # 用 wsl.exe --cd 设置工作目录，不出现在命令字符串中
                 wsl_cwd = self._to_wsl_path(str(cwd))
-                full_cmd = command
-                proc = subprocess.run(
-                    ["wsl.exe", "--cd", wsl_cwd, "bash", "-c", full_cmd],
-                    capture_output=True,
-                    text=False,
-                    timeout=effective_timeout,
-                    env=env,
-                )
+                proc_args = ["wsl.exe", "--cd", wsl_cwd, "bash", "-c", command]
             elif self.shell == "cmd":
-                full_cmd = f'cmd /c "{command}"'
-                proc = subprocess.run(
-                    full_cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=False,
-                    timeout=effective_timeout,
-                    cwd=str(cwd),
-                    env=env,
-                )
+                # 参数列表方式（不用 shell=True）：避免外层 cmd 对命令字符串的
+                # 二次引号解析——LLM 命令里的嵌套引号（如 "id=\""）曾导致内层
+                # cmd 挂起，而 subprocess.run(timeout=) 只杀外层进程、杀不掉
+                # 子进程树，communicate 永久死等（实测卡 30 分钟无输出）。
+                proc_args = ["cmd.exe", "/c", command]
             else:
-                full_cmd = f"{self.shell} -c {shell_quote(command)}"
-                proc = subprocess.run(
-                    full_cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=False,
-                    timeout=effective_timeout,
-                    cwd=str(cwd),
-                    env=env,
-                )
+                proc_args = [self.shell, "-c", command]
+            proc = subprocess.Popen(
+                proc_args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,   # 切断 stdin：防 findstr 等命令等待输入挂起
+                cwd=str(cwd),
+                env=env,
+                start_new_session=(os.name != "nt"),   # POSIX：独立进程组，超时可按组 kill
+            )
+            try:
+                raw_out, raw_err = proc.communicate(timeout=effective_timeout)
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                # 超时：强杀整个进程树（Windows: taskkill /T /F；POSIX: killpg），
+                # 否则子进程持有管道 → communicate 死等（旧实现的 30 分钟卡死根因）
+                timed_out = True
+                _kill_process_tree(proc.pid)
+                try:
+                    raw_out, raw_err = proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    raw_out, raw_err = b"", b""
+                # 超时语义：exit_code=-1，stderr 前置超时提示（tool_dispatch 依赖）
+                raw_err = f"[超时: {effective_timeout}s]".encode("utf-8", errors="replace") + raw_err
 
             # 手动解码：先试 UTF-8，失败回退到系统编码
-            raw_stdout = proc.stdout[:self.max_output] if proc.stdout else b""
-            raw_stderr = proc.stderr[:self.max_output] if proc.stderr else b""
+            raw_stdout = raw_out[:self.max_output] if raw_out else b""
+            raw_stderr = raw_err[:self.max_output] if raw_err else b""
             try:
                 stdout = raw_stdout.decode("utf-8")
             except UnicodeDecodeError:
@@ -221,15 +243,8 @@ class Executor:
             return {
                 "stdout": stdout,
                 "stderr": stderr,
-                "exit_code": proc.returncode,
-                "timed_out": False,
-            }
-        except subprocess.TimeoutExpired:
-            return {
-                "stdout": "",
-                "stderr": f"[超时: {effective_timeout}s]",
-                "exit_code": -1,
-                "timed_out": True,
+                "exit_code": (-1 if timed_out else proc.returncode),
+                "timed_out": timed_out,
             }
         except Exception as e:
             return {

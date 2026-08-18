@@ -29,12 +29,42 @@ def bash(command: str, timeout: int = 0) -> str:
 
 
 @tool
-def read_file(path: str, offset: int = 0, limit: int = 0) -> str:
-    """Read the contents of a file.
+def read_file(path: str, offset: int = 0, limit: int = 0, force_refresh: bool = False) -> str:
+    """Read the contents of a UTF-8 text file.
 
     Supports absolute paths, paths relative to the working directory,
     and ~/ expansion. Returns content with line numbers.
     Use offset/limit for pagination on large files.
+    ONLY for text files — images and other binary files cannot be
+    read this way; use view_image instead (vision models only).
+
+    IMPORTANT: the engine caches read results per session. Re-reading a
+    range you already read returns a cache-hit notice instead of the full
+    text. If the earlier content is no longer visible in your context
+    (e.g. it was compacted away), call again with force_refresh=true to
+    always get the full content.
+    """  # noqa: E501
+
+
+@tool
+def view_image(path: str) -> str:
+    """Load an image file (PNG/JPEG/GIF/WebP) into the conversation for visual inspection.
+
+    The image is injected as a multimodal message, so the model can SEE it.
+    Before injection, when Pillow is available, it is downscaled (longest edge
+    capped at 1568px) ONLY if that reduces the model's 512px-tile count (the
+    token cost unit); the smaller of JPEG(q85)/PNG is sent. Images that would
+    not save tiles, or environments without Pillow, pass through unchanged.
+    ONLY works on models that support vision (vision: true in model profile).
+    On text-only models it returns a notice instead of loading the image.
+    Use this to check screenshots (e.g. from shot_web) and verify UI rendering.
+
+    Args:
+        path: Path to the image file (absolute, or relative to working directory).
+
+    Returns:
+        Confirmation that the image was loaded, or a notice that the current
+        model cannot view images.
     """  # noqa: E501
 
 
@@ -263,7 +293,7 @@ def _take_fullpage_cdp(edge: str, target: str, width: int, out_abs: str, out_pat
             if not b64:
                 return "[截图失败] CDP 截图数据为空"
             out_path.write_bytes(base64.b64decode(b64))
-            return f"全页截图已保存: {out_abs} (宽 {width} x 高 {height})"
+            return f"全页截图已保存: {out_abs} (宽 {width} x 高 {height})。如需视觉检查请用 view_image 工具读取该图片"
         finally:
             ws.close()
     except Exception as e:
@@ -306,7 +336,7 @@ def _take_screenshot(url: str, width: int = 1280, height: int = 800,
         except Exception as e:
             return f"[截图失败] {e}"
         if out_path.exists():
-            return f"截图已保存: {out_abs} (视口 {width}x{height})"
+            return f"截图已保存: {out_abs} (视口 {width}x{height})。如需视觉检查请用 view_image 工具读取该图片"
         return f"[截图失败] Edge 未产出文件。stderr: {proc.stderr[:500]}"
 
     try:
@@ -319,14 +349,14 @@ def _take_screenshot(url: str, width: int = 1280, height: int = 800,
         except Exception as e:
             return f"[截图失败] {e}"
         if out_path.exists():
-            return (f"截图已保存(视口, 非全页): {out_abs}。\n"
+            return (f"截图已保存(视口, 非全页): {out_abs}。如需视觉检查请用 view_image 工具读取该图片。\n"
                     f"[提示] full_page 真全页需要 websocket-client：运行 `uv add websocket-client` 后重试。")
         return f"[截图失败] Edge 未产出文件（full_page 降级路径）。"
 
     return _take_fullpage_cdp(edge, target, width, out_abs, out_path)
 
 
-TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search, get_current_time, shot_web]
+TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search, get_current_time, shot_web, view_image]
 
 # 工具注册表：将硬编码列表升级为可扩展注册表（通用引擎核心，不绑定领域语义）。
 # 各 skill 可经 frontmatter 的 extra_tools 注入领域专属工具，核心不感知具体领域。

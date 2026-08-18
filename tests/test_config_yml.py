@@ -71,7 +71,8 @@ def test_load_config_yml_malformed(monkeypatch, tmp_path):
 
 def test_backfill_settings_to_environ(monkeypatch, tmp_path):
     for k in ("SKILLS_ENGINE_SECURITY_MODE", "SKILLS_ENGINE_AUTO_APPROVE",
-              "SKILL_ENGINE_MCP_CONFIG", "TAVILY_API_KEY"):
+              "SKILL_ENGINE_MCP_CONFIG", "TAVILY_API_KEY",
+              "SKILLS_ENGINE_CONTEXT_BUDGET"):
         monkeypatch.delenv(k, raising=False)
     cfg = {"settings": {
         "security_mode": "permissive",

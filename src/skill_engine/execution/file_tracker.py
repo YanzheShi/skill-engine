@@ -42,6 +42,12 @@ class FileStateTracker:
         self.strict = strict
         # resolved posix 路径 -> {"mtime_ns": int, "size": int}
         self._known: dict[str, dict] = {}
+        # read_file 去重缓存：resolved posix 路径 ->
+        #   {"mtime_ns": int, "size": int, "total_lines": int, "full_read": bool,
+        #    "intervals": [(start, end, content), ...]}
+        # 同一会话（MOA 跨轮共享同一实例）内重复读同一区间直接命中，
+        # 打断「读-压缩-遗忘-重读」循环；mtime/size 校验保证不读脏数据。
+        self._read_cache: dict[str, dict] = {}
 
     # ---- 内部工具 ----
 
@@ -75,14 +81,92 @@ class FileStateTracker:
     def on_write(self, path) -> None:
         """write_file / edit_file 写盘后更新登记（自己写的也算已知版本）。"""
         self.on_read(path)
+        self.invalidate_read_cache(path)
 
     def invalidate_all(self) -> None:
         """bash 执行后保守失效全部登记：命令可能改过任何文件，tracker 无从得知。
 
         代价只是后续的 edit 会收到一次"建议重读"提示（软）或被要求重读（硬），
-        换来的是不会基于 bash 之前的陈旧认知做编辑。
+        换来的是不会基于 bash 之前的陈旧认知做编辑。read 缓存同纪律一并清空。
         """
         self._known.clear()
+        self._read_cache.clear()
+
+    # ---- read_file 去重缓存 ----
+
+    def cache_read(self, path, offset: int, limit: int,
+                   total_lines: int, content: str) -> None:
+        """登记一次 read_file 的读取区间与内容（带行号版本）。
+
+        同文件重复读取不同区间会合并到同一 entry；文件已变则丢弃旧缓存重开。
+        """
+        try:
+            key = self._key(path)
+            st = self._stat(Path(path).resolve())
+            if key is None or st is None or total_lines <= 0:
+                return
+            entry = self._read_cache.get(key)
+            if (entry is None
+                    or entry["mtime_ns"] != st["mtime_ns"]
+                    or entry["size"] != st["size"]):
+                entry = {"mtime_ns": st["mtime_ns"], "size": st["size"],
+                         "total_lines": total_lines, "full_read": False,
+                         "intervals": []}
+                self._read_cache[key] = entry
+            start = offset
+            end = offset + limit if limit else total_lines
+            if limit == 0:
+                entry["full_read"] = True
+            if content:
+                entry["intervals"].append((start, end, content))
+        except Exception:
+            pass
+
+    def cache_lookup(self, path, offset: int, limit: int) -> Optional[dict]:
+        """按 (path, offset, limit) 查找已读区间。
+
+        Returns:
+            命中: {"content": str, "start": int, "end": int, "full": bool}
+            未命中 / 文件已变: None
+        """
+        try:
+            key = self._key(path)
+            if key is None:
+                return None
+            st = self._stat(Path(path).resolve())
+            if st is None:
+                return None
+            entry = self._read_cache.get(key)
+            if entry is None:
+                return None
+            if (entry["mtime_ns"] != st["mtime_ns"]
+                    or entry["size"] != st["size"]):
+                return None  # 文件已变 → 缓存不可信
+            total = entry.get("total_lines") or 0
+            start, end = offset, (offset + limit if limit else total)
+            if limit == 0:
+                if entry["full_read"]:
+                    for cs, ce, content in entry["intervals"]:
+                        if cs == 0 and (ce >= total or ce == 0):
+                            return {"content": content, "start": 0,
+                                    "end": total, "full": True}
+                return None
+            for cs, ce, content in entry["intervals"]:
+                if cs <= start and ce >= end:
+                    return {"content": content, "start": start,
+                            "end": end, "full": False}
+            return None
+        except Exception:
+            return None
+
+    def invalidate_read_cache(self, path) -> None:
+        """文件被写入后失效其 read 缓存（下个读会重新读盘）。"""
+        try:
+            key = self._key(path)
+            if key is not None:
+                self._read_cache.pop(key, None)
+        except Exception:
+            pass
 
     # ---- 校验 ----
 

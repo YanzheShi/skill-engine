@@ -206,7 +206,9 @@ def build_env_header(base_dir: Path, shell: str = "") -> str:
         "- 相对路径直接以工作目录为基准，例如 src/demo/main.py。\n"
         "- 读写/搜索文件优先用 read_file / write_file / edit_file / search_files 工具，"
         "它们跨平台且比 bash 可靠；bash 只用于跑测试、构建等真正需要 shell 的场景。\n"
-        f"{shell_rule}\n\n"
+        f"{shell_rule}\n"
+        "- 涉及当前日期/时间/年份的问题，必须先调用 get_current_time 获取，"
+        "不要凭训练知识猜测（训练数据有截止时间）。\n\n"
     )
 
 
@@ -507,18 +509,37 @@ def _run_verification(executor, base_dir: Path, verify_command: str, timeout: in
 # 按 confirm_edits 逐次/逐文件确认。默认关闭，其他 skill 零影响。
 # ---------------------------------------------------------------------------
 _DIFF_MAX_LINES = 200  # diff 超过该长度截断展示（全文重写类的大 diff）
+_DIFF_MAX_CHARS = 500  # diff 总字符上限（行数限制之外的双保险，防单行超长刷屏）
+_DIFF_NEW_FILE_PREVIEW_LINES = 40  # 新建文件时仅预览前 N 行
 
 
 def _render_diff(path: str, old: str, new: str) -> str:
     """生成供展示/确认的 unified diff；过长时截断并附提示。"""
     import difflib
+    # 新建文件：整份 diff 都是新增行，预览前几行 + 行数摘要即可，避免 709 行刷屏
+    if not old:
+        lines = new.splitlines()
+        total = len(lines)
+        preview = lines[:_DIFF_NEW_FILE_PREVIEW_LINES]
+        text = (f"[将新建文件 {path}，共 {total} 行，预览前 {len(preview)} 行]\n+"
+                + "\n+".join(preview))
+        if len(preview) < total:
+            text += f"\n... (其余 {total - len(preview)} 行省略)"
+        if len(text) > _DIFF_MAX_CHARS:
+            text = (text[:_DIFF_MAX_CHARS]
+                    + f"\n...(diff 共 {len(text)} 字符，仅显示前 {_DIFF_MAX_CHARS} 字符)")
+        return text
     lines = list(difflib.unified_diff(
         old.splitlines(), new.splitlines(),
         fromfile=f"{path} (before)", tofile=f"{path} (after)", lineterm=""))
     total = len(lines)
     if total > _DIFF_MAX_LINES:
         lines = lines[:_DIFF_MAX_LINES] + [f"... (diff 共 {total} 行，仅显示前 {_DIFF_MAX_LINES} 行)"]
-    return "\n".join(lines) if lines else "(内容无变化)"
+    text = "\n".join(lines) if lines else "(内容无变化)"
+    if len(text) > _DIFF_MAX_CHARS:
+        text = (text[:_DIFF_MAX_CHARS]
+                + f"\n...(diff 共 {len(text)} 字符，仅显示前 {_DIFF_MAX_CHARS} 字符)")
+    return text
 
 
 class ToolDispatchRunner:
@@ -541,6 +562,7 @@ class ToolDispatchRunner:
         working_root: Optional[str] = None,
         plain_text: bool = False,
         verbose: bool = False,
+        trusted_root: Optional[str] = None,
     ):
         self.executor = executor
         self.assembler = assembler
@@ -551,11 +573,25 @@ class ToolDispatchRunner:
         self.working_root = to_native_path(working_root)
         self.plain_text = plain_text  # CLI 纯文本终端：禁用 Markdown 输出
         self.verbose = verbose  # 是否显示引擎内部调试态（迭代/历史条数/LLM 响应）
+        # trusted_root：用户显式指定的受信任工作目录（如 MOA -w）。
+        # 目录内的文件读写自动放行（免审批/免 diff 确认）；目录外维持原审批。
+        self.trusted_root = to_native_path(trusted_root)
         # S1-3：batch 模式下会话内已批准的文件（run_repl 复用同一 runner 实例，跨轮存活）
         self._file_edit_approvals: set = set()
         self._confirm_edits_mode = "" 
 
-    def _truncate_msg(self, content: str, max_chars: int = 5000) -> str:
+    def _is_trusted_path(self, full_path: Path) -> bool:
+        """路径是否位于受信任工作目录（trusted_root）内。规范化后前缀匹配，防 .. 逃逸。"""
+        if not self.trusted_root:
+            return False
+        try:
+            root = os.path.normcase(str(Path(self.trusted_root).resolve()))
+            target = os.path.normcase(str(Path(full_path).resolve()))
+        except OSError:
+            return False
+        return target == root or target.startswith(root + os.sep) 
+
+    def _truncate_msg(self, content: str, max_chars: int = 30000) -> str:
         """Truncate tool result message content to prevent context overflow.
 
         Full content is preserved in step_results for logging.
@@ -616,6 +652,12 @@ class ToolDispatchRunner:
             if not approved:
                 return False, "[用户跳过] 敏感文件操作已取消"
 
+        # 受信任工作目录内的文件操作自动放行（用户显式指定 trusted_root 时）
+        if self.trusted_root:
+            base_dir = self.working_root or Path(skill.directory)
+            if self._is_trusted_path(_resolve_path(filepath, base_dir)):
+                return True, ""
+
         decision, reason = should_approve(
             f"{op_type}:{filepath}", skill.directory, risk_hint="tool_file"
         )
@@ -640,6 +682,10 @@ class ToolDispatchRunner:
         无 human_io（非交互场景）降级为仅展示、不阻断。
         """
         mode = self._confirm_edits_mode
+        # 受信任工作目录内的文件操作自动放行（不展示 diff、不询问）
+        if self._is_trusted_path(Path(filepath)):
+            print(f"     [diff 预览] {op} → {filepath}（工作目录内，自动放行）")
+            return True
         if mode == "batch" and filepath in self._file_edit_approvals:
             print(f"     [diff 预览] {op} → {filepath}（本会话已批准该文件，自动放行）")
             print(diff_text)
@@ -650,7 +696,8 @@ class ToolDispatchRunner:
             return True
         ask = ("允许吗？(y 允许 / n 拒绝)" if mode != "batch"
                else "允许吗？(y 允许并记住该文件 / n 拒绝)")
-        self.human_io.emit(f"📝 编辑预览 [{op} → {filepath}]\n{diff_text}\n{ask}")
+        pencil = "📝" if getattr(self.human_io, "_emoji", True) else "[diff]"
+        self.human_io.emit(f"{pencil} 编辑预览 [{op} → {filepath}]\n{diff_text}\n{ask}")
         answer = (self.human_io.read() or "").strip().lower()
         approved = answer in ("y", "yes", "是", "好", "ok")
         if approved and mode == "batch":
@@ -785,6 +832,12 @@ class ToolDispatchRunner:
                 tools = [t for t in tools if t.name not in disallowed]
             if allowed:
                 tools = [t for t in tools if t.name in allowed]
+            # 按模型能力过滤：文本模型不暴露视觉工具（view_image / shot_web），
+            # 从根源杜绝「截图 → 看图 → 被告知无视觉」的无效步骤。
+            from skill_engine.config import model_supports_vision
+            self._model_has_vision = model_supports_vision(llm)
+            if not self._model_has_vision:
+                tools = [t for t in tools if t.name not in ("view_image", "shot_web")]
             llm_with_tools = llm.bind_tools(tools)
         else:
             llm_with_tools = llm
@@ -827,7 +880,15 @@ class ToolDispatchRunner:
             else:
                 messages.append({"role": "user", "content": final_prompt})
         else:
-            messages.append({"role": "user", "content": final_prompt})
+            _fp = final_prompt
+            if not getattr(self, "_model_has_vision", True):
+                _fp = (
+                    "【能力声明】当前模型是**无视觉的文本模型**：view_image / shot_web "
+                    "工具不可用。需要验证 UI 渲染等视觉任务时，请改用读取 HTML/CSS/JS "
+                    "源码、或运行自动化测试（node / pytest 等）等方式完成，不要尝试截图看图。\n\n"
+                    + _fp
+                )
+            messages.append({"role": "user", "content": _fp})
 
         result = None
         # 执行开始标题头（语义通道；无 human_io 时静默——Web 端/测试回退默认实现）
@@ -1107,6 +1168,7 @@ class ToolDispatchRunner:
                         filepath = tc["input"].get("path", "")
                         offset = int(tc["input"].get("offset", 0))
                         limit = int(tc["input"].get("limit", 0))
+                        force_refresh = bool(tc["input"].get("force_refresh", False))
 
                         # 安全门（只查路径，strict 不 BLOCK）
                         approved, err_msg = self._check_file_safety("read", filepath, skill)
@@ -1124,11 +1186,42 @@ class ToolDispatchRunner:
                         base_dir = self.working_root or Path(skill.directory)
                         full_path = _resolve_path(filepath, base_dir)
 
+                        # read 去重缓存：同一会话同区间已读且文件未变 → 命中提示，
+                        # 不再重读（打断「读-压缩-遗忘-重读」循环）
+                        if (not force_refresh and self._file_tracker is not None):
+                            hit = self._file_tracker.cache_lookup(full_path, offset, limit)
+                            if hit is not None:
+                                lo, hi = hit["start"], hit["end"]
+                                where = ("全文" if hit["full"] else
+                                         f"第 {lo + 1}-{hi} 行")
+                                note = (
+                                    f"[read_file 缓存命中] {filepath} {where} 已在本会话早前"
+                                    f"读取过且文件未被修改，内容见上文历史。"
+                                    f"若上文内容已不可见，请带 force_refresh=true 重新调用以获取完整内容。"
+                                )
+                                step_results.append({
+                                    "name": f"read_{tc['id']}",
+                                    "type": "read_file",
+                                    "path": str(full_path),
+                                    "output": note[:1000],
+                                })
+                                messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc["id"],
+                                    "name": "read_file",
+                                    "content": note,
+                                })
+                                self._emit_tool(f"read_file {filepath} (缓存命中 {where})")
+                                continue
+
                         try:
                             content = full_path.read_text(encoding="utf-8")
                             # P0(S0-1)：登记"已读版本"，供后续 edit 一致性校验
                             self._file_tracker.on_read(full_path)
                             formatted = _read_file_with_lines(content, offset, limit)
+                            self._file_tracker.cache_read(
+                                full_path, offset, limit,
+                                len(content.splitlines()), formatted)
                             step_results.append({
                                 "name": f"read_{tc['id']}",
                                 "type": "read_file",
@@ -1160,6 +1253,137 @@ class ToolDispatchRunner:
                                 "content": f"[读取失败: {e}]",
                             })
                             print(f"     ERROR: {e}")
+
+                    elif tc["type"] == "view_image":
+                        filepath = tc["input"].get("path", "")
+
+                        # 安全门（只查路径，strict 不 BLOCK）
+                        approved, err_msg = self._check_file_safety("read", filepath, skill)
+                        if not approved:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "view_image",
+                                "content": err_msg,
+                            })
+                            print(f"     {err_msg}")
+                            continue
+
+                        base_dir = self.working_root or Path(skill.directory)
+                        full_path = _resolve_path(filepath, base_dir)
+                        if not full_path.is_file():
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "view_image",
+                                "content": f"[图片不存在: {filepath}]",
+                            })
+                            print(f"     view_image FILE NOT FOUND: {filepath}")
+                            continue
+
+                        # 模态区分：仅 vision 模型注入图片；文本模型返回提示（省 token）
+                        from skill_engine.config import model_supports_vision
+                        if not model_supports_vision(llm):
+                            notice = (
+                                f"[当前模型为文本模态，无法查看图片] {filepath} 是图片文件"
+                                f"（{full_path.stat().st_size} bytes）。请由支持视觉的模型"
+                                f"（vision: true）查看，或手动打开文件确认。"
+                            )
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "view_image",
+                                "content": notice,
+                            })
+                            self._emit_tool(f"view_image {filepath}")
+                            self._emit_result(notice)
+                            continue
+
+                        try:
+                            import base64
+                            ext = full_path.suffix.lower()
+                            mime = {".png": "image/png", ".jpg": "image/jpeg",
+                                    ".jpeg": "image/jpeg", ".gif": "image/gif",
+                                    ".webp": "image/webp"}.get(ext, "image/png")
+                            # 进模型前自适应压缩：按 512px 瓦片数（token 计费单位）决策。
+                            # 仅当缩放能减少瓦片数时才采纳，避免“缩了但瓦片不变”反而增大字节。
+                            # 缩放后取 JPEG/PNG 较小者；Pillow 缺失或解码失败回退原样字节（零新硬依赖）。
+                            import io
+                            import math
+                            raw_bytes = full_path.read_bytes()
+                            orig_size = len(raw_bytes)
+                            size = orig_size
+                            note = ""
+                            try:
+                                from PIL import Image
+                                try:
+                                    resample = Image.Resampling.LANCZOS
+                                except AttributeError:
+                                    resample = Image.LANCZOS
+                                img = Image.open(io.BytesIO(raw_bytes))
+                                ow, oh = img.size
+                                orig_tiles = math.ceil(ow / 512) * math.ceil(oh / 512)
+                                if max(img.size) > 1568:
+                                    scale = 1568 / max(img.size)
+                                    img = img.resize(
+                                        (int(img.size[0] * scale), int(img.size[1] * scale)),
+                                        resample,
+                                    )
+                                if img.mode in ("RGBA", "P", "LA"):
+                                    img = img.convert("RGB")
+                                nw, nh = img.size
+                                new_tiles = math.ceil(nw / 512) * math.ceil(nh / 512)
+                                if new_tiles < orig_tiles:
+                                    # 瓦片数减少→token 减少；取 JPEG/PNG 较小者
+                                    buf_jpeg = io.BytesIO()
+                                    img.save(buf_jpeg, format="JPEG", quality=85)
+                                    pj = buf_jpeg.getvalue()
+                                    buf_png = io.BytesIO()
+                                    img.save(buf_png, format="PNG")
+                                    pp = buf_png.getvalue()
+                                    if len(pj) <= len(pp):
+                                        b64 = base64.b64encode(pj).decode("ascii")
+                                        mime = "image/jpeg"
+                                        size = len(pj)
+                                        note = f"（压缩至 {size} bytes，原 {orig_size} bytes）"
+                                    else:
+                                        b64 = base64.b64encode(pp).decode("ascii")
+                                        mime = "image/png"
+                                        size = len(pp)
+                                        note = f"（缩放至 {size} bytes，原 {orig_size} bytes）"
+                                else:
+                                    # 瓦片数未减：保持原样（不重编码，避免无谓变化/透明信息丢失）
+                                    b64 = base64.b64encode(raw_bytes).decode("ascii")
+                            except Exception:
+                                b64 = base64.b64encode(raw_bytes).decode("ascii")
+                            # 先落 tool 文本消息（保持 OpenAI 协议顺序），
+                            # 再注入 user 多模态消息：下一轮调用时模型即可"看见"图片
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "view_image",
+                                "content": f"[图片已加载] {filepath}（{size} bytes{note}），多模态消息已注入。",
+                            })
+                            messages.append({
+                                "role": "user",
+                                "content": [
+                                    {"type": "text",
+                                     "text": f"已加载图片 {filepath}（{size} bytes{note}），请仔细查看图片内容，"
+                                             "据此检查实现是否符合要求。"},
+                                    {"type": "image_url",
+                                     "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                                ],
+                            })
+                            self._emit_tool(f"view_image {filepath}")
+                            self._emit_result(f"图片已注入多模态消息（{size} bytes, {mime}{note}）")
+                        except Exception as e:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "view_image",
+                                "content": f"[读取图片失败: {e}]",
+                            })
+                            print(f"     view_image ERROR: {e}")
 
                     elif tc["type"] == "write_file":
                         filepath = tc["input"].get("path", "")

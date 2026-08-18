@@ -105,6 +105,38 @@ class TestL2StructuredSummary:
         assert llm.last_prompt.startswith("CUSTOM-TEMPLATE")
 
 
+class TestL2ClipToBudget:
+    def test_summary_prompt_clipped_when_segment_huge(self):
+        """摘要 prompt 不得无限膨胀：超长历史先裁到预算内，否则调用必然超窗口失败。"""
+        from skill_engine.execution.context_manager import ContextManager
+        cm = ContextManager(budget=500, keep_recent=2, compact_tool_output=False)
+        cm.messages = _build_rounds(6, tool_chars=4000)  # 4 条旧 tool 输出各 1000 token
+        llm = _StubLLM()
+        assert cm.maybe_compress(llm) is True
+        assert llm.calls == 1
+        # cap = max(500*0.8*0.5, 2000) = 2000 token ≈ 8000 ASCII 字符；原始历史约 16000
+        assert len(llm.last_prompt) < 9000
+        assert "[历史过长" in llm.last_prompt
+
+    def test_small_segment_not_clipped(self):
+        from skill_engine.execution.context_manager import ContextManager
+        cm = ContextManager(budget=500, keep_recent=2, compact_tool_output=False)
+        cm.messages = _build_rounds(6, tool_chars=1800)  # 4 旧轮 1800 token < cap 2000
+        llm = _StubLLM()
+        assert cm.maybe_compress(llm) is True
+        assert llm.calls == 1
+        assert "[历史过长" not in llm.last_prompt
+
+    def test_summary_error_detail_recorded(self):
+        """失败详情必须被记录，供 UI 透出（此前仅日志前缀，看不到具体原因）。"""
+        from skill_engine.execution.context_manager import ContextManager
+        cm = ContextManager(budget=300, keep_recent=2)
+        cm.messages = _build_rounds(6, tool_chars=300)
+        llm = _StubLLM(reply=RuntimeError("boom"))
+        assert cm.maybe_compress(llm) is True
+        assert "boom" in str(cm._last_summary_error)
+
+
 class TestL3Truncation:
     def test_summary_failure_falls_back_to_truncation(self):
         from skill_engine.execution.context_manager import ContextManager
@@ -118,6 +150,65 @@ class TestL3Truncation:
         assert any("[系统提示]" in m.get("content", "") for m in cm.messages)
         assert not any("<condensed_history>" in m.get("content", "") for m in cm.messages)
         assert cm.messages[-4:] == before_tail
+
+
+class TestL2RateLimitRetry:
+    """429 限流（rpm exhausted）退避重试：等 RPM 窗口过去再试，不急着截断。"""
+
+    def _cm(self, monkeypatch, delays=(0.01, 0.01)):
+        import skill_engine.execution.context_manager as cm_mod
+        monkeypatch.setattr(cm_mod, "RPM_RETRY_DELAYS", delays)
+        monkeypatch.setattr(cm_mod.time, "sleep", lambda s: None)  # 测试不真等
+        from skill_engine.execution.context_manager import ContextManager
+        cm = ContextManager(budget=300, keep_recent=2)
+        cm.messages = _build_rounds(6, tool_chars=300)
+        return cm
+
+    def test_429_then_success_returns_summary(self, monkeypatch):
+        """首次 429 → 等待 → 重试成功：必须产出摘要，不得走截断。"""
+        cm = self._cm(monkeypatch)
+
+        class _FlakyLLM:
+            def __init__(self):
+                self.calls = 0
+
+            def invoke(self, prompt):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("Error code: 429 - rpm exhausted, code '8'")
+                return "重试成功的摘要"
+
+        llm = _FlakyLLM()
+        assert cm.maybe_compress(llm) is True
+        assert llm.calls == 2
+        assert any("<condensed_history>" in m.get("content", "") for m in cm.messages)
+        assert not any("[系统提示]" in m.get("content", "") for m in cm.messages)
+
+    def test_429_always_fails_after_retries_then_truncate(self, monkeypatch):
+        """持续 429：按退避表重试后仍失败，才走截断兜底。"""
+        cm = self._cm(monkeypatch)
+
+        class _Always429:
+            def __init__(self):
+                self.calls = 0
+
+            def invoke(self, prompt):
+                self.calls += 1
+                raise RuntimeError("Error code: 429 - {'message': 'rpm exhausted'}")
+
+        llm = _Always429()
+        assert cm.maybe_compress(llm) is True
+        assert llm.calls == 3  # 初次 + 2 次退避重试
+        assert any("[系统提示]" in m.get("content", "") for m in cm.messages)
+        assert "429" in str(cm._last_summary_error)
+
+    def test_non_429_error_no_retry(self, monkeypatch):
+        """非限流错误不重试（避免 5xx/参数错误反复空等）。"""
+        cm = self._cm(monkeypatch)
+        llm = _StubLLM(reply=RuntimeError("boom"))
+        assert cm.maybe_compress(llm) is True
+        assert llm.calls == 1
+        assert any("[系统提示]" in m.get("content", "") for m in cm.messages)
 
 
 class TestDefaultBudget:

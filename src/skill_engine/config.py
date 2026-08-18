@@ -230,6 +230,7 @@ def _parse_model_entries(raw) -> dict:
             "model_provider": (item.get("provider") or "openai"),
             "base_url": _expand_env(str(item.get("base_url", ""))).strip(),
             "api_key": api_key,
+            "vision": bool(item.get("vision", False)),
         }
     return out
 
@@ -268,6 +269,7 @@ def _build_model_profiles() -> dict:
                 "model_provider": cfg.get("model_provider", "openai"),
                 "base_url": cfg.get("base_url", ""),
                 "api_key": cfg["api_key"],
+                "vision": False,
             }
 
     # 2. 用户自定义 profile（SKILL_ENGINE_MODELS=name1,name2,...）
@@ -285,6 +287,7 @@ def _build_model_profiles() -> dict:
                 "model_provider": provider or "openai",
                 "base_url": base_url,
                 "api_key": api_key,
+                "vision": os.getenv(f"SKILL_ENGINE_MODEL_{key}_VISION", "").lower() in ("1", "true", "yes"),
             }
 
     # 3. 统一配置 config.yml 的 models: 段（优先级最高，可覆盖同名）
@@ -314,8 +317,68 @@ def list_model_profiles() -> dict:
             "model_provider": cfg["model_provider"],
             "base_url": cfg["base_url"],
             "api_key": ("***" if cfg["api_key"] else ""),
+            "vision": bool(cfg.get("vision", False)),
         }
     return safe
+
+
+_MODEL_VISION: dict[int, bool] = {}
+"""vision 标记注册表：id(model) → bool。
+
+原因：langchain 新版模型（ChatOpenAI 等）是 pydantic v2 且 model_config
+extra=forbid，运行期 ``model.vision = True`` 会抛 ValueError
+（"object has no field 'vision'"）——上一版因此直接导致 MOA 全部
+model_config_error。此处 try/setattr 失败时改走注册表。
+"""
+
+LLM_CALL_TIMEOUT = 120
+"""单次 LLM 调用的网络超时（秒）。
+
+openai 客户端默认 600s（10 分钟）——MOA 曾出现「bash 返回后下一轮调用无响应，
+屏幕静默 10 分钟」的现象。这里显式钳制到 120s：超时以异常形式上抛，由
+MOA 的异常隔离（_run_agent_safe / commander_error）接手，报错进黑板继续，
+而不是无提示地干等。
+"""
+
+
+def _apply_call_timeout(cfg: dict) -> None:
+    """按 provider 注入 LLM 调用超时参数（openai 兼容用 request_timeout）。"""
+    if not isinstance(cfg, dict):
+        return
+    provider = str(cfg.get("model_provider", "")).lower()
+    if provider in ("openai", "google", "groq", "mistralai", "azure_openai"):
+        cfg.setdefault("request_timeout", LLM_CALL_TIMEOUT)
+    elif provider == "anthropic":
+        cfg.setdefault("timeout", LLM_CALL_TIMEOUT)
+
+
+def _mark_model_vision(model, vision: bool) -> None:
+    """把 vision 标记挂到模型实例上；实例不容许 setattr 时落注册表。"""
+    if not vision:
+        return
+    try:
+        model.vision = True
+        return
+    except Exception:  # noqa: BLE001 — pydantic v2 extra=forbid 等
+        pass
+    _MODEL_VISION[id(model)] = True
+
+
+def model_supports_vision(model) -> bool:
+    """查询模型是否支持视觉：属性 → 注册表 → 沿 CountingLLM 包装链下钻。"""
+    seen: set[int] = set()
+    m = model
+    while m is not None and id(m) not in seen:
+        seen.add(id(m))
+        if _MODEL_VISION.get(id(m)):
+            return True
+        try:
+            if getattr(m, "vision", False):
+                return True
+        except Exception:  # noqa: BLE001 — __getattr__ 透传失败等
+            pass
+        m = getattr(m, "_llm", None)  # CountingLLM 包装链
+    return False
 
 
 def get_llm_by_profile(profile_name: str, **kwargs):
@@ -337,10 +400,14 @@ def get_llm_by_profile(profile_name: str, **kwargs):
             f"未知的模型 profile: '{profile_name}'，可选: {available}"
         )
     cfg = MODEL_PROFILES[profile_name].copy()
+    vision = bool(cfg.pop("vision", False))  # 视觉标记不进 init_chat_model，挂到实例上
     cfg.update(kwargs)
     if not cfg.get("model") or not cfg.get("api_key"):
         raise ValueError(f"模型 profile '{profile_name}' 配置不完整（缺 model 或 api_key）")
-    return init_chat_model(**cfg)
+    _apply_call_timeout(cfg)   # 显式网络超时，避免 openai 默认 600s 静默等待
+    model = init_chat_model(**cfg)
+    _mark_model_vision(model, vision)
+    return model
 
 # ── 业务用途 → 模型配置映射 ──
 # 业务代码只表达"用途"，不感知具体模型。

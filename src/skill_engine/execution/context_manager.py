@@ -15,6 +15,7 @@
 """
 
 import os
+import time
 import logging
 from typing import Optional
 
@@ -25,6 +26,12 @@ FOLD_THRESHOLD = 1500
 FOLD_KEEP_PREVIEW = 200
 # 引擎级默认预算（context_budget=0 时使用），可被环境变量覆盖
 DEFAULT_CONTEXT_BUDGET = 32768
+
+# L2 压缩遇到 429 限流（rpm exhausted）时的退避重试间隔（秒）。
+# 商汤网关 RPM 限额很紧（频繁出现 quota_exceeded_error code 8），
+# 等一轮再试往往就恢复了；直接截断会丢上下文、拉低 worker 质量。
+# 每次最多等 40s + 60s = 100s，仍失败才走 L3 截断兜底。
+RPM_RETRY_DELAYS = (40, 60)
 
 
 def default_context_budget() -> int:
@@ -71,6 +78,15 @@ def _estimate_text_tokens(text: str) -> int:
     return ascii_n // 4 + (len(text) - ascii_n)
 
 
+def _is_rate_limited(e: Exception) -> bool:
+    """判断异常是否为 429 限流（rpm exhausted / quota_exceeded）。"""
+    text = f"{e}"
+    return ("429" in text
+            or "rate limit" in text.lower()
+            or "rpm" in text.lower()
+            or "quota_exceeded" in text.lower())
+
+
 class ContextManager:
     """管理档位 B 循环的 messages，提供 token 预算与三级渐进压缩。"""
 
@@ -91,12 +107,16 @@ class ContextManager:
         self.threshold = threshold
         self.compact_tool_output = compact_tool_output
         self.summary_prompt = summary_prompt
+        self._last_summary_error: "Exception | None" = None
 
     # ---- token 估算 ----
-    def estimate_tokens(self) -> int:
-        """估算当前 messages 的 token 数（ASCII/非 ASCII 分别计权，见 _estimate_text_tokens）。"""
+    def estimate_tokens(self, messages: "list[dict] | None" = None) -> int:
+        """估算消息列表的 token 数（ASCII/非 ASCII 分别计权，见 _estimate_text_tokens）。
+
+        messages 为 None 时估算 self.messages。
+        """
         total = 0
-        for m in self.messages:
+        for m in (messages if messages is not None else self.messages):
             content = m.get("content", "")
             if isinstance(content, str):
                 total += _estimate_text_tokens(content)
@@ -189,11 +209,41 @@ class ContextManager:
 
         # L3 兜底：摘要失败（异常/空输出）→ 直接截断并显式告知
         self.messages[:] = head + [{"role": "user", "content": _TRUNCATION_NOTICE}] + tail
+        if self._last_summary_error:
+            print(f"     [上下文压缩失败: {self._last_summary_error}] 已走截断兜底")
         return True
 
+    def _clip_segment_for_summary(self, segment: list[dict]) -> list[dict]:
+        """把待摘要历史裁到预算内：单条摘要 prompt 超上下文是 L2 失败主因。
+
+        从尾部保留消息，累计 token 不超过 budget×threshold×50%（下限 2000），
+        保证摘要调用本身一定能被模型接受；被裁掉的说明以一条占位消息补充。
+        """
+        cap = max(int(self.budget * self.threshold * 0.5), 2000)
+        kept: list[dict] = []
+        total = 0
+        for m in reversed(segment):
+            t = self.estimate_tokens([m])
+            if kept and total + t > cap:
+                break
+            kept.append(m)
+            total += t
+        kept.reverse()
+        if len(kept) < len(segment):
+            kept.insert(0, {
+                "role": "user",
+                "content": f"[历史过长：仅保留最近 {len(kept)}/{len(segment)} 条消息用于摘要，"
+                            f"更早内容已省略]",
+            })
+        return kept
+
     def _summarize(self, segment: list[dict], llm) -> str:
-        """把一段历史交给 llm 压成结构化摘要。失败返回空串（触发 L3）。"""
+        """把一段历史交给 llm 压成结构化摘要。失败返回空串（触发 L3）。
+
+        429 限流（rpm exhausted）按 RPM_RETRY_DELAYS 退避重试，其余错误不重试。
+        """
         try:
+            segment = self._clip_segment_for_summary(segment)
             text = "\n\n".join(
                 f"[{m.get('role')}]\n{self._msg_text(m)}" for m in segment
             )
@@ -205,6 +255,27 @@ class ContextManager:
                 summary = getattr(resp, "content", str(resp)) or str(resp)
             return (summary or "").strip()
         except Exception as e:
+            if _is_rate_limited(e):
+                # 限流：等 RPM 窗口过去再试，别急着丢上下文
+                for delay in RPM_RETRY_DELAYS:
+                    logging.getLogger(__name__).warning(
+                        "上下文压缩遇 429 限流（%s），%ds 后重试", e, delay)
+                    print(f"     [上下文压缩 429 限流，{delay}s 后重试]")
+                    time.sleep(delay)
+                    try:
+                        resp = llm.invoke(prompt)
+                        if isinstance(resp, str):
+                            summary = resp
+                        else:
+                            summary = getattr(resp, "content", str(resp)) or str(resp)
+                        if (summary or "").strip():
+                            return (summary or "").strip()
+                    except Exception as e2:  # noqa: BLE001
+                        e = e2
+                self._last_summary_error = e
+                logging.getLogger(__name__).warning("上下文压缩 429 重试耗尽，走截断兜底: %s", e)
+                return ""
+            self._last_summary_error = e
             logging.getLogger(__name__).warning("上下文压缩失败，将走截断兜底: %s", e)
             return ""
 
