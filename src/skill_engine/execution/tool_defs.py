@@ -147,7 +147,186 @@ def get_current_time(timezone: str = "Asia/Shanghai") -> str:
     """
 
 
-TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search, get_current_time]
+@tool
+def shot_web(url: str, width: int = 1280, height: int = 800,
+             full_page: bool = False, out: str = "screenshot.png") -> str:
+    """用本机 Edge 无头模式对网页截图，结果落盘到工作目录（任何 skill 均可调用）。
+
+    底层调用系统已安装的 Microsoft Edge（Chromium 内核），无需额外下载浏览器。
+    适合在开发网页时快速检视渲染效果——例如截 Vite/React 本地 dev server、
+    或本地 HTML 文件。
+
+    支持目标：
+    - 在线地址：http:// 或 https:// 开头的 URL
+    - 本地文件：传文件路径（自动转 file:/// 绝对路径），或显式 file:/// 形式
+
+    Args:
+        url: 要截图的地址（http(s):// 或本地文件路径）
+        width: 视口宽度（像素），默认 1280
+        height: 视口高度（像素），默认 800；full_page=True 时被忽略（截整页）
+        full_page: True 截整页长图（需 websocket-client，缺失则降级为视口截图并提示）
+        out: 输出文件名（相对工作目录或绝对路径），默认 screenshot.png
+
+    Returns:
+        落盘 PNG 的绝对路径字符串，或错误信息。
+    """
+
+
+def _find_edge() -> "str | None":
+    """探测本机 Edge 可执行文件（Windows 优先），找不到返回 None。"""
+    import shutil
+    cand = shutil.which("msedge")
+    if cand:
+        return cand
+    for p in (
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    ):
+        if Path(p).exists():
+            return p
+    return None
+
+
+def _shot_target(url: str, base_dir) -> "str | None":
+    """把用户输入的 url 规整为 Edge 可识别的目标；本地文件转 file:///，不存在返回 None。"""
+    if url.startswith(("http://", "https://", "file://")):
+        return url
+    p = Path(url)
+    if not p.is_absolute():
+        p = Path(base_dir) / p
+    if p.exists():
+        return "file:///" + str(p.resolve()).replace("\\", "/")
+    return None
+
+
+def _cdp_send(ws, method: str, params: "dict | None" = None) -> dict:
+    """发送一条 CDP 命令并等待匹配 id 的响应（跳过中间的事件帧）。"""
+    import json
+    _cdp_send._id = getattr(_cdp_send, "_id", 0) + 1
+    msg_id = _cdp_send._id
+    ws.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
+    while True:
+        data = json.loads(ws.recv())
+        if data.get("id") == msg_id:
+            return data
+
+
+def _take_fullpage_cdp(edge: str, target: str, width: int, out_abs: str, out_path: Path) -> str:
+    """经 CDP（remote-debugging）测真实高度后截整页长图。需 websocket-client。"""
+    import json
+    import time
+    import base64
+    import tempfile
+    import subprocess
+    import urllib.request
+    import websocket
+    port = 9333
+    user_data = tempfile.mkdtemp(prefix="edge_shot_")
+    proc = subprocess.Popen(
+        [edge, "--headless=new", "--disable-gpu", "--no-first-run", "--hide-scrollbars",
+         f"--remote-debugging-port={port}", "--remote-allow-origins=*",
+         f"--user-data-dir={user_data}", target],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        list_url = f"http://127.0.0.1:{port}/json"
+        page_ws = None
+        for _ in range(50):
+            try:
+                with urllib.request.urlopen(list_url, timeout=1) as r:
+                    targets = json.loads(r.read())
+                for t in targets:
+                    if t.get("type") == "page" and t.get("webSocketDebuggerUrl"):
+                        page_ws = t["webSocketDebuggerUrl"]
+                        break
+            except Exception:
+                time.sleep(0.1)
+            if page_ws:
+                break
+        if not page_ws:
+            return "[截图失败] 无法连接 Edge 调试端口（full_page）"
+        ws = websocket.create_connection(page_ws, timeout=10)
+        try:
+            _cdp_send(ws, "Page.enable")
+            _cdp_send(ws, "Runtime.enable")
+            time.sleep(3)  # 等待 JS 渲染（SPA/dev server 可能需要更久）
+            h = _cdp_send(ws, "Runtime.evaluate",
+                          {"expression": "document.documentElement.scrollHeight", "returnByValue": True})
+            height = int((h.get("result", {}).get("result", {}).get("value", 0) or 0))
+            if height <= 0:
+                height = 800
+            _cdp_send(ws, "Emulation.setDeviceMetricsOverride",
+                      {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False})
+            shot = _cdp_send(ws, "Page.captureScreenshot",
+                             {"format": "png", "captureBeyondViewport": True})
+            b64 = shot.get("result", {}).get("data", "")
+            if not b64:
+                return "[截图失败] CDP 截图数据为空"
+            out_path.write_bytes(base64.b64decode(b64))
+            return f"全页截图已保存: {out_abs} (宽 {width} x 高 {height})"
+        finally:
+            ws.close()
+    except Exception as e:
+        return f"[截图失败] full_page CDP 异常: {e}"
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+
+
+def _take_screenshot(url: str, width: int = 1280, height: int = 800,
+                     full_page: bool = False, out: str = "screenshot.png",
+                     base_dir=None) -> str:
+    """用本机 Edge 无头模式截图（视口或全页），落盘并返回路径。
+
+    视口截图零额外依赖；full_page 真全页走 CDP，需 websocket-client，
+    缺失时自动降级为视口截图并给出提示。
+    """
+    import subprocess
+    edge = _find_edge()
+    if not edge:
+        return "[截图失败] 未找到 Edge（msedge）。请安装 Microsoft Edge，或确认 msedge 在 PATH 中。"
+    base_dir = Path(base_dir) if base_dir else Path.cwd()
+    target = _shot_target(url, base_dir)
+    if not target:
+        return f"[截图失败] 目标不可识别或本地文件不存在: {url}"
+    out_path = Path(out)
+    if not out_path.is_absolute():
+        out_path = base_dir / out_path
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_abs = str(out_path.resolve())
+
+    if not full_page:
+        cmd = [edge, "--headless=new", "--disable-gpu", "--no-first-run", "--hide-scrollbars",
+               f"--window-size={width},{height}", f"--screenshot={out_abs}", target]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except Exception as e:
+            return f"[截图失败] {e}"
+        if out_path.exists():
+            return f"截图已保存: {out_abs} (视口 {width}x{height})"
+        return f"[截图失败] Edge 未产出文件。stderr: {proc.stderr[:500]}"
+
+    try:
+        import websocket  # websocket-client
+    except ImportError:
+        cmd = [edge, "--headless=new", "--disable-gpu", "--no-first-run", "--hide-scrollbars",
+               f"--window-size={width},{height}", f"--screenshot={out_abs}", target]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except Exception as e:
+            return f"[截图失败] {e}"
+        if out_path.exists():
+            return (f"截图已保存(视口, 非全页): {out_abs}。\n"
+                    f"[提示] full_page 真全页需要 websocket-client：运行 `uv add websocket-client` 后重试。")
+        return f"[截图失败] Edge 未产出文件（full_page 降级路径）。"
+
+    return _take_fullpage_cdp(edge, target, width, out_abs, out_path)
+
+
+TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search, get_current_time, shot_web]
 
 # 工具注册表：将硬编码列表升级为可扩展注册表（通用引擎核心，不绑定领域语义）。
 # 各 skill 可经 frontmatter 的 extra_tools 注入领域专属工具，核心不感知具体领域。

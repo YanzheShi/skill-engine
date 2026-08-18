@@ -21,7 +21,7 @@ from typing import Optional, Callable
 from skill_engine.models import Skill, MatchResult, TurnPolicy, RunResult
 from skill_engine.execution.assembler import Assembler
 from skill_engine.execution.executor import Executor
-from skill_engine.execution.tool_defs import TOOL_REGISTRY, load_skill_tools, load_mcp_tools
+from skill_engine.execution.tool_defs import TOOL_REGISTRY, load_skill_tools, load_mcp_tools, _take_screenshot
 from skill_engine.execution.context_manager import ContextManager, default_context_budget
 from skill_engine.execution.human_io import HumanIO
 from skill_engine.execution.snapshot import FileSnapshot
@@ -1475,6 +1475,51 @@ class ToolDispatchRunner:
                                 "content": obs,
                             })
                             print(f"     get_current_time ERROR: {e}")
+
+                    elif tc["type"] == "shot_web":
+                        url = tc["input"].get("url", "")
+                        if not url:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "shot_web",
+                                "content": "error: url 不能为空（支持 http(s):// 或本地文件路径）",
+                            })
+                            print("     shot_web: empty url")
+                            continue
+                        try:
+                            width = int(tc["input"].get("width", 1280))
+                            height = int(tc["input"].get("height", 800))
+                        except (TypeError, ValueError):
+                            width, height = 1280, 800
+                        full_page = bool(tc["input"].get("full_page", False))
+                        out = tc["input"].get("out", "screenshot.png")
+                        base_dir = self.working_root or Path(skill.directory)
+                        try:
+                            obs = _take_screenshot(
+                                url, width, height, full_page, out, str(base_dir))
+                            step_results.append({
+                                "name": f"shot_web_{tc['id']}",
+                                "type": "shot_web",
+                                "url": url,
+                                "output": obs[:1000],
+                            })
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "shot_web",
+                                "content": self._truncate_msg(obs),
+                            })
+                            self._emit_tool("shot_web", url)
+                            self._emit_result(self._truncate_msg(obs, max_chars=800))
+                        except Exception as e:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "shot_web",
+                                "content": f"[截图失败: {e}]",
+                            })
+                            print(f"     shot_web ERROR: {e}")
 
                     else:
                         # ---- skill 自带工具的通用执行分支（工具可插拔接口）----
