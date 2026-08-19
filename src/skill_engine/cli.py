@@ -845,6 +845,8 @@ def session(
     working_root: Optional[str] = typer.Option(None, "--working-root", "-w", help="要修改的目标项目目录（默认引擎 cwd）"),
     state_path: Optional[str] = typer.Option(None, "--state-path", help="会话状态落盘路径（每轮写入）"),
     resume_from: Optional[str] = typer.Option(None, "--resume-from", "-r", help="从指定会话状态文件续接"),
+    model: Optional[str] = typer.Option(None, "--model", "-m",
+                                        help="指定模型 profile（默认 default；可用 profile 见 moa --list-models）"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="显示引擎调试日志（迭代/历史条数/LLM 响应）"),
 ):
     """进入单 skill 持续会话（REPL 模式）
@@ -856,6 +858,9 @@ def session(
     用法提示（用途 / 适用场景 / 参数），再等待你的第一条指令：
 
         skill-engine session -s code-builder -w /path/to/project
+
+    指定模型：-m <profile>（如 -m default / -m gpt4o），profile 列表见
+    `skill-engine moa --list-models`；不指定则用默认 LLM 配置。
     """
     from pathlib import Path
     from .routing.discovery import discover
@@ -897,7 +902,17 @@ def session(
     assembler = Assembler(executor=executor, command_timeout=30)
     runner = Runner(assembler, executor, plain_text=True, verbose=verbose)
 
-    td_llm = _get_tool_llm_client()
+    if model:
+        from .config import get_llm_by_profile, list_model_profiles
+        try:
+            td_llm = get_llm_by_profile(model)
+        except ValueError as e:
+            print(f"[ERROR] {e}")
+            print(f"  可选 profile: {', '.join(list_model_profiles().keys()) or '（无）'}")
+            raise typer.Exit(code=1)
+        print(f"[INFO] 使用模型 profile: {model}")
+    else:
+        td_llm = _get_tool_llm_client()
     if not td_llm:
         print("[ERROR] session 需要 LLM 配置（tool_dispatch 档位 B）")
         print("  请设置环境变量: LLM_MODEL, LLM_BASE_URL, LLM_API_KEY")

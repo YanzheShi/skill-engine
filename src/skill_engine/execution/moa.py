@@ -64,6 +64,23 @@ from .context_manager import ContextManager, default_context_budget
 # worker 自动匹配 skill 时也会排除这些（指挥官 skill 不派给 worker）。
 MOA_COMMANDER_SKILLS: tuple[str, ...] = ("moa-commander",)
 
+# ── key_facts：黑板结构化要点（抗压缩） ─────────────────────────────────────
+# worker 产出末尾约定写一段【关键事实】清单，_extract_key_facts 解析为结构化
+# 列表，与 output 并列存储/传输。压缩与截断丢的是长文本冗余描述，关键事实
+# 以最精炼形态独立流转——progress_summary / blackboard_summary 优先展示。
+FACTS_MAX_ITEMS = 20          # 单条产出最多提取的事实条数
+FACTS_MAX_LEN = 60            # 单条事实长度上限（超出截断，防 facts 变第二份长文本）
+FACTS_PROMPT_HINT = (
+    "\n\n## 产出格式约定（重要）\n"
+    "你的最终产出末尾必须追加一段【关键事实】清单：每行一条（以 - 开头），"
+    "每条是一句精炼、自包含、可独立引用的事实（尽量 ≤30 字），供指挥官跨轮"
+    "引用与决策。示例：\n"
+    "【关键事实】\n"
+    "- 品牌图标与设计稿不一致（红色实心圆 vs 类似苹果logo）\n"
+    "- 主色调已对齐设计稿 #EE6A4D\n"
+    "若本轮没有值得记录的要点，写【关键事实】\n- 无"
+)
+
 
 # ── 共享黑板 / 会话状态 ────────────────────────────────────────────────────
 @dataclass
@@ -115,12 +132,15 @@ class MoaSession:
         return self.agent_contexts.setdefault(alias, MoaAgentRuntime(alias=alias))
 
     def add_entry(self, alias: str, skill: str, output: str, files: list[str],
-                  status: str = "ok", iterations: int = 0, reason: str = "") -> None:
+                  status: str = "ok", iterations: int = 0, reason: str = "",
+                  key_facts: Optional[list[str]] = None) -> None:
         """登记一笔 worker 产出。
 
         status: 终止状态（ok=正常完成；max_iterations / error 等=被打断、未完成）。
         iterations: 该 worker 本轮实际执行的工具迭代轮数。
         reason: 原始停止原因（stopped_by 原值）。
+        key_facts: 结构化关键事实清单（从产出【关键事实】段解析），与 output
+            并列存储——压缩/截断丢的是长文本冗余描述，facts 以精炼形态流转。
         """
         self.blackboard.append({
             "alias": alias,
@@ -130,6 +150,7 @@ class MoaSession:
             "status": status,
             "iterations": int(iterations or 0),
             "reason": reason,
+            "key_facts": list(key_facts or []),
         })
         self.action_counts[alias] = self.action_counts.get(alias, 0) + 1
 
@@ -150,10 +171,18 @@ class MoaSession:
         payload = f"{e['alias']}|{e['output']}|{(e['files'] or [''])[0]}"
         return int.from_bytes(hashlib.md5(payload.encode("utf-8")).digest()[:8], "big")
 
-    def blackboard_summary(self, max_each: int = 1500) -> str:
+    def _facts_line(self, e: dict, max_items: int = 3) -> str:
+        """黑板条目的关键事实行（无 facts → 空串，兼容旧状态文件）。"""
+        facts = e.get("key_facts") or []
+        if not facts:
+            return ""
+        return "[关键事实] " + "；".join(facts[:max_items])
+
+    def blackboard_summary(self, max_each: int = 5000) -> str:
         """生成供注入 prompt 的共享状态摘要（截断，控制上下文体积）。
 
-        保留全部条目（供最终综合等一次性全量场景）。
+        保留全部条目（供最终综合等一次性全量场景）；每条先给结构化关键事实
+        行（抗截断的要点），再给 output 正文。
         """
         if not self.blackboard:
             return "（尚无任何 agent 产出）"
@@ -164,14 +193,19 @@ class MoaSession:
                 out = out[:max_each] + f" …(截断，共 {len(e['output'])} 字)"
             files = ("；文件: " + ", ".join(e["files"])) if e.get("files") else ""
             status_tag = _status_tag(e)
-            lines.append(f"### 第 {i} 步 · {e['alias']}（skill={e['skill']}）{status_tag}\n{out}{files}")
+            head = f"### 第 {i} 步 · {e['alias']}（skill={e['skill']}）{status_tag}"
+            fl = self._facts_line(e)
+            lines.append(f"{head}\n{fl}\n{out}{files}" if fl else f"{head}\n{out}{files}")
         return "\n\n".join(lines)
 
-    def progress_summary(self, ok_max: int = 200) -> str:
-        """指挥官决策视图：**两段式**（不全量展开历史）。
+    def progress_summary(self, recent_ok: int = 3, ok_max: int = 4000,
+                         old_ok_max: int = 120) -> str:
+        """指挥官决策视图：异常全量 + 新近全量 + 旧条目一行（关键事实优先）。
 
         - 未完成 / 异常 worker：完整条目 + 终止原因/轮数（commander 必须看清）；
-        - 正常产出：一行式概览（alias · 文件 · 产出前若干字）。
+        - 正常产出：最近 recent_ok 条给全量（关键信息还在热区，避免信息峰值
+          在正文后部时被概览截掉），更早的折叠为一行式概览——概览行优先展示
+          key_facts（结构化要点，截断不心疼），无 facts 时回退正文前若干字。
         """
         if not self.blackboard:
             return "（尚无任何 agent 产出）"
@@ -183,19 +217,40 @@ class MoaSession:
             lines = []
             for e in aborted:
                 out = e["output"] or "（无文本产出）"
-                if len(out) > 1500:
-                    out = out[:1500] + f" …(截断，共 {len(e['output'])} 字)"
-                lines.append(f"### {e['alias']}（skill={e['skill']}）{_status_tag(e)}\n{out}")
+                if len(out) > 4000:
+                    out = out[:4000] + f" …(截断，共 {len(e['output'])} 字)"
+                fl = self._facts_line(e)
+                head = f"### {e['alias']}（skill={e['skill']}）{_status_tag(e)}"
+                lines.append(f"{head}\n{fl}\n{out}" if fl else f"{head}\n{out}")
             parts.append("# ⚠ 未完成 / 异常 worker（其任务大概率未完成，必须优先处理）\n"
                          + "\n\n".join(lines))
         if ok_entries:
+            recent = ok_entries[-recent_ok:]
+            older = ok_entries[:-recent_ok] if len(ok_entries) > recent_ok else []
+            if older:
+                lines = []
+                for e in older:
+                    facts = e.get("key_facts") or []
+                    files = (" · 文件: " + ", ".join(e["files"][:5])) if e.get("files") else ""
+                    if facts:
+                        lines.append(f"- {e['alias']}（skill={e['skill']}）{files}"
+                                     f" · [要点] {'；'.join(facts[:2])}"
+                                     f" · {(e['output'] or '')[:old_ok_max]}")
+                    else:
+                        out = (e["output"] or "").replace("\n", " ")[:old_ok_max] or "（无文本产出）"
+                        lines.append(f"- {e['alias']}（skill={e['skill']}）{files} · {out}")
+                parts.append("# 更早产出（一行概览 · 关键事实优先）\n" + "\n".join(lines))
             lines = []
-            for e in ok_entries:
-                out = (e["output"] or "").replace("\n", " ")[:ok_max] or "（无文本产出）"
-                files = (" · 文件: " + ", ".join(e["files"][:5])) if e.get("files") else ""
-                lines.append(f"- {e['alias']}（skill={e['skill']}）{files} · {out}")
-            parts.append("# 正常产出概览（细节如需可让对应 worker 重新读取）\n"
-                         + "\n".join(lines))
+            for e in recent:
+                out = e["output"] or "（无文本产出）"
+                if len(out) > ok_max:
+                    out = out[:ok_max] + f" …(截断，共 {len(e['output'])} 字)"
+                files = ("；文件: " + ", ".join(e["files"][:5])) if e.get("files") else ""
+                fl = self._facts_line(e)
+                head = f"### {e['alias']}（skill={e['skill']}）"
+                lines.append(f"{head}\n{fl}\n{out}{files}" if fl else f"{head}\n{out}{files}")
+            parts.append(f"# 最近产出（最近 {len(recent)} 条 · 全量）\n"
+                         + "\n\n".join(lines))
         return "\n\n".join(parts)
 
 
@@ -239,6 +294,44 @@ def _try_remove(path: str) -> None:
             p.unlink()
     except Exception:
         pass
+
+
+def _extract_key_facts(output: str) -> list[str]:
+    """从 worker 产出中提取【关键事实】清单（容错：无标记 → []）。
+
+    逐行解析：标记行之后以 - / * / • / 数字开头的行都是事实条目；空行或
+    普通正文行终止提取。每条钳制长度与条数，防止格式漂移把 facts 变成
+    第二份长文本。解析失败一律降级为空列表，不影响主流程。
+    """
+    if not output:
+        return []
+    facts: list[str] = []
+    started = False
+    for line in output.splitlines():
+        s = line.strip()
+        if not started:
+            if re.search(r"【\s*关键事实\s*】", s):
+                started = True
+            continue
+        if not s:
+            break
+        if re.match(r"^[-*•·]\s*", s):
+            item = re.sub(r"^[-*•·]\s*", "", s)
+        elif re.match(r"^\d+[.、)]\s*", s):
+            item = re.sub(r"^\d+[.、)]\s*", "", s)
+        elif not facts:
+            item = s          # 容错：标记后首行无符号也当事实
+        else:
+            break             # 普通正文行 → 段结束
+        item = item.strip()
+        if not item or item in ("无", "无。", "None", "N/A"):
+            continue
+        if len(item) > FACTS_MAX_LEN:
+            item = item[:FACTS_MAX_LEN] + "…"
+        facts.append(item)
+        if len(facts) >= FACTS_MAX_ITEMS:
+            break
+    return facts
 
 
 def _classify_stop(stopped_by: str, iterations: int) -> tuple[str, int, str]:
@@ -506,6 +599,7 @@ class MoaOrchestrator:
                 f"## 指挥官在第 {round_no} 轮指派给你的新任务\n{task}\n\n"
                 f"## 需要你知晓的协作上下文（其他 agent 的产出，非其私有历史）\n"
                 f"{session.blackboard_summary()}\n"
+                + FACTS_PROMPT_HINT
             )
             initial_messages = actx.messages
         else:
@@ -516,6 +610,7 @@ class MoaOrchestrator:
                 f"## 原始总任务\n{query}\n\n"
                 f"## 当前协作状态（其他 agent 的已有产出，供你参考 / 接续，不要重复）\n"
                 f"{session.blackboard_summary()}\n"
+                + FACTS_PROMPT_HINT
             )
             initial_messages = None
 
@@ -815,10 +910,11 @@ class MoaOrchestrator:
             # 2) 执行 worker（异常隔离，单点失败不拖垮整轮）
             out, files, status = self._run_agent_safe(agent, session, decision["task"], query,
                                                       round_no, max_agent_iterations)
+            facts = _extract_key_facts(out)
             session.add_entry(agent.alias, agent.skill_name, out, files,
                               status=status["code"], iterations=status["iterations"],
-                              reason=status["reason"])
-            summary = out.strip().replace("\n", " ")[:400]
+                              reason=status["reason"], key_facts=facts)
+            summary = out.strip().replace("\n", " ")[:800]
             aborted = status["code"] != "ok"
             verb = "中止" if aborted else "完成"
             line = f"   └─ {agent.alias} {verb}（产出 {len(out)} 字，文件 {len(files)} 个"
@@ -828,6 +924,8 @@ class MoaOrchestrator:
             line += "）"
             if summary:
                 line += f"\n       ↳ {summary}"
+            if not aborted and out.strip() and not facts:
+                line += "\n       ⚠ 产出未附【关键事实】要点（key_facts 为空，概览/压缩兜底未生效）"
             for f in files[:5]:
                 line += f"\n       · {f}"
             self._emit(line)

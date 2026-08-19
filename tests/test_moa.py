@@ -842,8 +842,8 @@ def test_moa_state_save_load_roundtrip(tmp_path):
     orch = _make_orchestrator(tmp_path)
     s = MoaSession(str(tmp_path))
     s.round = 2
-    s.add_entry("A1", "code-builder", "A1 实现登录", [])
-    s.add_entry("A2", "", "A2 补了测试", ["t.py"])
+    s.add_entry("A1", "code-builder", "A1 实现登录", [], key_facts=["登录页已实现"])
+    s.add_entry("A2", "", "A2 补了测试", ["t.py"], key_facts=["测试覆盖登录流程"])
     s.commander_decisions.append({"round": 1, "next": "A1", "task": "dev", "rationale": "先开发"})
     s.commander_decisions.append({"round": 2, "next": "A2", "task": "test", "rationale": "补质量"})
     s.last_agent_alias = "A2"
@@ -870,6 +870,7 @@ def test_moa_state_save_load_roundtrip(tmp_path):
     assert s2.action_counts == {"A1": 1, "A2": 1}
     assert len(s2.blackboard) == 2
     assert s2.blackboard[1]["files"] == ["t.py"]
+    assert s2.blackboard[0]["key_facts"] == ["登录页已实现"]   # key_facts 随状态持久化
     assert len(s2.commander_decisions) == 2
     a1 = s2.agent_contexts["A1"]
     assert a1.messages[0]["content"] == "r1"
@@ -1065,6 +1066,130 @@ def test_run_agent_files_cumulative_across_rounds(tmp_path):
     assert out2 == "第二轮完成"
     assert len(actx.files) == 2
     assert files2 == [actx.files[1]] and files2 != actx.files
+
+
+# ── 22. key_facts 结构化要点 + progress_summary 分层 ───────────────────────
+def test_extract_key_facts_parses_section():
+    """【关键事实】段解析：- / * / 数字 行首符号均可。"""
+    from skill_engine.execution.moa import _extract_key_facts
+    out = ("UI 检查汇报……\n"
+           "【关键事实】\n"
+           "- 品牌图标与设计稿不一致\n"
+           "- 主色调已对齐设计稿 #EE6A4D\n"
+           "* 第三行星号也可\n")
+    assert _extract_key_facts(out) == [
+        "品牌图标与设计稿不一致",
+        "主色调已对齐设计稿 #EE6A4D",
+        "第三行星号也可",
+    ]
+
+
+def test_extract_key_facts_no_marker_returns_empty():
+    from skill_engine.execution.moa import _extract_key_facts
+    assert _extract_key_facts("纯文本产出，无关键事实段") == []
+    assert _extract_key_facts("") == []
+
+
+def test_extract_key_facts_stops_at_plain_text():
+    """无空行分隔的普通正文行终止提取（不把后续正文当 facts）。"""
+    from skill_engine.execution.moa import _extract_key_facts
+    out = "结论。\n【关键事实】\n- 事实一\n接下来是正文补充说明……\n"
+    assert _extract_key_facts(out) == ["事实一"]
+
+
+def test_extract_key_facts_caps_items_and_len():
+    """条数上限 + 单条超长钳制，防 facts 变第二份长文本。"""
+    from skill_engine.execution.moa import _extract_key_facts, FACTS_MAX_LEN
+    out = "【关键事实】\n" + "".join(f"- 事实{i}\n" for i in range(30))
+    facts = _extract_key_facts(out)
+    assert len(facts) == 20 and facts[-1] == "事实19"
+    long = _extract_key_facts("【关键事实】\n- " + "长" * 200)
+    assert long == ["长" * FACTS_MAX_LEN + "…"]
+
+
+def test_progress_summary_recent_full_older_oneline(tmp_path):
+    """方案 1：最近 N 条 ok 产出全量，更早的折叠成一行（要点优先）。"""
+    s = MoaSession(str(tmp_path))
+    for i in range(5):
+        s.add_entry(f"A{i % 3}", "code-builder", f"产出{i} " + "好" * 300, [],
+                    status="ok", key_facts=[f"要点{i}"])
+    ps = s.progress_summary(recent_ok=2)
+    recent_part = ps.split("# 最近产出")[1]
+    older_part = ps.split("# 最近产出")[0]
+    # 最近 2 条（产出3/4）全量：300 字长文本完整可见
+    assert "产出3" in recent_part and "产出4" in recent_part
+    assert "好" * 300 in recent_part
+    # 更早 3 条一行概览：有要点、无全量长文本
+    assert "要点0" in older_part and "要点2" in older_part
+    assert "好" * 121 not in older_part
+
+
+def test_progress_summary_facts_preferred_on_older(tmp_path):
+    """旧条目一行：有 key_facts 展示要点，无 facts 回退正文前若干字。"""
+    s = MoaSession(str(tmp_path))
+    s.add_entry("A1", "", "很短", [], status="ok", key_facts=["核心事实甲"])
+    s.add_entry("A2", "", "x" * 5000, [], status="ok")
+    s.add_entry("A3", "", "y" * 5000, [], status="ok", key_facts=["要点乙", "要点丙"])
+    ps = s.progress_summary(recent_ok=1)
+    assert "核心事实甲" in ps             # 旧条目有 facts → 要点展示
+    assert "要点乙" in ps and "要点丙" in ps   # 新近全量也带 facts 行
+    assert "x" * 121 not in ps            # A2 无 facts → 旧行只取 120 字
+    assert "y" * 200 in ps                # A3 新近全量正文
+
+
+def test_blackboard_summary_includes_facts(tmp_path):
+    """blackboard_summary（worker 注入 / 最终综合）每条先给关键事实行。"""
+    s = MoaSession(str(tmp_path))
+    s.add_entry("A1", "", "正文内容", [], key_facts=["事实一", "事实二"])
+    bs = s.blackboard_summary()
+    assert "[关键事实] 事实一；事实二" in bs
+    assert "正文内容" in bs
+
+
+def test_worker_prompt_includes_facts_contract(tmp_path):
+    """首轮 / 续跑 composed 都带【关键事实】产出约定。"""
+    orch = _make_orchestrator(tmp_path)
+    session = MoaSession(str(tmp_path))
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "cmd"},
+        ScriptedLLM(["完成", "完成"]), ScriptedLLM(["x"]),
+    )
+    orch._run_agent(workers[0], session, "任务1", "q", 1, 5)
+    actx = session.ctx("A1")
+    joined = "".join(str(m.get("content", "")) for m in actx.messages)
+    assert "产出格式约定" in joined and "【关键事实】" in joined
+    orch._run_agent(workers[0], session, "任务2", "q", 2, 5)
+    joined2 = "".join(str(m.get("content", "")) for m in actx.messages)
+    assert joined2.count("产出格式约定") >= 2
+
+
+def test_moa_key_facts_extracted_into_blackboard(tmp_path, monkeypatch):
+    """run 全流程：worker 产出【关键事实】→ add_entry 收到结构化 key_facts。"""
+    from skill_engine.execution.moa import MoaSession
+    seen = []
+    orig = MoaSession.add_entry
+
+    def spy(self, *a, **kw):
+        seen.append(kw.get("key_facts"))
+        return orig(self, *a, **kw)
+
+    monkeypatch.setattr(MoaSession, "add_entry", spy)
+    orch = _make_orchestrator(tmp_path)
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "检查 UI"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "cmd"},
+        ScriptedLLM(["UI 检查完毕。\n【关键事实】\n- 品牌图标与设计稿不一致\n- 主色调已对齐 #EE6A4D"]),
+        ScriptedLLM([
+            '<moa_decision>{"next":"A1","task":"检查UI","rationale":"r"}</moa_decision>',
+            '<moa_decision>{"next":"STOP","task":"","rationale":"done"}</moa_decision>',
+            "最终综合",
+        ]),
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="检查 UI", max_rounds=3,
+                      max_agent_iterations=5, max_llm_calls=100)
+    assert result["stopped_by"] == "commander_stop"
+    assert any(f and "品牌图标与设计稿不一致" in f[0] for f in seen)
 
 
 if __name__ == "__main__":
