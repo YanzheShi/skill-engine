@@ -834,5 +834,238 @@ def test_commander_prompt_contains_aborted_section(tmp_path):
     assert "不要从头重做" in prompt
 
 
+# ── 20. Phase 3：MOA 级状态持久化与崩溃续跑 ────────────────────────────────
+def test_moa_state_save_load_roundtrip(tmp_path):
+    """状态落盘/载入往返：agent 私有上下文、黑板、决策轨迹、计数器全部保留。"""
+    from pathlib import Path
+    from skill_engine.execution.moa import MoaAgentRuntime
+    orch = _make_orchestrator(tmp_path)
+    s = MoaSession(str(tmp_path))
+    s.round = 2
+    s.add_entry("A1", "code-builder", "A1 实现登录", [])
+    s.add_entry("A2", "", "A2 补了测试", ["t.py"])
+    s.commander_decisions.append({"round": 1, "next": "A1", "task": "dev", "rationale": "先开发"})
+    s.commander_decisions.append({"round": 2, "next": "A2", "task": "test", "rationale": "补质量"})
+    s.last_agent_alias = "A2"
+    s.same_agent_streak = 2
+    s.no_progress_streak = 0
+    s.prev_blackboard_hash = s.last_entry_hash()
+    s.agent_contexts["A1"] = MoaAgentRuntime(
+        alias="A1",
+        messages=[{"role": "user", "content": "r1"}, {"role": "assistant", "content": "done"}],
+        last_output="A1 实现登录", cumulative_iterations=5, files=["login.py"],
+    )
+    counter = {"calls": 7, "prompt": 100, "completion": 50, "total": 150}
+    path = str(tmp_path / "moa_state.json")
+    orch._save_moa_state(path, s, counter)
+
+    restored = orch._load_moa_state(path)
+    assert restored is not None
+    s2, c2 = restored["session"], restored["counter"]
+    assert s2.round == 2
+    assert s2.last_agent_alias == "A2"
+    assert s2.same_agent_streak == 2
+    assert s2.no_progress_streak == 0
+    assert s2.prev_blackboard_hash == s.prev_blackboard_hash   # 确定性指纹跨进程一致
+    assert s2.action_counts == {"A1": 1, "A2": 1}
+    assert len(s2.blackboard) == 2
+    assert s2.blackboard[1]["files"] == ["t.py"]
+    assert len(s2.commander_decisions) == 2
+    a1 = s2.agent_contexts["A1"]
+    assert a1.messages[0]["content"] == "r1"
+    assert a1.cumulative_iterations == 5
+    assert a1.files == ["login.py"]
+    assert c2 == counter
+    # 载入后增量指纹与落盘前一致（确定性哈希，跨进程可对齐）
+    assert s2.last_entry_hash() == s.last_entry_hash()
+
+
+def test_moa_resume_continues_from_breakpoint(tmp_path):
+    """崩溃续跑：载入断点后从「已完成轮数+1」继续，黑板/计数保留，不再重复派活。"""
+    from pathlib import Path
+    orch = _make_orchestrator(tmp_path)
+    s = MoaSession(str(tmp_path))
+    s.round = 2
+    s.add_entry("A1", "code-builder", "A1 did X", [])
+    s.add_entry("A2", "code-builder", "A2 did Y", [])
+    s.prev_blackboard_hash = s.last_entry_hash()
+    state_path = str(tmp_path / "moa_state.json")
+    counter = {"calls": 5, "prompt": 90, "completion": 40, "total": 130}
+    orch._save_moa_state(state_path, s, counter)
+
+    # 续跑：两个 worker 都已行动过 → 指挥官 STOP 直接生效，不再派活
+    agent_llm = ScriptedLLM(["should not be called"])
+    commander_llm = ScriptedLLM([
+        '<moa_decision>{"next":"STOP","task":"","rationale":"done"}</moa_decision>',
+    ])
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"},
+         {"alias": "A2", "model_profile": "default", "skill_name": "", "instruction": "test"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "cmd"},
+        agent_llm, commander_llm,
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="task", max_rounds=10,
+                      max_agent_iterations=5, max_llm_calls=100,
+                      resume_from=state_path, final_synthesis=False)
+    assert result["stopped_by"] == "commander_stop"
+    assert result["rounds"] == 3          # 已完成的 2 轮 + 续跑 1 轮（STOP 轮）
+    assert commander_llm.call_count == 1  # 仅决策 1 次（final_synthesis=False）
+    assert agent_llm.call_count == 0      # 不重复派活
+    assert "A1 did X" in result["output"]  # 黑板跨进程保留
+    assert "A2 did Y" in result["output"]
+    assert result["llm_calls"] >= 5       # 成本计数器续接（原 5 次 + 续跑 1 次）
+    # 干净结束 → 检查点被删除（不留陈旧状态文件误导后续 --resume-from）
+    assert not Path(state_path).exists()
+
+
+def test_moa_resume_redispatch_worker_keeps_context(tmp_path):
+    """续跑后 commander 再次派 A1：worker 基于恢复出的私有上下文续做（不重做）。"""
+    from pathlib import Path
+    from skill_engine.execution.moa import MoaAgentRuntime
+    orch = _make_orchestrator(tmp_path)
+    s = MoaSession(str(tmp_path))
+    s.round = 2
+    s.add_entry("A1", "code-builder", "A1 完成了第一版", ["login.py"])
+    s.add_entry("A2", "code-builder", "A2 审查发现 3 处问题", [])
+    s.agent_contexts["A1"] = MoaAgentRuntime(
+        alias="A1",
+        messages=[{"role": "user", "content": "round1 任务"},
+                  {"role": "assistant", "content": "A1 完成了第一版"}],
+        last_output="A1 完成了第一版", cumulative_iterations=3, files=["login.py"],
+    )
+    state_path = str(tmp_path / "moa_state.json")
+    orch._save_moa_state(state_path, s, {"calls": 6, "prompt": 1, "completion": 1, "total": 2})
+
+    agent_llm = ScriptedLLM(["A1 已修复审查问题"])
+    commander_llm = ScriptedLLM([
+        '<moa_decision>{"next":"A1","task":"修复 A2 指出的问题","rationale":"续派"}</moa_decision>',
+        '<moa_decision>{"next":"STOP","task":"","rationale":"done"}</moa_decision>',
+    ])
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"},
+         {"alias": "A2", "model_profile": "default", "skill_name": "", "instruction": "review"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "cmd"},
+        agent_llm, commander_llm,
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="task", max_rounds=10,
+                      max_agent_iterations=5, max_llm_calls=100,
+                      resume_from=state_path, final_synthesis=False)
+    assert result["stopped_by"] == "commander_stop"
+    assert result["rounds"] == 4          # 2 轮已完成 + 续跑 2 轮（A1 修复 / STOP）
+    assert agent_llm.call_count == 1      # A1 仅续做一次，不重做
+    assert "A1 完成了第一版" in result["output"]   # 恢复出的旧产出仍在黑板
+    assert "A2 审查发现 3 处问题" in result["output"]
+    assert "A1 已修复审查问题" in result["output"]  # 续跑新增产出追加
+
+
+def test_moa_resume_missing_state_early_return(tmp_path):
+    """续跑文件不存在/损坏 → resume_state_missing 终止（fail-safe）。"""
+    orch = _make_orchestrator(tmp_path)
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "cmd"},
+        ScriptedLLM(["x"]), ScriptedLLM(["x"]),
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="task", max_rounds=5,
+                      resume_from=str(tmp_path / "nope.json"))
+    assert result["stopped_by"] == "resume_state_missing"
+    assert result["rounds"] == 0
+
+
+# ── 21. 修复回归：commander 压缩 / eager L1 / 文件累计 ─────────────────────
+def test_commander_context_compresses_across_rounds(tmp_path):
+    """Phase 2：commander 私有上下文无工具历史，超预算后压缩必须生效。
+
+    回归点：_round_starts 无工具时回退以 user 消息为轮次边界，否则
+    L2/L3 永不触发、上下文无界增长。
+    """
+    from skill_engine.execution.context_manager import ContextManager
+    session = MoaSession(str(tmp_path))
+    c_ctx = session.ctx("C")
+    # 模拟 run() 主循环：每轮追加超长决策 prompt + 决策回复（8 轮纯对话）
+    big = "决策背景 " + "协作状态" * 4000
+    for _ in range(8):
+        c_ctx.messages.append({"role": "user", "content": big})
+        c_ctx.messages.append({"role": "assistant", "content": "决策回复" * 100})
+    # 走 run() 同款压缩路径（c_cm.messages 与 c_ctx.messages 同一对象）
+    # 显式小预算，避免受 config.yml 的 context_budget 环境桥接影响
+    c_cm = ContextManager(budget=2000, keep_recent=2)
+    c_cm.messages = c_ctx.messages
+    llm = ScriptedLLM(["压缩摘要"])
+    assert c_cm.maybe_compress(llm) is True
+    assert llm.call_count == 1
+    assert any("<condensed_history>" in m.get("content", "") for m in c_ctx.messages)
+    # 首条 user prompt 保留；最近 2 个完整轮次成对保留
+    assert c_ctx.messages[0]["content"].startswith("决策背景")
+    tail = c_ctx.messages[-4:]
+    assert [m["role"] for m in tail[::2]] == ["user"] * 2
+    assert [m["role"] for m in tail[1::2]] == ["assistant"] * 2
+
+
+def test_eager_fold_old_rounds_keeps_recent():
+    """P2b：轮末 eager L1 折叠旧轮大 tool 输出与思考，keep_recent 窗口原样保留。"""
+    from skill_engine.execution.moa import _eager_fold_old_rounds
+    msgs = [{"role": "user", "content": "final"}]
+    for i in range(6):
+        msgs.append({
+            "role": "assistant",
+            "content": f"思考 {i} " + "z" * 2000,
+            "tool_calls": [{"id": f"c{i}", "name": "bash", "args": {}}],
+        })
+        msgs.append({
+            "role": "tool", "tool_call_id": f"c{i}", "name": "bash",
+            "content": "o" * 3000,
+        })
+    _eager_fold_old_rounds(msgs)
+    # 默认 keep_recent=4：只折前 2 轮（rounds 0-1），最近 4 轮原样保留
+    for i in range(2):
+        assert msgs[1 + i * 2]["content"] == "[已折叠: 旧轮思考过程]"
+        assert msgs[2 + i * 2]["content"].startswith("[已折叠: bash 输出")
+    for i in range(2, 6):
+        assert msgs[1 + i * 2]["content"].startswith("思考")
+        assert msgs[2 + i * 2]["content"] == "o" * 3000
+
+
+def test_merge_files_dedup_cumulative():
+    """P3：文件列表跨轮去重累计。"""
+    from skill_engine.execution.moa import _merge_files
+    existing = ["a.py"]
+    _merge_files(existing, ["b.py", "a.py", "b.py"])
+    assert existing == ["a.py", "b.py"]
+
+
+def test_run_agent_files_cumulative_across_rounds(tmp_path):
+    """P3：actx.files 跨轮累计（去重）；黑板每轮只记本轮文件。"""
+    orch = _make_orchestrator(tmp_path)
+    session = MoaSession(str(tmp_path))
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "cmd"},
+        ScriptedLLM([
+            {"content": "先写文件", "tool_calls": [
+                {"type": "write_file", "id": "w1",
+                 "input": {"path": "a.py", "content": "print(1)"}}]},
+            {"content": "第一轮完成", "tool_calls": []},
+            {"content": "再写一个", "tool_calls": [
+                {"type": "write_file", "id": "w2",
+                 "input": {"path": "b.py", "content": "print(2)"}}]},
+            {"content": "第二轮完成", "tool_calls": []},
+        ]),
+        ScriptedLLM(["x"]),
+    )
+    agent = workers[0]
+    _, files1, status1 = orch._run_agent(agent, session, "task1", "query", 1, 10)
+    actx = session.ctx("A1")
+    assert status1["code"] == "ok"
+    assert [f.endswith("a.py") for f in files1] == [True]
+    assert actx.files == files1
+    # 第二轮续跑：写新文件 → actx.files 累计；黑板文件只含本轮
+    out2, files2, status2 = orch._run_agent(agent, session, "task2", "query", 2, 10)
+    assert status2["code"] == "ok"
+    assert out2 == "第二轮完成"
+    assert len(actx.files) == 2
+    assert files2 == [actx.files[1]] and files2 != actx.files
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

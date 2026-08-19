@@ -68,6 +68,9 @@ bt.log
 p6.log
 pt_result.log
 
+# MOA 自动检查点（每轮落盘，正常结束自动删除；崩溃后用于 --resume-from）
+moa_session_state.json
+
 # Isolated venv used by some scripts (already self-ignored, belt-and-suspenders)
 active/
 

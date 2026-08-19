@@ -715,6 +715,7 @@ class ToolDispatchRunner:
         session_mode: bool = False,
         snapshot: Optional[FileSnapshot] = None,
         file_tracker: Optional[FileStateTracker] = None,
+        append_final_prompt: bool = False,
     ) -> dict:
         """执行 tool_dispatch 循环
 
@@ -861,6 +862,9 @@ class ToolDispatchRunner:
             # session 模式续轮：直接用历史起轮，final_prompt 已含在 initial_messages 中
             ctx.messages[:] = list(initial_messages)
             messages = ctx.messages
+            if append_final_prompt:
+                # MOA 续跑：在已有私有历史上追加本轮 final_prompt（含 env 头）作为新 user 轮
+                messages.append({"role": "user", "content": final_prompt})
         elif resume_from:
             loaded = self._load_state(resume_from)
             if loaded is not None:

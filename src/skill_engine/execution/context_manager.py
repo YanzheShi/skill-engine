@@ -130,7 +130,13 @@ class ContextManager:
 
     # ---- 轮次边界 ----
     def _round_starts(self) -> list[int]:
-        """返回所有 'assistant 且带 tool_calls' 的消息索引（即每个工具轮次的起点）。"""
+        """返回轮次边界索引（每个轮次的起点）。
+
+        有工具历史（assistant 且带 tool_calls）：每个工具轮为边界（旧行为）；
+        无工具历史（commander 纯决策 / 纯对话）：回退以 user 消息为边界，保证
+        「提示词 + 回复」成对保留在 keep_recent 窗口内，使 L2/L3 对纯对话上下文
+        同样生效——否则压缩永不触发、上下文无界增长。
+        """
         starts = [
             i for i, m in enumerate(self.messages)
             if m.get("role") == "assistant" and m.get("tool_calls")
@@ -143,14 +149,24 @@ class ContextManager:
             )
             if last_assistant < starts[-1]:
                 starts.append(len(self.messages))
-        return starts
+            return starts
+        # 无工具历史（commander 纯决策 / 纯对话）：以 user 消息为轮次边界
+        return [
+            i for i, m in enumerate(self.messages)
+            if m.get("role") == "user"
+        ]
 
     # ---- L1：micro-compaction（规则化折叠旧的大块工具输出）----
     def _micro_compact(self) -> bool:
-        """折叠 keep_recent 窗口之外、超过 FOLD_THRESHOLD 的 tool 消息内容。
+        """折叠 keep_recent 窗口之外的旧轮内容，降低上下文体积。
 
-        这些旧输出（大段 pytest 日志、整文件读取）几轮之后只剩诊断价值；
-        先降级它们，往往就不必动用有损的 L2 摘要。已折叠的幂等跳过。
+        - tool 消息：超过 FOLD_THRESHOLD 的大块输出（大段 pytest 日志、整文件
+          读取）折成带头部预览的占位符——几轮之后只剩诊断价值；
+        - assistant 且带 tool_calls 的消息：剥离旧工具轮的思考/前言 content，
+          仅保留 tool_calls（模型跨轮不再需要旧轮思考，零成本零有损）。
+
+        这些旧内容几轮之后只剩诊断价值，先降级它们往往就不必动用有损的 L2
+        摘要。已折叠的幂等跳过。
         """
         if not self.compact_tool_output:
             return False
@@ -160,19 +176,24 @@ class ContextManager:
         cut = starts[-self.keep_recent]
         changed = False
         for m in self.messages[1:cut]:
-            if m.get("role") != "tool":
-                continue
-            content = m.get("content", "")
-            if not isinstance(content, str) or len(content) <= FOLD_THRESHOLD:
-                continue
-            if content.startswith("[已折叠"):
-                continue
-            name = m.get("name") or "tool"
-            m["content"] = (
-                f"[已折叠: {name} 输出 {len(content)} 字，细节已省略；如仍需要请用工具重新获取]\n"
-                f"[头部预览] {content[:FOLD_KEEP_PREVIEW]}"
-            )
-            changed = True
+            if m.get("role") == "tool":
+                content = m.get("content", "")
+                if not isinstance(content, str) or len(content) <= FOLD_THRESHOLD:
+                    continue
+                if content.startswith("[已折叠"):
+                    continue
+                name = m.get("name") or "tool"
+                m["content"] = (
+                    f"[已折叠: {name} 输出 {len(content)} 字，细节已省略；如仍需要请用工具重新获取]\n"
+                    f"[头部预览] {content[:FOLD_KEEP_PREVIEW]}"
+                )
+                changed = True
+            elif m.get("role") == "assistant" and m.get("tool_calls"):
+                # 扩展：剥离旧工具轮的思考/前言 content，仅保留 tool_calls
+                content = m.get("content")
+                if content and not (isinstance(content, str) and content.startswith("[已折叠")):
+                    m["content"] = "[已折叠: 旧轮思考过程]"
+                    changed = True
         return changed
 
     # ---- 三级主入口 ----

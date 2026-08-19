@@ -36,9 +36,11 @@ skill-engine 原本的执行核心是单一的 ``ToolDispatchRunner.run(skill, l
 import os
 import re
 import json
+import hashlib
 import logging
 from pathlib import Path
 from typing import Optional
+from dataclasses import dataclass, field
 
 from skill_engine.models import MoaAgent, MatchResult
 
@@ -55,6 +57,7 @@ from skill_engine import ensure_utf8_io
 # ── 全局 LLM 调用计数包装（成本闸门 #3） ────────────────────────────────────
 # 抽成共享模块，供 moa 与 run 命令（baseline run -td 埋 token）共用同一套机制。
 from .counting_llm import CountingLLM, _accumulate_tokens
+from .context_manager import ContextManager, default_context_budget
 
 
 # ── 指挥官专用 skill 白名单（问题 3：只能从这里选，未来可扩展） ────────────
@@ -63,6 +66,22 @@ MOA_COMMANDER_SKILLS: tuple[str, ...] = ("moa-commander",)
 
 
 # ── 共享黑板 / 会话状态 ────────────────────────────────────────────────────
+@dataclass
+class MoaAgentRuntime:
+    """单个 agent（含 commander）的跨轮私有运行时上下文。
+
+    与共享黑板正交：这里只装该 agent 自己的 messages（任务轮次 + 工具步骤 +
+    自身答案 + 黑板精选摘要），绝不混入其他 agent 的私有历史。messages 跨轮持久，
+    由 ``ToolDispatchRunner.run`` 内部的 ``ContextManager`` 负责压缩；每次跑完把
+    ``result.history`` 回写此处即可实现"记得上次做了啥"。
+    """
+    alias: str
+    messages: list[dict] = field(default_factory=list)
+    last_output: str = ""
+    cumulative_iterations: int = 0
+    files: list[str] = field(default_factory=list)
+
+
 class MoaSession:
     """一次 MOA 运行的共享状态持有者（与 session 模式的 SkillSession 同思路）。
 
@@ -78,6 +97,10 @@ class MoaSession:
         self.snapshot = FileSnapshot(base)
         self.file_tracker = FileStateTracker(strict=False)
         self.blackboard: list[dict] = []   # {"alias","skill","output","files"}
+        # 每 agent（含 commander）独立的跨轮私有上下文：隔离记忆，互不共享
+        self.agent_contexts: dict[str, "MoaAgentRuntime"] = {}
+        # 指挥官决策轨迹（供跨轮决策参考 + 最终综合）
+        self.commander_decisions: list[dict] = []
         self.round = 0
         self.llm_calls = 0                  # 经 CountingLLM 累计
         # 防震荡
@@ -86,6 +109,10 @@ class MoaSession:
         self.prev_blackboard_hash: Optional[int] = None
         self.no_progress_streak = 0
         self.action_counts: dict[str, int] = {}   # alias → 已行动轮次（防早停闸用）
+
+    def ctx(self, alias: str) -> "MoaAgentRuntime":
+        """按 alias 懒创建/获取私有运行时上下文（含 commander）。"""
+        return self.agent_contexts.setdefault(alias, MoaAgentRuntime(alias=alias))
 
     def add_entry(self, alias: str, skill: str, output: str, files: list[str],
                   status: str = "ok", iterations: int = 0, reason: str = "") -> None:
@@ -112,12 +139,16 @@ class MoaSession:
         只取**最新一笔**（增量），而非整块黑板——否则每轮新增一条 entry 都会
         让整体 hash 变化，导致「连续同 agent 产出相同」永远判不出「无进展」。
         指纹含 alias + 输出正文 + 首个文件，比仅用长度更抗碰撞。
+
+        使用 hashlib 计算**确定性**指纹（而非内置 ``hash()``）：内置 ``hash()``
+        逐进程加盐，状态文件跨进程（崩溃续跑）重载后无法与现场重新计算的指纹
+        对齐，会让反震荡闸在续跑后失效。确定性指纹保证落盘/重载一致。
         """
         if not self.blackboard:
             return 0
         e = self.blackboard[-1]
         payload = f"{e['alias']}|{e['output']}|{(e['files'] or [''])[0]}"
-        return hash(payload)
+        return int.from_bytes(hashlib.md5(payload.encode("utf-8")).digest()[:8], "big")
 
     def blackboard_summary(self, max_each: int = 1500) -> str:
         """生成供注入 prompt 的共享状态摘要（截断，控制上下文体积）。
@@ -170,6 +201,17 @@ class MoaSession:
 
 _OK_STOPS = {"stop", "tool_stop", "session_turn_end", "max_turns", "user_exit"}
 
+# 正常终止原因（与崩溃/异常终止相对）：这些情况下协作已"干净结束"，运行结束
+# 后删除自动检查点，避免陈旧的状态文件误导后续 --resume-from。其余终止原因
+# （commander_error / commander_invalid_agent / model_config_error 等）视为
+# 非正常结束，保留检查点以便用户 --resume-from 续跑。
+_CLEAN_STOP_REASONS = {
+    "commander_stop",
+    "max_rounds",
+    "max_llm_calls",
+    "anti_loop_forced_stop",
+}
+
 _STATUS_TEXT = {
     "max_iterations": "达到最大迭代次数",
     "error": "异常终止",
@@ -189,6 +231,16 @@ def _status_tag(e: dict) -> str:
     return f"[⚠ {txt} · 已执行 {it} 轮 · 任务可能未完成]"
 
 
+def _try_remove(path: str) -> None:
+    """尽力删除检查点文件（失败静默）。"""
+    try:
+        p = Path(path)
+        if p.exists():
+            p.unlink()
+    except Exception:
+        pass
+
+
 def _classify_stop(stopped_by: str, iterations: int) -> tuple[str, int, str]:
     """把 tool_dispatch 的停止原因映射为黑板状态。
 
@@ -200,6 +252,27 @@ def _classify_stop(stopped_by: str, iterations: int) -> tuple[str, int, str]:
     if not sb:
         return "ok", int(iterations or 0), ""
     return sb, int(iterations or 0), sb
+
+
+def _eager_fold_old_rounds(messages: list[dict]) -> None:
+    """轮末 eager L1：原地折叠 keep_recent 之外的旧轮超大 tool 输出与旧轮思考。
+
+    免费、确定性、零 LLM 调用——与 run 循环内的 lazy L1 共用同一套
+    ``ContextManager._micro_compact`` 逻辑。保证私有上下文跨轮处于"干净态"：
+    状态落盘精简，且下次派发时无需再折同样的内容（幂等）。
+    """
+    if not messages:
+        return
+    cm = ContextManager(budget=default_context_budget(), compact_tool_output=True)
+    cm.messages = messages
+    cm._micro_compact()
+
+
+def _merge_files(existing: list[str], new_files: list[str]) -> None:
+    """把本轮产出文件去重合并进累计文件列表（文档 §3.1：files 为累计产出文件）。"""
+    for f in new_files:
+        if f not in existing:
+            existing.append(f)
 
 
 # ── 编排器 ────────────────────────────────────────────────────────────────
@@ -301,6 +374,17 @@ class MoaOrchestrator:
                     )
             except Exception:
                 skill_ctx = ""
+        # 指挥官自身决策轨迹（跨轮累积于私有上下文；此处再给一份结构化摘要，
+        # 抗压缩、便于跨轮避免重复派活 / 乒乓）
+        decision_history = ""
+        if session.commander_decisions:
+            recent = session.commander_decisions[-6:]
+            lines = "\n".join(
+                f"- 第 {d['round']} 轮：派 {d['next']}"
+                f"（{(d.get('task') or '')[:80]}）"
+                for d in recent
+            )
+            decision_history = f"\n# 你之前的决策轨迹（避免重复派活 / 乒乓）\n{lines}\n"
         return f"""\
 你是一个多智能体协作任务的**指挥官（commander）**。你不直接写代码或改文件，
 你的唯一职责是：根据当前进展，决定**下一轮由哪个 worker agent 行动、干什么**。
@@ -316,7 +400,7 @@ class MoaOrchestrator:
 
 # 当前协作进度（未完成/异常 worker 全量 + 正常产出概览）
 {session.progress_summary()}
-
+{decision_history}
 # 决策要求
 - 你正处在第 {round_no}/{max_rounds} 轮。
 - 只能在以下代号中选一个作为 next：{aliases}，或输出 STOP 表示任务已完成。
@@ -411,13 +495,30 @@ class MoaOrchestrator:
                     supporting_files=[],
                 )
 
-        composed = (
-            f"{agent.instruction}\n\n"
-            f"## 本轮任务（指挥官在第 {round_no} 轮指派）\n{task}\n\n"
-            f"## 原始总任务\n{query}\n\n"
-            f"## 当前协作状态（其他 agent 的已有产出，供你参考 / 接续，不要重复）\n"
-            f"{session.blackboard_summary()}\n"
-        )
+        # —— 私有上下文：首轮完整 composed；续跑仅注入新轮 task + 完整黑板 ——
+        # 隔离保证：actx.messages 只含该 agent 自己的轮次与黑板精选摘要，
+        # 绝不混入其他 agent 的私有历史。
+        actx = session.ctx(agent.alias)
+        if actx.messages:
+            # 续跑：该 agent 已有跨轮私有历史，新轮作为一条 user 消息追加，
+            # 整体作为 initial_messages 交给 run()，由其复用自身记忆。
+            composed = (
+                f"## 指挥官在第 {round_no} 轮指派给你的新任务\n{task}\n\n"
+                f"## 需要你知晓的协作上下文（其他 agent 的产出，非其私有历史）\n"
+                f"{session.blackboard_summary()}\n"
+            )
+            initial_messages = actx.messages
+        else:
+            # 首轮：照旧完整 composed（含 instruction / 原始总任务 / 黑板 / env 头）
+            composed = (
+                f"{agent.instruction}\n\n"
+                f"## 本轮任务（指挥官在第 {round_no} 轮指派）\n{task}\n\n"
+                f"## 原始总任务\n{query}\n\n"
+                f"## 当前协作状态（其他 agent 的已有产出，供你参考 / 接续，不要重复）\n"
+                f"{session.blackboard_summary()}\n"
+            )
+            initial_messages = None
+
         arguments = {"$ARGUMENTS": composed, "$0": composed, **parse_named_params(composed)}
         mr = MatchResult(skill=skill, score=1.0, method="moa", arguments=arguments)
 
@@ -436,11 +537,25 @@ class MoaOrchestrator:
             mr, agent.llm, max_iterations=max_agent_iterations,
             snapshot=session.snapshot, file_tracker=session.file_tracker,
             session_mode=False,
+            initial_messages=initial_messages,
+            append_final_prompt=bool(actx.messages),
         )
-        out = result.get("output", "") or ""
+        # —— 回写私有上下文（result.history 已被 run 内部 ContextManager 压缩过）——
+        # 下次再派该 agent 时，它即可从这份历史里"记得上次做了啥"。
+        actx.messages = list(result.history)
+        # 轮末 eager L1：立即折掉超出 keep_recent 的旧轮大 tool 输出与旧轮思考，
+        # 私有上下文保持"干净态"（落盘精简 / 下次续跑无需重复折叠）。
+        _eager_fold_old_rounds(actx.messages)
+        actx.last_output = result.get("output", "") or ""
+        actx.cumulative_iterations += int(result.get("iterations", 0) or 0)
+        round_files = result.get("files_created", []) or []
+        # 累计产出文件（跨轮去重合并进 actx.files；黑板只记本轮文件）
+        _merge_files(actx.files, round_files)
+
+        out = actx.last_output
         # 注意：不能用 result.get("ctx", {})——RunResult.get 对 "ctx" 键无特判且 ctx
         # 内不含 "ctx" 键，会返回默认 {}；files_created 是 ctx 内的键，get 会透传。
-        files = result.get("files_created", []) or []
+        files = round_files
         sb = result.get("stopped_by", "") or ""
         status_code, status_iter, _ = _classify_stop(sb, int(result.get("iterations", 0) or 0))
         status = {"code": status_code, "iterations": status_iter, "reason": sb}
@@ -498,10 +613,14 @@ class MoaOrchestrator:
     def _final_synthesis(self, commander: MoaAgent, session: MoaSession,
                         query: str) -> str:
         """让指挥官基于黑板产出最终综合结论（单步，失败回退到拼接黑板）。"""
+        seq = "；".join(
+            f"R{d['round']}→{d['next']}" for d in session.commander_decisions
+        ) or "（无）"
         prompt = (
             f"用户原始任务：{query}\n\n"
             f"以下是各 agent 协作完成后的完整黑板记录：\n\n"
             f"{session.blackboard_summary(max_each=4000)}\n\n"
+            f"本次协作指挥官逐轮指派序列：{seq}\n\n"
             f"请综合以上所有成果，输出**最终交付结论**（不要重复过程，聚焦结果、"
             f"关键文件、以及仍需人工确认的点）。"
         )
@@ -531,6 +650,8 @@ class MoaOrchestrator:
         max_llm_calls: int = 500,
         max_consecutive_same_agent: int = 3,
         final_synthesis: bool = True,
+        resume_from: Optional[str] = None,
+        state_path: Optional[str] = None,
     ) -> dict:
         """运行 MOA 协作回路。
 
@@ -544,6 +665,12 @@ class MoaOrchestrator:
             max_llm_calls: 全局 LLM 调用次数上限（闸 #3，CountingLLM 计数）。
             max_consecutive_same_agent: 同 agent 连续命中上限（闸 #4 触发条件）。
             final_synthesis: 结束后是否让指挥官综合最终结论。
+            resume_from: 可选，从指定状态文件续跑（载入各 agent 私有上下文 / 黑板 /
+                决策轨迹 / 计数器，从断点继续整轮协作）。文件不存在/损坏 →
+                返回 resume_state_missing 终止。
+            state_path: 可选，运行状态落盘路径（每轮完成后写检查点，崩溃最多丢
+                本轮在途工作）。省略时默认落到工作目录 moa_session_state.json；
+                正常完成后自动删除，避免陈旧文件误导后续 --resume-from。
 
         Returns:
             结果 dict（含 output / rounds / llm_calls / stopped_by / files_created 等）。
@@ -558,10 +685,31 @@ class MoaOrchestrator:
         if len(set(aliases)) != len(aliases):
             return self._result("", 0, 0, "duplicate_alias", [], query, [])
 
+        # ── 续跑恢复（Phase 3）──
+        # 从断点状态文件载入 session（各 agent 私有上下文 / 黑板 / 决策轨迹 /
+        # 计数器），继续整轮协作；否则全新启动。
+        if resume_from:
+            restored = self._load_moa_state(resume_from)
+            if restored is None:
+                return self._result("", 0, 0, "resume_state_missing", [], query, [])
+            session = restored["session"]
+            counter = restored["counter"]
+            # 续跑沿用同一状态文件路径（若未显式另指），边跑边更新检查点
+            state_path = state_path or resume_from
+        else:
+            session = MoaSession(self.working_root)
+            counter = {"calls": 0, "prompt": 0, "completion": 0, "total": 0}
+
+        # ── 自动检查点 ──
+        # 未显式指定 state_path 时，默认落到工作目录 moa_session_state.json：
+        # 每轮正常完成后落盘，崩溃最多丢失本轮在途工作；正常完成后删除，避免
+        # 陈旧文件误导后续 --resume-from（续跑命令见 cli 提示）。
+        if state_path is None:
+            state_path = os.path.join(self.working_root, "moa_session_state.json")
+
         # ── 实例化各 agent 的模型客户端（延迟到运行期，便于提前报缺配置） ──
         # 若调用方已预注入 a.llm（测试 / 复用客户端场景），则跳过联网取模型，
-        # 但仍统一包一层 CountingLLM 以计入全局成本上限。
-        counter = {"calls": 0, "prompt": 0, "completion": 0, "total": 0}
+        # 但仍统一包一层 CountingLLM 以计入全局成本上限（续跑时复用恢复出的 counter）。
         try:
             from skill_engine.config import get_llm_by_profile
             for a in agents + [commander]:
@@ -573,7 +721,6 @@ class MoaOrchestrator:
             return self._result("", 0, 0, "model_config_error",
                                 [f"{a.alias}: {e}" for a in agents + [commander]], query, [])
 
-        session = MoaSession(self.working_root)
         stopped_by = "max_rounds"
         last_rationale = ""
 
@@ -584,7 +731,10 @@ class MoaOrchestrator:
             f"上限 {max_rounds} 轮 / {max_llm_calls} 次 LLM 调用"
         )
 
-        for round_no in range(1, max_rounds + 1):
+        # 续跑从「已完成轮数 + 1」继续；max_rounds 作为绝对预算（总轮数上限），
+        # 即续跑沿用原 max_rounds，剩余可用轮数 = max_rounds - session.round。
+        start_round = session.round + 1 if resume_from else 1
+        for round_no in range(start_round, max_rounds + 1):
             # 闸 #3：全局 LLM 调用上限（counter 由 CountingLLM 实时累计）。
             # 在当前轮尚未派出任何 agent 前就已达上限 → 记「已完成轮数」= round_no-1。
             if counter["calls"] >= max_llm_calls:
@@ -594,21 +744,33 @@ class MoaOrchestrator:
                 break
             session.round = round_no
 
-            # 1) 指挥官决策
+            # 1) 指挥官决策（指挥官拥有独立隔离上下文，跨轮累积决策轨迹）
             c_prompt = self._commander_prompt(commander, session, agents, query,
                                               round_no, max_rounds)
             try:
-                c_resp = commander.llm.invoke(c_prompt)
+                c_ctx = session.ctx(commander.alias)
+                c_ctx.messages.append({"role": "user", "content": c_prompt})
+                c_cm = ContextManager(budget=default_context_budget())
+                c_cm.messages = c_ctx.messages
+                c_cm.maybe_compress(commander.llm)   # 复用 L1/L2/L3（指挥官无工具，仅压缩）
+                c_resp = commander.llm.invoke(c_cm.messages)
+                c_text = (c_resp.get("content") if isinstance(c_resp, dict)
+                          else getattr(c_resp, "content", str(c_resp)))
+                if isinstance(c_text, (list, dict)):
+                    c_text = str(c_text)
+                c_ctx.messages.append({"role": "assistant", "content": c_text})
+                c_ctx.last_output = c_text
             except Exception as e:
                 stopped_by = "commander_error"
                 self._emit(f"[ERROR] 指挥官调用失败: {e}")
                 break
-            c_text = (c_resp.get("content") if isinstance(c_resp, dict)
-                      else getattr(c_resp, "content", str(c_resp)))
-            if isinstance(c_text, (list, dict)):
-                c_text = str(c_text)
             decision = self._parse_decision(c_text, agents)
             last_rationale = decision.get("rationale", "")
+            # 决策理由回写（供跨轮决策参考 + 最终综合）
+            session.commander_decisions.append({
+                "round": round_no, "next": decision["next"],
+                "task": decision.get("task", ""), "rationale": decision.get("rationale", ""),
+            })
 
             self._emit(
                 f"> 第 {round_no}/{max_rounds} 轮 · 指挥官决策: "
@@ -685,7 +847,13 @@ class MoaOrchestrator:
                 self._emit(
                     f"[防死循环] {agent.alias} 连续 {session.same_agent_streak} 轮且黑板无进展，强制停止"
                 )
+                # 落盘当前轮（含触发的闸），便于崩溃续跑从断点继续
+                if state_path:
+                    self._save_moa_state(state_path, session, counter)
                 break
+            # ── 轮末检查点：每轮正常完成后落盘（崩溃最多丢失本轮在途工作）──
+            if state_path:
+                self._save_moa_state(state_path, session, counter)
 
         # 最终综合
         final_output = ""
@@ -704,6 +872,12 @@ class MoaOrchestrator:
         all_files = []
         for e in session.blackboard:
             all_files.extend(e.get("files") or [])
+
+        # ── 正常完成：清理检查点 ──
+        # 仅 clean 终止原因才删（协作已干净结束）；崩溃 / 异常终止（commander_error
+        # 等）保留检查点，便于用户 --resume-from 从断点继续。
+        if state_path and stopped_by in _CLEAN_STOP_REASONS:
+            _try_remove(state_path)
 
         return self._result(
             final_output, session.round, session.llm_calls, stopped_by,
@@ -732,3 +906,95 @@ class MoaOrchestrator:
             "tokens_completion": tokens_completion,
             "tokens_total": tokens_total,
         }
+
+    # ── Phase 3：MOA 级状态持久化（崩溃续跑） ──────────────────────────────
+    def _save_moa_state(self, path: str, session: "MoaSession", counter: dict) -> None:
+        """将整轮 MOA 协作状态落盘为 JSON，供后续 --resume-from 续跑。
+
+        持久化内容（均为 JSON 可序列化）：各 agent 私有上下文（messages /
+        last_output / 累计迭代 / 产出文件）、黑板、指挥官决策轨迹、轮次与防死循环
+        计数器、以及 LLM 成本计数器（续跑预算连续计数）。
+
+        注意：snapshot / file_tracker 是运行时对象（文件已在 working_root 落盘），
+        不序列化；续跑时 MoaSession.__init__ 重建即可，磁盘文件天然可见。
+        失败静默，绝不拖垮主执行流程。
+        """
+        try:
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            state = {
+                "version": 1,
+                "round": session.round,
+                "llm_calls": session.llm_calls,
+                "last_agent_alias": session.last_agent_alias,
+                "same_agent_streak": session.same_agent_streak,
+                "prev_blackboard_hash": session.prev_blackboard_hash,
+                "no_progress_streak": session.no_progress_streak,
+                "action_counts": session.action_counts,
+                "blackboard": session.blackboard,
+                "commander_decisions": session.commander_decisions,
+                "agent_contexts": {
+                    alias: {
+                        "alias": rt.alias,
+                        "messages": rt.messages,
+                        "last_output": rt.last_output,
+                        "cumulative_iterations": rt.cumulative_iterations,
+                        "files": rt.files,
+                    }
+                    for alias, rt in session.agent_contexts.items()
+                },
+                "counter": {
+                    "calls": counter.get("calls", 0),
+                    "prompt": counter.get("prompt", 0),
+                    "completion": counter.get("completion", 0),
+                    "total": counter.get("total", 0),
+                },
+            }
+            p.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            # 状态持久化失败绝不影响主执行流程
+            pass
+
+    def _load_moa_state(self, path: str):
+        """读取 MOA 状态文件；不存在 / 损坏 → 返回 None。
+
+        Returns: {"session": MoaSession, "counter": dict} 或 None。
+        重建的 session 复用当前 working_root（磁盘文件天然可见），prev_blackboard_hash
+        因 last_entry_hash 已确定性化，直接载入即可与现场重新计算的指纹对齐。
+        """
+        try:
+            p = Path(path)
+            if not p.exists():
+                return None
+            state = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        session = MoaSession(self.working_root)
+        session.round = state.get("round", 0)
+        session.llm_calls = state.get("llm_calls", 0)
+        session.last_agent_alias = state.get("last_agent_alias")
+        session.same_agent_streak = state.get("same_agent_streak", 0)
+        session.prev_blackboard_hash = state.get("prev_blackboard_hash")
+        session.no_progress_streak = state.get("no_progress_streak", 0)
+        session.action_counts = state.get("action_counts", {}) or {}
+        session.blackboard = state.get("blackboard", []) or []
+        session.commander_decisions = state.get("commander_decisions", []) or []
+        agent_contexts = {}
+        for alias, rt in (state.get("agent_contexts", {}) or {}).items():
+            agent_contexts[alias] = MoaAgentRuntime(
+                alias=rt.get("alias", alias),
+                messages=rt.get("messages", []) or [],
+                last_output=rt.get("last_output", ""),
+                cumulative_iterations=rt.get("cumulative_iterations", 0),
+                files=rt.get("files", []) or [],
+            )
+        session.agent_contexts = agent_contexts
+        counter = state.get("counter", {}) or {}
+        counter = {
+            "calls": counter.get("calls", 0),
+            "prompt": counter.get("prompt", 0),
+            "completion": counter.get("completion", 0),
+            "total": counter.get("total", 0),
+        }
+        return {"session": session, "counter": counter}

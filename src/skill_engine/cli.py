@@ -1048,6 +1048,8 @@ def moa(
     max_llm_calls: int = typer.Option(500, "--max-llm-calls", help="全局 LLM 调用次数上限（闸 #3）"),
     working_root: Optional[str] = typer.Option(None, "--working-root", "-w", help="目标项目目录（默认引擎 cwd）"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="显示引擎调试日志"),
+    state_path: Optional[str] = typer.Option(None, "--state-path", "-s", help="MOA 运行状态落盘路径（每轮检查点，支持断点续跑）"),
+    resume_from: Optional[str] = typer.Option(None, "--resume-from", "-r", help="从指定状态文件续跑 MOA（崩溃恢复）；状态文件由上次运行生成于 --state-path 或默认工作目录 moa_session_state.json"),
 ):
     """进入 MOA 多模型 / 多 skill 协作（向导式引导配置 + 指挥官驱动执行）
 
@@ -1125,7 +1127,8 @@ def moa(
                      max_agent_iterations=opts.get("max_agent_iterations", max_iterations),
                      max_llm_calls=opts.get("max_llm_calls", max_llm_calls),
                      verbose=verbose, export_after=True, export_source="plan",
-                     trusted_root=working_root)
+                     trusted_root=working_root,
+                     state_path=state_path, resume_from=resume_from)
         return
 
     # ── 交互向导 ──
@@ -1219,18 +1222,25 @@ def moa(
                  max_rounds=max_rounds, max_agent_iterations=max_iterations,
                  max_llm_calls=max_llm_calls, verbose=verbose,
                  export_after=True, export_source="wizard",
-                 trusted_root=working_root)
+                 trusted_root=working_root,
+                 state_path=state_path, resume_from=resume_from)
 
 
 def _moa_execute(registry, workers: list, commander, query: str,
                  working_root: Optional[str], max_rounds: int,
                  max_agent_iterations: int, max_llm_calls: int, verbose: bool,
                  export_after: bool = False, export_source: str = "executed",
-                 trusted_root: Optional[str] = None) -> None:
+                 trusted_root: Optional[str] = None,
+                 state_path: Optional[str] = None,
+                 resume_from: Optional[str] = None) -> None:
     """构造运行环境并执行 MOA，打印最终报告；export_after 时导出配置 JSON。
 
     trusted_root：用户显式指定的受信任工作目录（-w 非空时启用）——其内的文件
     读写自动放行免审批；目录外操作维持原审批。未指定时为 None（不启用）。
+
+    state_path / resume_from：Phase 3 崩溃续跑。state_path 为每轮检查点落盘
+    路径（省略时引擎默认工作目录 moa_session_state.json）；resume_from 从指定
+    状态文件载入断点继续整轮协作。
     """
     from pathlib import Path
     from .execution.assembler import Assembler
@@ -1256,10 +1266,15 @@ def _moa_execute(registry, workers: list, commander, query: str,
         plain_text=True, verbose=verbose,
         trusted_root=trusted_root,
     )
+    if resume_from:
+        print(f"[INFO] 续跑模式：从状态文件 {resume_from} 载入断点，继续整轮协作")
+    elif state_path:
+        print(f"[INFO] 检查点：{state_path}（每轮落盘；崩溃后可加 --resume-from 续跑）")
     result = orch.run(
         workers, commander, registry, query=query or "",
         max_rounds=max_rounds, max_agent_iterations=max_agent_iterations,
         max_llm_calls=max_llm_calls,
+        resume_from=resume_from, state_path=state_path,
     )
 
     print("\n" + "═" * 64)
