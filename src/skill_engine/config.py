@@ -92,6 +92,10 @@ _SETTINGS_ENV_MAP = {
     "tavily_api_key": "TAVILY_API_KEY",
     "vault_path": "VAULT_PATH",
     "ollama_host": "OLLAMA_HOST",
+    "r2_token": "CF_R2_TOKEN",
+    "r2_account_id": "CF_R2_ACCOUNT_ID",
+    "r2_bucket": "CF_R2_BUCKET",
+    "r2_public_base": "CF_R2_PUBLIC_BASE",
 }
 
 

@@ -578,7 +578,9 @@ class ToolDispatchRunner:
         self.trusted_root = to_native_path(trusted_root)
         # S1-3：batch 模式下会话内已批准的文件（run_repl 复用同一 runner 实例，跨轮存活）
         self._file_edit_approvals: set = set()
-        self._confirm_edits_mode = "" 
+        self._confirm_edits_mode = ""
+        # view_image 的 R2 上传缓存：(path, size, mtime_ns) → 公网 URL，同文件只传一次
+        self._view_image_urls: dict = {} 
 
     def _is_trusted_path(self, full_path: Path) -> bool:
         """路径是否位于受信任工作目录（trusted_root）内。规范化后前缀匹配，防 .. 逃逸。"""
@@ -1309,15 +1311,17 @@ class ToolDispatchRunner:
                             mime = {".png": "image/png", ".jpg": "image/jpeg",
                                     ".jpeg": "image/jpeg", ".gif": "image/gif",
                                     ".webp": "image/webp"}.get(ext, "image/png")
-                            # 进模型前自适应压缩：按 512px 瓦片数（token 计费单位）决策。
-                            # 仅当缩放能减少瓦片数时才采纳，避免“缩了但瓦片不变”反而增大字节。
+                            # 进模型前自适应压缩：按"面积线性计费"决策（sensenova 实测：
+                            # image_tokens ≈ 面积(px)/1024，纯线性、无瓦片取整边界）。
+                            # 只要发生缩放，面积必然严格减小 → token 必然减少，直接采纳；
+                            # 未缩放（最长边 ≤ 1568）则保持原样，避免无谓重编码损失画质。
                             # 缩放后取 JPEG/PNG 较小者；Pillow 缺失或解码失败回退原样字节（零新硬依赖）。
                             import io
-                            import math
                             raw_bytes = full_path.read_bytes()
                             orig_size = len(raw_bytes)
                             size = orig_size
                             note = ""
+                            payload = raw_bytes  # 最终发送字节（压缩后或原样）
                             try:
                                 from PIL import Image
                                 try:
@@ -1325,20 +1329,15 @@ class ToolDispatchRunner:
                                 except AttributeError:
                                     resample = Image.LANCZOS
                                 img = Image.open(io.BytesIO(raw_bytes))
-                                ow, oh = img.size
-                                orig_tiles = math.ceil(ow / 512) * math.ceil(oh / 512)
                                 if max(img.size) > 1568:
                                     scale = 1568 / max(img.size)
                                     img = img.resize(
                                         (int(img.size[0] * scale), int(img.size[1] * scale)),
                                         resample,
                                     )
-                                if img.mode in ("RGBA", "P", "LA"):
-                                    img = img.convert("RGB")
-                                nw, nh = img.size
-                                new_tiles = math.ceil(nw / 512) * math.ceil(nh / 512)
-                                if new_tiles < orig_tiles:
-                                    # 瓦片数减少→token 减少；取 JPEG/PNG 较小者
+                                    if img.mode in ("RGBA", "P", "LA"):
+                                        img = img.convert("RGB")
+                                    # 缩放后面积减小→token 减少；取 JPEG/PNG 较小者
                                     buf_jpeg = io.BytesIO()
                                     img.save(buf_jpeg, format="JPEG", quality=85)
                                     pj = buf_jpeg.getvalue()
@@ -1346,27 +1345,51 @@ class ToolDispatchRunner:
                                     img.save(buf_png, format="PNG")
                                     pp = buf_png.getvalue()
                                     if len(pj) <= len(pp):
-                                        b64 = base64.b64encode(pj).decode("ascii")
+                                        payload = pj
                                         mime = "image/jpeg"
                                         size = len(pj)
                                         note = f"（压缩至 {size} bytes，原 {orig_size} bytes）"
                                     else:
-                                        b64 = base64.b64encode(pp).decode("ascii")
+                                        payload = pp
                                         mime = "image/png"
                                         size = len(pp)
                                         note = f"（缩放至 {size} bytes，原 {orig_size} bytes）"
-                                else:
-                                    # 瓦片数未减：保持原样（不重编码，避免无谓变化/透明信息丢失）
-                                    b64 = base64.b64encode(raw_bytes).decode("ascii")
                             except Exception:
-                                b64 = base64.b64encode(raw_bytes).decode("ascii")
+                                pass
+                            b64 = base64.b64encode(payload).decode("ascii")
+                            # R2 外链模式：配置了 R2 时上传压缩后字节换公网 URL（sensenova
+                            # 等不吃 base64 的模型）。失败/未配置回退 base64 内联（fail-soft）。
+                            # 同文件（大小+mtime 不变）会话内只传一次，避免重复上传。
+                            image_url = ""
+                            cache_key = (str(full_path), orig_size,
+                                         int(full_path.stat().st_mtime_ns))
+                            if cache_key in self._view_image_urls:
+                                image_url = self._view_image_urls[cache_key]
+                            else:
+                                try:
+                                    from skill_engine.execution.image_hosting import (
+                                        upload_image_to_r2,
+                                    )
+                                    got = upload_image_to_r2(payload, mime)
+                                    if got:
+                                        image_url = got
+                                        self._view_image_urls[cache_key] = got
+                                except Exception:
+                                    image_url = ""
+                            if image_url:
+                                url = image_url
+                                url_note = f"，已上传 R2 公网 URL"
+                            else:
+                                url = f"data:{mime};base64,{b64}"
+                                url_note = ""
                             # 先落 tool 文本消息（保持 OpenAI 协议顺序），
                             # 再注入 user 多模态消息：下一轮调用时模型即可"看见"图片
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc["id"],
                                 "name": "view_image",
-                                "content": f"[图片已加载] {filepath}（{size} bytes{note}），多模态消息已注入。",
+                                "content": f"[图片已加载] {filepath}（{size} bytes{note}）"
+                                           f"，多模态消息已注入{url_note}。",
                             })
                             messages.append({
                                 "role": "user",
@@ -1375,11 +1398,11 @@ class ToolDispatchRunner:
                                      "text": f"已加载图片 {filepath}（{size} bytes{note}），请仔细查看图片内容，"
                                              "据此检查实现是否符合要求。"},
                                     {"type": "image_url",
-                                     "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                                     "image_url": {"url": url}},
                                 ],
                             })
                             self._emit_tool(f"view_image {filepath}")
-                            self._emit_result(f"图片已注入多模态消息（{size} bytes, {mime}{note}）")
+                            self._emit_result(f"图片已注入多模态消息（{size} bytes, {mime}{note}{url_note}）")
                         except Exception as e:
                             messages.append({
                                 "role": "tool",

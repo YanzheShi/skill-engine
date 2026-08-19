@@ -52,9 +52,14 @@ def view_image(path: str) -> str:
 
     The image is injected as a multimodal message, so the model can SEE it.
     Before injection, when Pillow is available, it is downscaled (longest edge
-    capped at 1568px) ONLY if that reduces the model's 512px-tile count (the
-    token cost unit); the smaller of JPEG(q85)/PNG is sent. Images that would
-    not save tiles, or environments without Pillow, pass through unchanged.
+    capped at 1568px) whenever it exceeds that cap — under area-linear image
+    pricing (e.g. sensenova: ~1 token per 1024 px) any downscale strictly
+    reduces tokens; the smaller of JPEG(q85)/PNG is sent. Images within the
+    cap, or environments without Pillow, pass through unchanged.
+    When R2 hosting is configured (settings r2_token/r2_bucket/...), the image
+    is uploaded and injected as a public R2 URL instead of inline base64 —
+    required by some providers (e.g. sensenova) that reject base64 images;
+    otherwise it falls back to base64 automatically.
     ONLY works on models that support vision (vision: true in model profile).
     On text-only models it returns a notice instead of loading the image.
     Use this to check screenshots (e.g. from shot_web) and verify UI rendering.

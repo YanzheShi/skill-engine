@@ -38,3 +38,9 @@ settings:
   tavily_api_key: ${TAVILY_API_KEY}
   vault_path: ""
   ollama_host: ""
+  # R2 图片托管：view_image 注入图片时上传到 R2 换公网 URL。
+  # 未配置时回退 base64 内联，不影响其它模型。
+  r2_token: ${CF_R2_TOKEN}
+  r2_account_id: ${CF_R2_ACCOUNT_ID}
+  r2_bucket: ${CF_R2_BUCKET}
+  r2_public_base: ${CF_R2_PUBLIC_BASE}

@@ -145,3 +145,102 @@ def test_vision_model_prompt_no_capability_notice(tmp_path):
     runner.run(_match(tmp_path), tool_dispatch=llm)
     first_user = next(m for m in llm.last_messages if m.get("role") == "user")
     assert "无视觉的文本模型" not in first_user["content"]
+
+
+# ── R2 外链模式（sensenova 等不吃 base64 的模型走公网 URL） ─────────────────
+@pytest.fixture(autouse=True)
+def _no_r2_upload(monkeypatch):
+    """屏蔽真实 R2 上传：本机 config.yml 配置了 R2，防止测试打到真实网络。
+
+    未配置/上传失败时 view_image 应回退 base64 内联（fail-soft）。
+    """
+    monkeypatch.setattr("skill_engine.execution.image_hosting.upload_image_to_r2",
+                        lambda data, mime: None)
+
+
+def test_view_image_r2_url_injection(tmp_path, monkeypatch):
+    """R2 可用时：注入公网 URL，不再内联 base64，且上传的是压缩后的字节。"""
+    uploaded = []
+
+    def fake_upload(data, mime):
+        uploaded.append((data, mime))
+        return "https://pub-x.r2.dev/vision/abc123.png"
+
+    monkeypatch.setattr("skill_engine.execution.image_hosting.upload_image_to_r2", fake_upload)
+    runner = _runner()
+    llm = MockLLM([_view_call(_png(tmp_path)), "done"])
+    llm.vision = True
+    runner.run(_match(tmp_path), tool_dispatch=llm)
+    assert uploaded, "R2 配置可用时应真实上传图片字节"
+    multimodal = [m for m in llm.last_messages if isinstance(m.get("content"), list)]
+    parts = multimodal[0]["content"]
+    urls = [p["image_url"]["url"] for p in parts if p.get("type") == "image_url"]
+    assert urls == ["https://pub-x.r2.dev/vision/abc123.png"]
+    tool_msgs = _tool_msgs(llm)
+    assert any("R2 公网 URL" in m.get("content", "") for m in tool_msgs)
+
+
+def test_view_image_r2_upload_fails_falls_back_base64(tmp_path, monkeypatch):
+    """R2 上传失败：回退 base64 内联，不影响原链路。"""
+    monkeypatch.setattr("skill_engine.execution.image_hosting.upload_image_to_r2",
+                        lambda data, mime: None)
+    runner = _runner()
+    llm = MockLLM([_view_call(_png(tmp_path)), "done"])
+    llm.vision = True
+    runner.run(_match(tmp_path), tool_dispatch=llm)
+    multimodal = [m for m in llm.last_messages if isinstance(m.get("content"), list)]
+    urls = [p["image_url"]["url"] for p in multimodal[0]["content"]
+            if p.get("type") == "image_url"]
+    assert urls and urls[0].startswith("data:image/png;base64,")
+
+
+def test_view_image_r2_same_file_uploads_once(tmp_path, monkeypatch):
+    """同文件二次 view_image：复用会话内 URL，不重复上传。"""
+    calls = []
+
+    def fake_upload(data, mime):
+        calls.append(1)
+        return "https://pub-x.r2.dev/vision/abc123.png"
+
+    monkeypatch.setattr("skill_engine.execution.image_hosting.upload_image_to_r2", fake_upload)
+    runner = _runner()
+    png = _png(tmp_path)
+    llm = MockLLM([_view_call(png), _view_call(png), "done"])
+    llm.vision = True
+    runner.run(_match(tmp_path), tool_dispatch=llm)
+    assert len(calls) == 1
+
+
+def test_view_image_downscales_large_square(tmp_path):
+    """线性计费回归：2048×2048 必须被缩放压缩（旧"瓦片数不变"逻辑会漏掉此尺寸）。"""
+    import base64
+    import io
+    import random
+    from PIL import Image, ImageDraw
+
+    p = tmp_path / "big.png"
+    img = Image.new("RGB", (2048, 2048), (240, 242, 245))
+    d = ImageDraw.Draw(img)
+    random.seed(7)
+    for _ in range(600):
+        x = random.randint(0, 1900)
+        y = random.randint(0, 1900)
+        d.rectangle([x, y, x + 120, y + 90],
+                    fill=(random.randint(60, 220),) * 3,
+                    outline=(180, 180, 180))
+    img.save(p)
+
+    runner = _runner()
+    llm = MockLLM([_view_call(str(p)), "done"])
+    llm.vision = True
+    runner.run(_match(tmp_path), tool_dispatch=llm)
+    multimodal = [m for m in llm.last_messages if isinstance(m.get("content"), list)]
+    urls = [part["image_url"]["url"] for part in multimodal[0]["content"]
+            if part.get("type") == "image_url"]
+    assert urls, "应注入多模态图片"
+    raw = base64.b64decode(urls[0].split(",", 1)[1])
+    out = Image.open(io.BytesIO(raw))
+    assert max(out.size) <= 1568, "2048×2048 应缩到 1568 上限"
+    tool_msgs = _tool_msgs(llm)
+    assert any(("压缩至" in m.get("content", "") or "缩放至" in m.get("content", ""))
+               for m in tool_msgs), "缩放后必须走压缩分支"
