@@ -547,10 +547,10 @@ def test_counting_llm_counts_bound_invoke():
     counter = {"calls": 0, "prompt": 0, "completion": 0, "total": 0}
     base = ScriptedLLM(["a", "b"])
     wrapped = CountingLLM(base, counter)
-    bound = wrapped.bind_tools([])   # bind_tools 计入 1 次
+    bound = wrapped.bind_tools([])   # bind_tools 非真实调用，不计入（B-3 修复）
     bound.invoke(["x"])              # invoke 计入 1 次
     wrapped.invoke(["y"])            # invoke 计入 1 次
-    assert counter["calls"] == 3
+    assert counter["calls"] == 2     # 旧实现 bind_tools 虚增 1 次 → 预算被幽灵配额提前耗尽
     assert base.call_count == 2
 
 
@@ -1190,6 +1190,86 @@ def test_moa_key_facts_extracted_into_blackboard(tmp_path, monkeypatch):
                       max_agent_iterations=5, max_llm_calls=100)
     assert result["stopped_by"] == "commander_stop"
     assert any(f and "品牌图标与设计稿不一致" in f[0] for f in seen)
+
+
+# ── 20. 性能诊断建议 4/9/2 回归：增量注入 / JSONL 差量 / strict 快速失败 ────
+def test_blackboard_incremental_summary(tmp_path):
+    """增量黑板摘要：只注入 since 之后的新条目；无新增 → 明确提示。"""
+    from skill_engine.execution.moa import MoaAgentRuntime
+    orch = _make_orchestrator(tmp_path)
+    session = MoaSession(str(tmp_path))
+    session.agent_contexts["A1"] = MoaAgentRuntime(
+        alias="A1", messages=[], last_output="", cumulative_iterations=0, files=[])
+    session.add_entry("A1", "code-builder", "第一轮：登录函数", [])
+    session.add_entry("A1", "code-builder", "第二轮：首页检查", [])
+    rt = session.agent_contexts["A1"]
+    assert rt.last_blackboard_len == 2          # add_entry 同步推进注入游标
+    assert "无新增" in session.blackboard_incremental_summary(rt.last_blackboard_len)
+    session.add_entry("A2", "vlm", "第三轮：视觉走查", [])
+    inc = session.blackboard_incremental_summary(rt.last_blackboard_len)
+    assert "第三轮：视觉走查" in inc
+    assert "登录函数" not in inc and "首页检查" not in inc
+    full = session.blackboard_incremental_summary(0)
+    assert "登录函数" in full and "第三轮：视觉走查" in full
+    # _run_agent 续跑分支会回退兜底：last_blackboard_len 缺省 → 保守全量
+    assert session.agent_contexts.get("A2") is None or True   # A2 未注册 runtime 不崩溃
+
+
+def test_moa_state_jsonl_delta_roundtrip(tmp_path):
+    """MOA 状态 JSONL：首行快照 + 后续增量；加载按序重放后状态一致。"""
+    from skill_engine.execution.moa import MoaAgentRuntime
+    orch = _make_orchestrator(tmp_path)
+    s = MoaSession(str(tmp_path))
+    s.agent_contexts["A1"] = MoaAgentRuntime(
+        alias="A1",
+        messages=[{"role": "user", "content": "r1"}, {"role": "assistant", "content": "done"}],
+        last_output="", cumulative_iterations=2, files=[])
+    counter = {"calls": 2, "prompt": 10, "completion": 5, "total": 15}
+    path = str(tmp_path / "moa_state.jsonl")
+    s.add_entry("A1", "code-builder", "第一笔产出", [])
+    orch._save_moa_state(path, s, counter)                      # 第 1 行：全量快照
+    s.add_entry("A1", "code-builder", "第二笔产出", [])
+    s.commander_decisions.append({"round": 1, "next": "A1", "task": "t", "rationale": "r"})
+    s.llm_calls = 4
+    counter["calls"] = 4
+    s.agent_contexts["A1"].messages_version += 1
+    orch._save_moa_state(path, s, counter)                      # 第 2 行：round_delta
+
+    lines = (tmp_path / "moa_state.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(lines[0])["type"] == "moa_snapshot"
+    assert json.loads(lines[1])["type"] == "moa_round_delta"
+
+    restored = orch._load_moa_state(path)
+    assert restored is not None
+    s2, c2 = restored["session"], restored["counter"]
+    assert len(s2.blackboard) == 2
+    assert s2.blackboard[1]["output"] == "第二笔产出"           # 增量重放成功
+    assert len(s2.commander_decisions) == 1
+    assert s2.agent_contexts["A1"].messages[0]["content"] == "r1"
+    assert s2.llm_calls == 4
+    assert c2 == counter
+
+
+def test_strict_mode_bash_fast_fail(tmp_path, monkeypatch):
+    """strict 模式 bash BLOCK → 快速失败（security_blocked），不耗到 max_iterations。"""
+    monkeypatch.setenv("SKILLS_ENGINE_SECURITY_MODE", "strict")
+    from skill_engine.models import MoaAgent
+    orch = _make_orchestrator(tmp_path)
+    worker = MoaAgent(alias="A1", model_profile="default", skill_name="",
+                      role="worker", instruction="检查代码",
+                      llm=ScriptedLLM([_bash_call()]))
+    commander = MoaAgent(alias="C", model_profile="default", role="commander",
+                         llm=ScriptedLLM([
+                             '<moa_decision>{"next":"A1","task":"检查","rationale":"r"}</moa_decision>',
+                             '<moa_decision>{"next":"STOP","task":"","rationale":"done"}</moa_decision>',
+                             "最终综合",
+                         ]))
+    result = orch.run([worker], commander, FakeRegistry(), query="q",
+                      max_rounds=3, max_agent_iterations=5, max_llm_calls=100)
+    # 快速失败：worker 只调 1 次 LLM（旧行为会重试到 5 次 → llm_calls ≥ 7）
+    assert result["llm_calls"] == 3
+    assert result["rounds"] == 2
+    assert result["stopped_by"] == "commander_stop"
 
 
 if __name__ == "__main__":

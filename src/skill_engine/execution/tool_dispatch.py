@@ -28,19 +28,75 @@ from skill_engine.execution.snapshot import FileSnapshot
 from skill_engine.execution.file_tracker import FileStateTracker
 from skill_engine.execution.paths import to_native_path
 from skill_engine.security.scanner import should_approve
-from skill_engine.config import TAVILY_API_KEY
+from skill_engine.config import TAVILY_API_KEY, llm_call_interval
 from langchain_core.tools import tool
 
 import re
 import json
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
 # bash 工具超时参数硬上限：测试/构建等长命令由 LLM 按需传 timeout，
 # 引擎守住上限，防止失控命令拖垮会话（P0 S0-4）。
 BASH_MAX_TIMEOUT = 600
+
+# IO 工具（read_file / search_files）并行执行的工作线程上限（性能诊断建议 8）。
+_IO_MAX_WORKERS = 4
+
+
+# ---------------------------------------------------------------------------
+# 性能诊断建议 6：bash 后文件登记选择性失效
+# ---------------------------------------------------------------------------
+# 引号包裹的 token，或裸的相对/盘符路径 token（要求含目录分隔符或形如
+# 盘符开头，避免把 "python"、"git" 等普通词误判为路径）。
+_PATH_TOKEN_RE = re.compile(
+    r"""(?:"(?P<dq>[^"]+)"|'(?P<sq>[^']+)')
+        |(?P<raw>(?:\.{1,2}[/\\]|[A-Za-z]:[/\\]|[\w.+-]+[/\\])[\w .\-@+()\[\]{}~#%'"\\]*)
+    """,
+    re.VERBOSE,
+)
+
+
+def _extract_cmd_paths(cmd: str, base_dir):
+    """从 bash 命令中尽力提取命令可能涉及的文件/目录路径（性能诊断建议 6）。
+
+    Returns:
+        list[Path]: 解析到且位于工作目录内的路径；token 含目录分隔符或
+            命令执行后路径真实存在（touch 新建等）才保留——引号包裹的普通
+            字符串（如 echo "hi"）不会误判成文件
+        None: 命令中提取不到任何路径 token → 影响面未知，调用方应保守
+            全量失效（invalidate_all，与旧行为一致）。
+    """
+    base = Path(base_dir).resolve()
+    tokens = []
+    saw_pathish = False   # 出现过「形似路径」的 token（含引号包裹或分隔符）
+    for m in _PATH_TOKEN_RE.finditer(cmd):
+        t = (m.group("dq") or m.group("sq") or m.group("raw") or "").strip()
+        if not t or t in (".", ".."):
+            continue
+        saw_pathish = True
+        # 含 .. 组件的 token（../../etc/hosts 等）：可能逃逸工作目录，直接跳过
+        if ".." in t.replace("\\", "/").split("/"):
+            continue
+        quoted = m.group("dq") is not None or m.group("sq") is not None
+        native = to_native_path(t)
+        p = Path(native) if Path(native).is_absolute() else (base / t)
+        try:
+            rp = p.resolve()
+            rp.relative_to(base)
+        except (OSError, ValueError):
+            continue
+        # 引号包裹的 token 一律保留（echo "x" > "out.txt" 的重定向目标靠它命中）；
+        # 裸 token 要求含分隔符或命令执行后真实存在（touch 新建等）。
+        if quoted or "/" in t or "\\" in t or rp.exists():
+            tokens.append(rp)
+    if not saw_pathish:
+        # 命令里压根没有路径形 token（echo hi / git status）→ 影响面未知，保守全失效
+        return None
+    return tokens
 
 
 # ---------------------------------------------------------------------------
@@ -914,10 +970,16 @@ class ToolDispatchRunner:
                 elif iterations > 1:
                     print()
 
-                # 上下文压缩：接近 token 预算时自动摘要压缩旧历史（保持首条与最近轮次）
-                ctx.maybe_compress(llm)
-
-                # 调用 LLM（带 rate limit 退避重试）
+                # 上下文压缩移到轮末执行（性能诊断建议 3）：本轮工具结果全部追加
+                # 完毕、下轮 invoke 之前压缩——旧实现在轮首，压缩对象滞后一轮，
+                # 且压缩本身抢在 LLM 调用前白白占用热路径。
+                # 每轮 LLM 调用之间的人为节流（性能诊断建议 1）：旧版无条件
+                # sleep(3) 拖慢所有会话；改为可配置（SKILLS_ENGINE_LLM_CALL_INTERVAL /
+                # config.yml settings.llm_call_interval），默认 0 = 关闭，
+                # 429 限流由上方指数退避兜底。测试环境下跳过（PYTEST_CURRENT_TEST）。
+                interval = llm_call_interval()
+                if interval > 0 and not os.environ.get("PYTEST_CURRENT_TEST"):
+                    time.sleep(interval)
                 resp = None
                 max_retries = 5
                 for attempt in range(max_retries):
@@ -945,11 +1007,6 @@ class ToolDispatchRunner:
                                      "iterations": iterations, "stopped_by": "error"},
                                 history=messages[:] if 'messages' in dir() else [],
                             )
-
-                # 每轮 LLM 调用之间加短暂延迟，降低触发 rate limit 的概率
-                # 测试环境下跳过人为节流，加速用例（PYTEST_CURRENT_TEST 由 pytest 自动设置）
-                if not os.environ.get("PYTEST_CURRENT_TEST"):
-                    time.sleep(3)
 
                 # 标准化 LLM 响应为 dict（兼容 LangChain AIMessage）。
                 # 关键：保留推理字段 reasoning_content —— 推理模型（DeepSeek-R1 /
@@ -1070,7 +1127,20 @@ class ToolDispatchRunner:
                 })
 
                 round_had_write = False
+                io_batch = []
                 for tc in tool_calls:
+                    # 性能诊断建议 8：read_file / search_files 是纯磁盘读、互不依赖、
+                    # 无副作用，入批并行执行（工作线程只做磁盘读/ripgrep，共享状态
+                    # 操作留在主线程）；遇到任何串行工具先 flush 批，保证工具消息
+                    # 严格按 tool_calls 顺序回灌（OpenAI 协议要求）。
+                    if tc["type"] == "read_file":
+                        io_batch.append(tc)
+                        continue
+                    if tc["type"] == "search_files":
+                        io_batch.append(tc)
+                        continue
+                    self._flush_io_batch(io_batch, messages, step_results, skill, base_dir)
+                    io_batch = []
                     if tc["type"] == "stop":
                         return RunResult(
                             output=tc["input"].get("reason", "stopped"),
@@ -1083,24 +1153,39 @@ class ToolDispatchRunner:
                         cmd = tc["input"].get("command", "")
                         decision, reason = should_approve(cmd, skill.directory, risk_hint="tool_dispatch")
                         if decision == "BLOCK":
+                            # 性能诊断建议 2（strict 快速失败）：BLOCK 只会出现在 strict
+                            # 模式下（LLM 侧 bash 一律不自动执行）。继续循环只会让模型一遍遍
+                            # 撞墙、空转耗尽迭代上限——直接终止本轮并明确告知原因。
                             logging.getLogger("skill_engine.tool_dispatch").warning(
-                                f"tool_dispatch bash 被安全拦截: {cmd[:80]}"
+                                f"tool_dispatch bash 被安全拦截（strict 快速失败）: {cmd[:80]}"
+                            )
+                            err = (
+                                "[安全拦截] 当前安全模式为 strict：LLM 发起的 bash 命令一律不自动执行。"
+                                "继续尝试 bash 只会耗尽迭代上限。请设置环境变量 "
+                                "SKILLS_ENGINE_SECURITY_MODE=permissive 后重试，"
+                                "或改用 read_file / write_file / edit_file / search_files 等文件工具。"
                             )
                             step_results.append({
                                 "name": f"bash_{tc['id']}",
                                 "type": "bash",
                                 "command": cmd,
                                 "output": "",
-                                "error": "[安全拦截] tool_dispatch 命令不自动执行",
+                                "error": err,
                             })
                             messages.append({
                                 "role": "tool",
                                 "tool_call_id": tc["id"],
                                 "name": "bash",
-                                "content": "[安全拦截] tool_dispatch 命令不自动执行",
+                                "content": err,
                             })
-                            print(f"     BLOCKED: {cmd[:80]}")
-                            continue
+                            print(f"     BLOCKED (strict 快速失败): {cmd[:80]}")
+                            return RunResult(
+                                output=err,
+                                ctx={"steps": step_results, "files_created": files_created,
+                                     "skill_name": skill.metadata.name,
+                                     "iterations": iterations, "stopped_by": "security_blocked"},
+                                history=messages,
+                            )
                         elif decision == "ATTENTION":
                             if self.approval_fn:
                                 approved = self.approval_fn(
@@ -1137,8 +1222,15 @@ class ToolDispatchRunner:
                         try:
                             base_dir = self.working_root or Path(skill.directory)
                             exec_result = self.executor.run_step(cmd, cwd=base_dir, timeout=exec_timeout)
-                            # P0(S0-1)：bash 可能改过任何文件 → 保守失效文件读取登记
-                            self._file_tracker.invalidate_all()
+                            # 性能诊断建议 6：bash 可能改过文件 → 按命令中实际出现的路径
+                            # 选择性失效（文件级/目录级），未涉及的登记保留，消除「每次
+                            # bash 后全部文件回到未读」的迭代放大；无法提取路径 token 时
+                            # 保守全失效（与旧行为一致，如 echo hi）。
+                            touched = _extract_cmd_paths(cmd, base_dir)
+                            if touched is None:
+                                self._file_tracker.invalidate_all()
+                            else:
+                                self._file_tracker.invalidate_paths(touched)
                             obs = format_observation(cmd, exec_result)
                             step_results.append({
                                 "name": f"bash_{tc['id']}",
@@ -1171,94 +1263,8 @@ class ToolDispatchRunner:
                             print(f"     ERROR: {e}")
 
                     elif tc["type"] == "read_file":
-                        filepath = tc["input"].get("path", "")
-                        offset = int(tc["input"].get("offset", 0))
-                        limit = int(tc["input"].get("limit", 0))
-                        force_refresh = bool(tc["input"].get("force_refresh", False))
-
-                        # 安全门（只查路径，strict 不 BLOCK）
-                        approved, err_msg = self._check_file_safety("read", filepath, skill)
-                        if not approved:
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc["id"],
-                                "name": "read_file",
-                                "content": err_msg,
-                            })
-                            print(f"     {err_msg}")
-                            continue
-
-                        # 解析路径
-                        base_dir = self.working_root or Path(skill.directory)
-                        full_path = _resolve_path(filepath, base_dir)
-
-                        # read 去重缓存：同一会话同区间已读且文件未变 → 命中提示，
-                        # 不再重读（打断「读-压缩-遗忘-重读」循环）
-                        if (not force_refresh and self._file_tracker is not None):
-                            hit = self._file_tracker.cache_lookup(full_path, offset, limit)
-                            if hit is not None:
-                                lo, hi = hit["start"], hit["end"]
-                                where = ("全文" if hit["full"] else
-                                         f"第 {lo + 1}-{hi} 行")
-                                note = (
-                                    f"[read_file 缓存命中] {filepath} {where} 已在本会话早前"
-                                    f"读取过且文件未被修改，内容见上文历史。"
-                                    f"若上文内容已不可见，请带 force_refresh=true 重新调用以获取完整内容。"
-                                )
-                                step_results.append({
-                                    "name": f"read_{tc['id']}",
-                                    "type": "read_file",
-                                    "path": str(full_path),
-                                    "output": note[:1000],
-                                })
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tc["id"],
-                                    "name": "read_file",
-                                    "content": note,
-                                })
-                                self._emit_tool(f"read_file {filepath} (缓存命中 {where})")
-                                continue
-
-                        try:
-                            content = full_path.read_text(encoding="utf-8")
-                            # P0(S0-1)：登记"已读版本"，供后续 edit 一致性校验
-                            self._file_tracker.on_read(full_path)
-                            formatted = _read_file_with_lines(content, offset, limit)
-                            self._file_tracker.cache_read(
-                                full_path, offset, limit,
-                                len(content.splitlines()), formatted)
-                            step_results.append({
-                                "name": f"read_{tc['id']}",
-                                "type": "read_file",
-                                "path": str(full_path),
-                                "output": formatted[:1000],
-                            })
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc["id"],
-                                "name": "read_file",
-                                "content": self._truncate_msg(formatted),
-                            })
-                            # 步骤 2：原只打 "read N chars"，现展示真实文件内容（超长截断）
-                            self._emit_tool(f"read_file {filepath}")
-                            self._emit_result(self._truncate_msg(formatted, max_chars=800))
-                        except FileNotFoundError:
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc["id"],
-                                "name": "read_file",
-                                "content": f"[文件不存在: {filepath}]",
-                            })
-                            print(f"     FILE NOT FOUND: {filepath}")
-                        except Exception as e:
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc["id"],
-                                "name": "read_file",
-                                "content": f"[读取失败: {e}]",
-                            })
-                            print(f"     ERROR: {e}")
+                        # 已在上方批入 io_batch 并行执行（性能诊断建议 8），此分支不可达
+                        pass
 
                     elif tc["type"] == "view_image":
                         filepath = tc["input"].get("path", "")
@@ -1592,54 +1598,8 @@ class ToolDispatchRunner:
                             print(f"     ERROR: {e}")
 
                     elif tc["type"] == "search_files":
-                        pattern = tc["input"].get("pattern", "")
-                        search_path = tc["input"].get("path", ".")
-                        file_glob = tc["input"].get("file_glob", "")
-                        if not pattern:
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc["id"],
-                                "name": "search_files",
-                                "content": "error: pattern 不能为空",
-                            })
-                            continue
-                        base_dir = self.working_root or Path(skill.directory)
-                        search_dir = _resolve_path(search_path, base_dir)
-                        if not search_dir.exists():
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc["id"],
-                                "name": "search_files",
-                                "content": f"[路径不存在: {search_path}]",
-                            })
-                            continue
-                        try:
-                            # P0(S0-2)：ripgrep 优先（gitignore-aware），无 rg 自动回退纯 Python
-                            max_results_req = int(tc["input"].get("max_results", 0) or 0)
-                            result = _search_files(pattern, search_dir, file_glob, max_results_req)
-                            n_matches = 0 if result == "no matches found" else result.count("\n") + 1
-                            step_results.append({
-                                "name": f"search_{tc['id']}",
-                                "type": "search_files",
-                                "pattern": pattern,
-                                "path": str(search_dir),
-                                "matches": n_matches,
-                            })
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc["id"],
-                                "name": "search_files",
-                                "content": self._truncate_msg(result),
-                            })
-                            print(f"     search '{pattern}' in {search_dir}: {n_matches} matches")
-                        except Exception as e:
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tc["id"],
-                                "name": "search_files",
-                                "content": f"[搜索失败: {e}]",
-                            })
-                            print(f"     ERROR: {e}")
+                        # 已在上方批入 io_batch 并行执行（性能诊断建议 8），此分支不可达
+                        pass
 
                     elif tc["type"] == "web_search":
                         query = tc["input"].get("query", "")
@@ -1824,6 +1784,14 @@ class ToolDispatchRunner:
                     else:
                         print("     verify passed")
 
+                # 收尾：flush 批内剩余的 IO 结果（工具消息顺序与 tool_calls 对齐）
+                self._flush_io_batch(io_batch, messages, step_results, skill, base_dir)
+
+                # 上下文压缩移到轮末（性能诊断建议 3）：本轮全部工具结果已追加完毕、
+                # 即将进入下一轮 invoke——轮首压缩的旧实现压缩对象滞后一轮，且压缩
+                # 抢在 LLM 调用前占热路径。
+                ctx.maybe_compress(llm)
+
         # 达到最大迭代次数
             result = RunResult(
                 output="[达到最大迭代次数]",
@@ -1839,11 +1807,171 @@ class ToolDispatchRunner:
                                  final_prompt, session_mode)
         return result
 
+    # ---------------- 性能诊断建议 8：IO 工具并行执行 ----------------
+
+    def _flush_io_batch(self, io_batch, messages, step_results, skill, base_dir):
+        """并行执行 IO 工具批（read_file / search_files）。
+
+        IO 工具是纯磁盘读、互不依赖、无副作用，可并行；安全门、路径解析、
+        read 缓存、tracker 登记、消息回灌等共享状态操作留在主线程，工作线程
+        只做真正的磁盘读取/ripgrep 搜索。结果严格按 tool_calls 顺序回灌，
+        保证 OpenAI 协议消息顺序不变。串行工具（bash/write/edit/...）执行前
+        必须调用本方法。
+        """
+        if not io_batch:
+            return
+        base = base_dir or Path(skill.directory)
+        prepared = []   # (kind, tc, payload)：主线程预处理后的批项
+        for tc in io_batch:
+            inp = tc["input"]
+            if tc["type"] == "read_file":
+                filepath = inp.get("path", "")
+                approved, err_msg = self._check_file_safety("read", filepath, skill)
+                if not approved:
+                    prepared.append(("deny", tc, err_msg))
+                    continue
+                full_path = _resolve_path(filepath, base)
+                offset = int(inp.get("offset", 0))
+                limit = int(inp.get("limit", 0))
+                force_refresh = bool(inp.get("force_refresh", False))
+                if not force_refresh and self._file_tracker is not None:
+                    hit = self._file_tracker.cache_lookup(full_path, offset, limit)
+                    if hit is not None:
+                        prepared.append(("cache_hit", tc, (full_path, hit, filepath)))
+                        continue
+                prepared.append(("read", tc, (full_path, offset, limit, filepath)))
+            elif tc["type"] == "search_files":
+                pattern = inp.get("pattern", "")
+                search_path = inp.get("path", ".")
+                file_glob = inp.get("file_glob", "")
+                if not pattern:
+                    prepared.append(("deny", tc, "error: pattern 不能为空"))
+                    continue
+                search_dir = _resolve_path(search_path, base)
+                if not search_dir.exists():
+                    prepared.append(("deny", tc, f"[路径不存在: {search_path}]"))
+                    continue
+                prepared.append(("search", tc,
+                                 (pattern, search_dir, file_glob,
+                                  int(inp.get("max_results", 0) or 0))))
+
+        # 工作线程只做磁盘读/搜索（纯函数，无共享状态）
+        def _worker(item):
+            kind = item[0]
+            payload = item[2]
+            try:
+                if kind == "read":
+                    full_path = payload[0]
+                    return ("read", payload, full_path.read_text(encoding="utf-8"))
+                if kind == "search":
+                    pattern, search_dir, file_glob, max_results_req = payload
+                    return ("search", payload,
+                            _search_files(pattern, search_dir, file_glob, max_results_req))
+            except FileNotFoundError:
+                return ("err", payload, f"[文件不存在: {payload[3]}]")
+            except Exception as e:
+                return ("err", payload, f"[读取失败: {e}]")
+            return ("err", payload, "[未知错误]")
+
+        to_run = [it for it in prepared if it[0] in ("read", "search")]
+        outcomes = []
+        if to_run:
+            with ThreadPoolExecutor(max_workers=min(_IO_MAX_WORKERS, len(to_run))) as pool:
+                outcomes = list(pool.map(_worker, to_run))
+        run_iter = iter(outcomes)
+
+        for item in prepared:
+            kind = item[0]
+            tc = item[1]
+            payload = item[2]
+            if kind == "deny":
+                messages.append({
+                    "role": "tool", "tool_call_id": tc["id"],
+                    "name": tc["type"], "content": payload,
+                })
+                print(f"     {payload}")
+                continue
+            if kind == "cache_hit":
+                full_path, hit, filepath = payload
+                lo, hi = hit["start"], hit["end"]
+                where = ("全文" if hit["full"] else f"第 {lo + 1}-{hi} 行")
+                note = (
+                    f"[read_file 缓存命中] {filepath} {where} 已在本会话早前"
+                    f"读取过且文件未被修改，内容见上文历史。"
+                    f"若上文内容已不可见，请带 force_refresh=true 重新调用以获取完整内容。"
+                )
+                step_results.append({
+                    "name": f"read_{tc['id']}",
+                    "type": "read_file",
+                    "path": str(full_path),
+                    "output": note[:1000],
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "name": "read_file",
+                    "content": note,
+                })
+                self._emit_tool(f"read_file {filepath} (缓存命中 {where})")
+                continue
+            out = next(run_iter)
+            if out[0] == "err":
+                messages.append({
+                    "role": "tool", "tool_call_id": tc["id"],
+                    "name": tc["type"], "content": out[2],
+                })
+                print(f"     {out[2]}")
+                continue
+            _, out_payload, content = out
+            if kind == "read":
+                full_path, offset, limit, filepath = out_payload
+                # P0(S0-1)：登记"已读版本"，供后续 edit 一致性校验
+                self._file_tracker.on_read(full_path)
+                formatted = _read_file_with_lines(content, offset, limit)
+                self._file_tracker.cache_read(
+                    full_path, offset, limit, len(content.splitlines()), formatted)
+                step_results.append({
+                    "name": f"read_{tc['id']}",
+                    "type": "read_file",
+                    "path": str(full_path),
+                    "output": formatted[:1000],
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "name": "read_file",
+                    "content": self._truncate_msg(formatted),
+                })
+                self._emit_tool(f"read_file {filepath}")
+                self._emit_result(self._truncate_msg(formatted, max_chars=800))
+            elif kind == "search":
+                pattern, search_dir, file_glob, max_results_req = out_payload
+                result = content
+                n_matches = 0 if result == "no matches found" else result.count("\n") + 1
+                step_results.append({
+                    "name": f"search_{tc['id']}",
+                    "type": "search_files",
+                    "pattern": pattern,
+                    "path": str(search_dir),
+                    "matches": n_matches,
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "name": "search_files",
+                    "content": self._truncate_msg(result),
+                })
+                print(f"     search '{pattern}' in {search_dir}: {n_matches} matches")
+
     # ---------------- P2-3：todo 落盘续跑（状态持久化） ----------------
 
     def _save_state(self, path, messages, iterations, step_results, files_created,
                     final_prompt, session_mode: bool = False):
-        """将运行状态落盘为 JSON，供后续 resume_from 续跑。失败静默。
+        """将运行状态落盘为 append-only JSONL（性能诊断建议 9）。
+
+        每次调用追加一行完整快照（type=snapshot）。JSONL 天然防半写损坏：
+        崩溃/中断只损失最后一行，之前的历史快照仍可续跑；加载侧取最后一行。
+        旧版单 JSON 整文件覆写（一次崩溃即全损）自动迁移兼容。
 
         session_mode 一并落盘：session 产生的历史含 ask_user 交互与多轮用户指令，
         若被普通 run --resume-from 载入，行为语义不同（无 ask_user 工具、
@@ -1853,6 +1981,7 @@ class ToolDispatchRunner:
             p = Path(path)
             p.parent.mkdir(parents=True, exist_ok=True)
             state = {
+                "type": "snapshot",
                 "final_prompt": final_prompt,
                 "messages": messages,
                 "iterations": iterations,
@@ -1860,17 +1989,25 @@ class ToolDispatchRunner:
                 "files_created": files_created,
                 "session_mode": session_mode,
             }
-            p.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+            with p.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(state, ensure_ascii=False) + "\n")
         except Exception:
             # 状态持久化失败绝不影响主执行流程
             pass
 
     def _load_state(self, path):
-        """读取状态文件；不存在或损坏返回 None。"""
+        """读取状态文件；不存在或损坏返回 None。
+
+        JSONL（append-only）：取最后一行的完整快照；兼容旧版单 JSON 对象。
+        """
         try:
             p = Path(path)
             if not p.exists():
                 return None
-            return json.loads(p.read_text(encoding="utf-8"))
+            text = p.read_text(encoding="utf-8")
+            if "\n" in text.strip():
+                last_line = [ln for ln in text.splitlines() if ln.strip()][-1]
+                return json.loads(last_line)
+            return json.loads(text)
         except Exception:
             return None

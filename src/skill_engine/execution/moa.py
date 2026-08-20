@@ -97,6 +97,13 @@ class MoaAgentRuntime:
     last_output: str = ""
     cumulative_iterations: int = 0
     files: list[str] = field(default_factory=list)
+    # 性能诊断建议 4：该 agent 上次行动时黑板的条目数——续跑注入只用
+    # 「此后新增」的增量，不再整块黑板重灌（黑板随轮次线性增长，全量注入
+    # 会让跨轮私有上下文二次方膨胀，连 L1/L2 压缩都追不上）。
+    last_blackboard_len: int = 0
+    # 私有 messages 的版本号：每次 _run_agent 回写 result.history 递增一次，
+    # 供状态差量落盘（JSONL round_delta）判断「哪些 agent 上下文本轮变了」。
+    messages_version: int = 0
 
 
 class MoaSession:
@@ -153,6 +160,11 @@ class MoaSession:
             "key_facts": list(key_facts or []),
         })
         self.action_counts[alias] = self.action_counts.get(alias, 0) + 1
+        # 性能诊断建议 4：行动完成 → 记录该 agent 已见到的黑板长度，
+        # 下次派活时只注入此后的增量。
+        rt = self.agent_contexts.get(alias)
+        if rt is not None:
+            rt.last_blackboard_len = len(self.blackboard)
 
     def last_entry_hash(self) -> int:
         """最近一笔产出的指纹，用于「无进展」检测。
@@ -188,6 +200,35 @@ class MoaSession:
             return "（尚无任何 agent 产出）"
         lines = []
         for i, e in enumerate(self.blackboard, 1):
+            out = e["output"] or "（无文本产出）"
+            if len(out) > max_each:
+                out = out[:max_each] + f" …(截断，共 {len(e['output'])} 字)"
+            files = ("；文件: " + ", ".join(e["files"])) if e.get("files") else ""
+            status_tag = _status_tag(e)
+            head = f"### 第 {i} 步 · {e['alias']}（skill={e['skill']}）{status_tag}"
+            fl = self._facts_line(e)
+            lines.append(f"{head}\n{fl}\n{out}{files}" if fl else f"{head}\n{out}{files}")
+        return "\n\n".join(lines)
+
+    def blackboard_incremental_summary(self, since: int, max_each: int = 5000) -> str:
+        """黑板增量摘要：只注入「自该 agent 上次行动之后」的新增产出。
+
+        性能诊断建议 4：跨轮私有上下文不再整块黑板重灌——黑板随轮次线性增长，
+        全量注入让每个 worker 的历史二次方膨胀（连 L1/L2 压缩都追不上）。
+        该 agent 已见部分（含自己的产出）在其私有 messages 里，无需重灌；
+        无新增时给一行明确提示，避免模型误以为协作上下文丢失。
+
+        since == 0（或越界）→ 等效全量（首轮/异常情况的安全兜底）。
+        """
+        total = len(self.blackboard)
+        if not total:
+            return "（尚无任何 agent 产出）"
+        since = max(0, min(int(since or 0), total))
+        new_entries = self.blackboard[since:]
+        if not new_entries:
+            return "（自你上次行动以来，黑板无新增条目）"
+        lines = []
+        for i, e in enumerate(new_entries, since + 1):
             out = e["output"] or "（无文本产出）"
             if len(out) > max_each:
                 out = out[:max_each] + f" …(截断，共 {len(e['output'])} 字)"
@@ -398,6 +439,11 @@ class MoaOrchestrator:
         self.verbose = verbose
         self._router = None                     # 懒构建（worker 自动匹配 skill 用）
         self._auto_skill_cache: dict[str, str] = {}  # alias → 自动匹配到的 skill 名
+        # JSONL 差量落盘游标（性能诊断建议 9）：记录最近一次 _save_moa_state
+        # 时黑板/决策轨迹的长度与各 agent 上下文的版本，据此只写「本轮新增」。
+        self._moa_saved_bb_len = 0
+        self._moa_saved_dec_len = 0
+        self._moa_saved_agent_versions: dict[str, int] = {}
         # verbose 时把引擎内部诊断（决策解析、闸触发、worker 起止）打到 stderr，
         # 不影响 _emit 的用户进度通道；无 handler 时挂一个一次性 StreamHandler。
         if verbose:
@@ -595,10 +641,12 @@ class MoaOrchestrator:
         if actx.messages:
             # 续跑：该 agent 已有跨轮私有历史，新轮作为一条 user 消息追加，
             # 整体作为 initial_messages 交给 run()，由其复用自身记忆。
+            # 黑板只注入「自上次行动以来的增量」（性能诊断建议 4），旧条目
+            # 已在私有历史里，避免跨轮二次方膨胀。
             composed = (
                 f"## 指挥官在第 {round_no} 轮指派给你的新任务\n{task}\n\n"
                 f"## 需要你知晓的协作上下文（其他 agent 的产出，非其私有历史）\n"
-                f"{session.blackboard_summary()}\n"
+                f"{session.blackboard_incremental_summary(actx.last_blackboard_len)}\n"
                 + FACTS_PROMPT_HINT
             )
             initial_messages = actx.messages
@@ -638,6 +686,7 @@ class MoaOrchestrator:
         # —— 回写私有上下文（result.history 已被 run 内部 ContextManager 压缩过）——
         # 下次再派该 agent 时，它即可从这份历史里"记得上次做了啥"。
         actx.messages = list(result.history)
+        actx.messages_version += 1
         # 轮末 eager L1：立即折掉超出 keep_recent 的旧轮大 tool 输出与旧轮思考，
         # 私有上下文保持"干净态"（落盘精简 / 下次续跑无需重复折叠）。
         _eager_fold_old_rounds(actx.messages)
@@ -854,6 +903,7 @@ class MoaOrchestrator:
                 if isinstance(c_text, (list, dict)):
                     c_text = str(c_text)
                 c_ctx.messages.append({"role": "assistant", "content": c_text})
+                c_ctx.messages_version += 1
                 c_ctx.last_output = c_text
             except Exception as e:
                 stopped_by = "commander_error"
@@ -1006,67 +1056,179 @@ class MoaOrchestrator:
         }
 
     # ── Phase 3：MOA 级状态持久化（崩溃续跑） ──────────────────────────────
+    # 性能诊断建议 9：append-only JSONL，行类型两种——
+    #   moa_snapshot   全量状态（新文件首行 / 每 4 行一次），可独立续跑；
+    #   moa_round_delta 本轮增量（黑板新增条目、决策新增、计数器、变更过的
+    #                   agent 私有上下文），挂在最近一个 snapshot 之上重放。
+    # 每轮落盘成本 = O(本轮新增内容)，而非旧版的 O(全量累积状态)（黑板/历史
+    # 随轮次增长，整文件覆写让每轮写入成本二次方放大）。append-only 还天然
+    # 防半写损坏：崩溃最多损失最后一行；超过 8MB 压缩为单行快照。
+    # 兼容旧版单 JSON 整文件覆写格式（无换行 → 按单 snapshot 处理）。
+
+    _MOA_STATE_COMPACT_BYTES = 8 * 1024 * 1024
+
+    def _moa_runtime_dict(self, rt: "MoaAgentRuntime") -> dict:
+        return {
+            "alias": rt.alias,
+            "messages": rt.messages,
+            "last_output": rt.last_output,
+            "cumulative_iterations": rt.cumulative_iterations,
+            "files": rt.files,
+            "last_blackboard_len": rt.last_blackboard_len,
+            "messages_version": rt.messages_version,
+        }
+
     def _save_moa_state(self, path: str, session: "MoaSession", counter: dict) -> None:
-        """将整轮 MOA 协作状态落盘为 JSON，供后续 --resume-from 续跑。
+        """将 MOA 协作状态追加落盘为 append-only JSONL，供 --resume-from 续跑。
 
-        持久化内容（均为 JSON 可序列化）：各 agent 私有上下文（messages /
-        last_output / 累计迭代 / 产出文件）、黑板、指挥官决策轨迹、轮次与防死循环
-        计数器、以及 LLM 成本计数器（续跑预算连续计数）。
-
-        注意：snapshot / file_tracker 是运行时对象（文件已在 working_root 落盘），
-        不序列化；续跑时 MoaSession.__init__ 重建即可，磁盘文件天然可见。
+        每轮调用追加一行：新文件首行与每第 4 行写全量 snapshot，其余写本轮
+        round_delta（黑板/决策增量 + 变更过的 agent 上下文 + 计数器）。
         失败静默，绝不拖垮主执行流程。
         """
         try:
             p = Path(path)
             p.parent.mkdir(parents=True, exist_ok=True)
-            state = {
-                "version": 1,
-                "round": session.round,
-                "llm_calls": session.llm_calls,
-                "last_agent_alias": session.last_agent_alias,
-                "same_agent_streak": session.same_agent_streak,
-                "prev_blackboard_hash": session.prev_blackboard_hash,
-                "no_progress_streak": session.no_progress_streak,
-                "action_counts": session.action_counts,
-                "blackboard": session.blackboard,
-                "commander_decisions": session.commander_decisions,
-                "agent_contexts": {
-                    alias: {
-                        "alias": rt.alias,
-                        "messages": rt.messages,
-                        "last_output": rt.last_output,
-                        "cumulative_iterations": rt.cumulative_iterations,
-                        "files": rt.files,
-                    }
+            existing = p.read_text(encoding="utf-8").strip() if p.exists() else ""
+            had_snapshot = "moa_snapshot" in existing
+            line_count = existing.count("\n") + 1 if existing else 0
+            take_snapshot = not had_snapshot or line_count % 4 == 0
+            if take_snapshot:
+                line = {"type": "moa_snapshot", "version": 1, **self._moa_full_dict(session, counter)}
+                # 快照后同步差量游标：下一次落盘从快照状态往后写增量
+                self._moa_saved_bb_len = len(session.blackboard)
+                self._moa_saved_dec_len = len(session.commander_decisions)
+                self._moa_saved_agent_versions = {
+                    alias: rt.messages_version
                     for alias, rt in session.agent_contexts.items()
-                },
-                "counter": {
-                    "calls": counter.get("calls", 0),
-                    "prompt": counter.get("prompt", 0),
-                    "completion": counter.get("completion", 0),
-                    "total": counter.get("total", 0),
-                },
-            }
-            p.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+                }
+            else:
+                line = {"type": "moa_round_delta", "round": session.round,
+                        **self._moa_delta_dict(session, counter)}
+            with p.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+            if p.stat().st_size > self._MOA_STATE_COMPACT_BYTES:
+                # 越界防护：重写为单行全量快照（一次性代价，换回 O(1) 读取）
+                p.write_text(json.dumps(
+                    {"type": "moa_snapshot", "version": 1,
+                     **self._moa_full_dict(session, counter)},
+                    ensure_ascii=False) + "\n", encoding="utf-8")
         except Exception:
             # 状态持久化失败绝不影响主执行流程
             pass
 
+    def _moa_full_dict(self, session: "MoaSession", counter: dict) -> dict:
+        """全量快照 dict（agent 上下文含 messages 全量）。"""
+        return {
+            "round": session.round,
+            "llm_calls": session.llm_calls,
+            "last_agent_alias": session.last_agent_alias,
+            "same_agent_streak": session.same_agent_streak,
+            "prev_blackboard_hash": session.prev_blackboard_hash,
+            "no_progress_streak": session.no_progress_streak,
+            "action_counts": session.action_counts,
+            "blackboard": session.blackboard,
+            "commander_decisions": session.commander_decisions,
+            "agent_contexts": {
+                alias: self._moa_runtime_dict(rt)
+                for alias, rt in session.agent_contexts.items()
+            },
+            "counter": {
+                "calls": counter.get("calls", 0),
+                "prompt": counter.get("prompt", 0),
+                "completion": counter.get("completion", 0),
+                "total": counter.get("total", 0),
+            },
+        }
+
+    def _moa_delta_dict(self, session: "MoaSession", counter: dict) -> dict:
+        """本轮差量 dict：只带自上次落盘以来的新增内容。"""
+        bb, dec = session.blackboard, session.commander_decisions
+        bb_from = max(0, min(self._moa_saved_bb_len, len(bb)))
+        dec_from = max(0, min(self._moa_saved_dec_len, len(dec)))
+        changed = {}
+        for alias, rt in session.agent_contexts.items():
+            if self._moa_saved_agent_versions.get(alias, -1) < rt.messages_version:
+                changed[alias] = self._moa_runtime_dict(rt)
+        self._moa_saved_bb_len = len(bb)
+        self._moa_saved_dec_len = len(dec)
+        for alias, rt in session.agent_contexts.items():
+            self._moa_saved_agent_versions[alias] = rt.messages_version
+        return {
+            "blackboard_from": bb_from,
+            "blackboard_new": bb[bb_from:],
+            "decisions_from": dec_from,
+            "decisions_new": dec[dec_from:],
+            "llm_calls": session.llm_calls,
+            "last_agent_alias": session.last_agent_alias,
+            "same_agent_streak": session.same_agent_streak,
+            "no_progress_streak": session.no_progress_streak,
+            "prev_blackboard_hash": session.prev_blackboard_hash,
+            "action_counts": session.action_counts,
+            "agent_contexts": changed,
+            "counter": {
+                "calls": counter.get("calls", 0),
+                "prompt": counter.get("prompt", 0),
+                "completion": counter.get("completion", 0),
+                "total": counter.get("total", 0),
+            },
+        }
+
     def _load_moa_state(self, path: str):
         """读取 MOA 状态文件；不存在 / 损坏 → 返回 None。
 
+        兼容三种形态：
+        - 新版 JSONL：最后一行 moa_snapshot + 其后按序重放 moa_round_delta；
+        - 旧版单 JSON 对象（无换行）：直接作为快照；
+        重建的 session 复用当前 working_root（磁盘文件天然可见）。
         Returns: {"session": MoaSession, "counter": dict} 或 None。
-        重建的 session 复用当前 working_root（磁盘文件天然可见），prev_blackboard_hash
-        因 last_entry_hash 已确定性化，直接载入即可与现场重新计算的指纹对齐。
         """
         try:
             p = Path(path)
             if not p.exists():
                 return None
-            state = json.loads(p.read_text(encoding="utf-8"))
+            lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            if not lines:
+                return None
         except Exception:
             return None
+
+        last_snapshot_idx = -1
+        for i, ln in enumerate(lines):
+            try:
+                obj = json.loads(ln)
+            except Exception:
+                continue
+            if obj.get("type") == "moa_snapshot":
+                last_snapshot_idx = i
+        if last_snapshot_idx < 0:
+            try:
+                state = json.loads(lines[-1])   # 旧版单 JSON / 退化兜底
+            except Exception:
+                return None
+        else:
+            state = json.loads(lines[last_snapshot_idx])
+            # 按序重放快照之后的 round_delta（黑板书/决策/计数器/agent 上下文）
+            for ln in lines[last_snapshot_idx + 1:]:
+                try:
+                    d = json.loads(ln)
+                except Exception:
+                    continue
+                if d.get("type") != "moa_round_delta":
+                    continue
+                bb_from = d.get("blackboard_from", len(state.get("blackboard", [])))
+                state["blackboard"] = (state.get("blackboard", []) or [])[:bb_from] \
+                    + (d.get("blackboard_new") or [])
+                dec_from = d.get("decisions_from", len(state.get("commander_decisions", [])))
+                state["commander_decisions"] = (state.get("commander_decisions", []) or [])[:dec_from] \
+                    + (d.get("decisions_new") or [])
+                for k in ("llm_calls", "last_agent_alias", "same_agent_streak",
+                          "no_progress_streak", "prev_blackboard_hash", "action_counts"):
+                    if k in d:
+                        state[k] = d[k]
+                if d.get("counter"):
+                    state["counter"] = d["counter"]
+                for alias, rt in (d.get("agent_contexts") or {}).items():
+                    state.setdefault("agent_contexts", {})[alias] = rt
 
         session = MoaSession(self.working_root)
         session.round = state.get("round", 0)
@@ -1080,12 +1242,19 @@ class MoaOrchestrator:
         session.commander_decisions = state.get("commander_decisions", []) or []
         agent_contexts = {}
         for alias, rt in (state.get("agent_contexts", {}) or {}).items():
+            # last_blackboard_len 缺失（旧版状态文件）→ 保守回退「已见除最后一笔
+            # 外的全部」，保证续跑 agent 不会漏掉他人最新的产出。
+            last_bb = rt.get("last_blackboard_len")
+            if last_bb is None:
+                last_bb = max(0, len(session.blackboard) - 1)
             agent_contexts[alias] = MoaAgentRuntime(
                 alias=rt.get("alias", alias),
                 messages=rt.get("messages", []) or [],
                 last_output=rt.get("last_output", ""),
                 cumulative_iterations=rt.get("cumulative_iterations", 0),
                 files=rt.get("files", []) or [],
+                last_blackboard_len=int(last_bb),
+                messages_version=int(rt.get("messages_version", 0)),
             )
         session.agent_contexts = agent_contexts
         counter = state.get("counter", {}) or {}
@@ -1094,5 +1263,11 @@ class MoaOrchestrator:
             "prompt": counter.get("prompt", 0),
             "completion": counter.get("completion", 0),
             "total": counter.get("total", 0),
+        }
+        # 同步差量游标：续跑后的第一笔落盘从「已恢复状态」往后写增量
+        self._moa_saved_bb_len = len(session.blackboard)
+        self._moa_saved_dec_len = len(session.commander_decisions)
+        self._moa_saved_agent_versions = {
+            alias: rt.messages_version for alias, rt in session.agent_contexts.items()
         }
         return {"session": session, "counter": counter}

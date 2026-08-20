@@ -88,6 +88,7 @@ _SETTINGS_ENV_MAP = {
     "auto_approve": "SKILLS_ENGINE_AUTO_APPROVE",
     "allowlist": "SKILLS_ENGINE_ALLOWLIST",
     "context_budget": "SKILLS_ENGINE_CONTEXT_BUDGET",
+    "llm_call_interval": "SKILLS_ENGINE_LLM_CALL_INTERVAL",
     "mcp_config": "SKILL_ENGINE_MCP_CONFIG",
     "tavily_api_key": "TAVILY_API_KEY",
     "vault_path": "VAULT_PATH",
@@ -515,3 +516,17 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 def get_security_mode() -> str:
     """获取当前安全模式（每次读环境变量，不缓存）"""
     return os.getenv("SKILLS_ENGINE_SECURITY_MODE", "strict").strip().lower()
+
+
+def llm_call_interval() -> float:
+    """每次 LLM 调用之间的人为节流间隔（秒），默认 0 = 关闭。
+
+    旧版无条件 sleep(3)（性能诊断 P0-1）。429 限流已有独立指数退避兜底，
+    固定节流不再默认叠加；需要保守节流时通过
+    SKILLS_ENGINE_LLM_CALL_INTERVAL（或 config.yml settings.llm_call_interval）设置。
+    """
+    try:
+        v = float(os.getenv("SKILLS_ENGINE_LLM_CALL_INTERVAL", "") or 0)
+        return max(0.0, v)
+    except ValueError:
+        return 0.0

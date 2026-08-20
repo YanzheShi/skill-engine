@@ -531,7 +531,12 @@ class Runner:
                 p = _P(path)
                 if not p.exists():
                     return None
-                return json.loads(p.read_text(encoding="utf-8"))
+                text = p.read_text(encoding="utf-8")
+                # JSONL（append-only 快照，性能诊断建议 9）：取最后一行的完整快照
+                if "\n" in text.strip():
+                    last_line = [ln for ln in text.splitlines() if ln.strip()][-1]
+                    return json.loads(last_line)
+                return json.loads(text)   # 兼容旧版单 JSON 对象
             except Exception:
                 return None
 
@@ -819,14 +824,15 @@ class Runner:
                 user_cmd = hio.read(prompt=f"│ {skill.metadata.name} > ")
                 # 终端无关的元命令：解决 input() 回退时多行粘贴被按行拆分的问题
                 if user_cmd.startswith(":load "):
-                    loaded = _load_file_as_paste(user_cmd[6:].strip(), os.path.join(wr, "pastes"))
+                    loaded = _load_file_as_paste(user_cmd[6:].strip(),
+                                                 os.path.join(session.working_root, "pastes"))
                     if loaded.startswith("[session] :load 失败"):
                         print(loaded)
                         iteration -= 1
                         continue
                     user_cmd = loaded
                 elif user_cmd.strip() == ":paste":
-                    pasted = _capture_paste(hio, os.path.join(wr, "pastes"))
+                    pasted = _capture_paste(hio, os.path.join(session.working_root, "pastes"))
                     if not pasted.strip():
                         print("[session] 未捕获到内容，已忽略")
                         iteration -= 1

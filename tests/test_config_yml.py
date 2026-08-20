@@ -197,5 +197,24 @@ def test_integration_and_masking(monkeypatch, tmp_path):
     assert safe["yamlonly"]["model"] == "yaml-model"
 
 
+# ── llm_call_interval（性能诊断 P0-1：默认 0 = 关闭节流） ──
+
+def test_llm_call_interval_default_zero(monkeypatch):
+    monkeypatch.delenv("SKILLS_ENGINE_LLM_CALL_INTERVAL", raising=False)
+    assert config.llm_call_interval() == 0.0
+
+
+def test_llm_call_interval_from_env(monkeypatch):
+    monkeypatch.setenv("SKILLS_ENGINE_LLM_CALL_INTERVAL", "0.5")
+    assert config.llm_call_interval() == 0.5
+
+
+def test_llm_call_interval_invalid_falls_back_zero(monkeypatch):
+    monkeypatch.setenv("SKILLS_ENGINE_LLM_CALL_INTERVAL", "abc")
+    assert config.llm_call_interval() == 0.0
+    monkeypatch.setenv("SKILLS_ENGINE_LLM_CALL_INTERVAL", "-3")
+    assert config.llm_call_interval() == 0.0   # 负数钳制为 0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -92,6 +92,30 @@ class FileStateTracker:
         self._known.clear()
         self._read_cache.clear()
 
+    def invalidate_paths(self, paths) -> None:
+        """bash 执行后按命令中实际出现的路径选择性失效（性能诊断建议 6）。
+
+        只失效命令明确涉及的文件/目录（目录=该目录下所有登记一并失效），
+        未涉及的登记保留——消除「每次 bash 后全部文件回到未读」的迭代放大。
+        paths 解析失败时调用方应回退 invalidate_all()（保守全失效）。
+        """
+        try:
+            keys: set[str] = set()
+            for p in paths:
+                rp = Path(p).resolve()
+                key = rp.as_posix()
+                if rp.is_dir():
+                    prefix = key + "/"
+                    keys.update(k for k in self._known if k.startswith(prefix))
+                    keys.update(k for k in self._read_cache if k.startswith(prefix))
+                else:
+                    keys.add(key)
+            for k in keys:
+                self._known.pop(k, None)
+                self._read_cache.pop(k, None)
+        except Exception:
+            pass
+
     # ---- read_file 去重缓存 ----
 
     def cache_read(self, path, offset: int, limit: int,

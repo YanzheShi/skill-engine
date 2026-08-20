@@ -61,7 +61,8 @@ class CountingLLM:
         return resp
 
     def bind_tools(self, tools, **kwargs):
-        self._counter["calls"] += 1
+        # B-3（性能诊断）：bind_tools 不是真实 LLM 调用，不计数——
+        # 否则 MOA 每 worker 每轮虚增 1 次，max_llm_calls 预算被幽灵配额提前耗尽。
         bound = self._llm.bind_tools(tools, **kwargs)
         return CountingLLM(bound, self._counter)
 

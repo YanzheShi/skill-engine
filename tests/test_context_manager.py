@@ -209,3 +209,55 @@ class TestMicroCompact:
         snapshot = [dict(m) for m in cm.messages]
         assert cm._micro_compact() is False
         assert cm.messages == snapshot
+
+    def test_folds_old_blackboard_user_blocks(self):
+        """L1 扩展（性能诊断建议 4/5）：旧轮 MOA 黑板/composed 大块 user 消息折叠。"""
+        from skill_engine.execution.context_manager import ContextManager
+        cm = ContextManager(budget=10 ** 9, keep_recent=2)
+        # 4 个完整轮次（无工具历史 → user 消息为轮边界）：
+        # 前 2 轮是含黑板标记的大 user 块 + 回复，后 2 轮保留在 keep_recent 窗口内
+        msgs = [{"role": "user", "content": "FINAL_PROMPT"}]
+        for i in range(4):
+            msgs.append({
+                "role": "user",
+                "content": "## 需要你知晓的协作上下文\n" + "b" * 3000,
+            })
+            msgs.append({"role": "assistant", "content": f"answer {i}"})
+        cm.messages = msgs
+        assert cm._micro_compact() is True
+        # 旧轮黑板块被折叠（超出 keep_recent 窗口的前 2 轮）
+        assert cm.messages[1]["content"].startswith("[已折叠: 旧轮黑板/任务块")
+        assert cm.messages[3]["content"].startswith("[已折叠: 旧轮黑板/任务块")
+        # 最近 2 轮原样保留（折叠只作用于 keep_recent 之前的消息）
+        assert cm.messages[5]["content"].startswith("## 需要你知晓的协作上下文")
+        assert cm.messages[7]["content"].startswith("## 需要你知晓的协作上下文")
+        # 普通小 user 消息（assistant 回复）不受影响
+        assert cm.messages[2]["content"] == "answer 0"
+
+    def test_small_user_message_not_folded(self):
+        """折叠只针对超大黑板块：普通大小指令不折叠。"""
+        from skill_engine.execution.context_manager import ContextManager
+        cm = ContextManager(budget=10 ** 9, keep_recent=1)
+        msgs = [{"role": "user", "content": "FINAL_PROMPT"}]
+        msgs.append({"role": "user", "content": "## 本轮任务\n小任务指令"})
+        msgs.append({"role": "assistant", "content": "ok"})
+        cm.messages = msgs
+        assert cm._micro_compact() is False
+        assert cm.messages[1]["content"] == "## 本轮任务\n小任务指令"
+
+
+class TestCompressRetryDelays:
+    def test_default_short_single_retry(self):
+        """性能诊断建议 3：默认只快速重试 1 次（5s），不再 (40,60) 阻塞热路径。"""
+        from skill_engine.execution.context_manager import compress_retry_delays
+        assert compress_retry_delays() == (5,)
+
+    def test_env_configurable(self, monkeypatch):
+        from skill_engine.execution.context_manager import compress_retry_delays
+        monkeypatch.setenv("SKILLS_ENGINE_COMPRESS_RETRY_DELAYS", "10,20,5.5")
+        assert compress_retry_delays() == (10.0, 20.0, 5.5)
+
+    def test_env_invalid_falls_back(self, monkeypatch):
+        from skill_engine.execution.context_manager import compress_retry_delays
+        monkeypatch.setenv("SKILLS_ENGINE_COMPRESS_RETRY_DELAYS", "abc,-3,")
+        assert compress_retry_delays() == (5,)

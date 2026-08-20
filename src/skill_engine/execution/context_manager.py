@@ -28,10 +28,26 @@ FOLD_KEEP_PREVIEW = 200
 DEFAULT_CONTEXT_BUDGET = 32768
 
 # L2 压缩遇到 429 限流（rpm exhausted）时的退避重试间隔（秒）。
-# 商汤网关 RPM 限额很紧（频繁出现 quota_exceeded_error code 8），
-# 等一轮再试往往就恢复了；直接截断会丢上下文、拉低 worker 质量。
-# 每次最多等 40s + 60s = 100s，仍失败才走 L3 截断兜底。
-RPM_RETRY_DELAYS = (40, 60)
+# 可配置：SKILLS_ENGINE_COMPRESS_RETRY_DELAYS（逗号分隔秒数）。
+# 旧版固定 (40, 60) 会让压缩在热路径上阻塞最长 100s（性能诊断 P1-3：压缩加剧限流）。
+# 默认仅快速重试 1 次（5s），仍失败即走 L3 截断兜底，不再长时间挂起主循环。
+RPM_RETRY_DELAYS = (5,)
+
+
+def compress_retry_delays() -> tuple:
+    """压缩 429 重试间隔（可配置，默认 (5,) = 快速重试一次后走 L3 兜底）。"""
+    raw = os.environ.get("SKILLS_ENGINE_COMPRESS_RETRY_DELAYS", "").strip()
+    if not raw:
+        return RPM_RETRY_DELAYS
+    out = []
+    for part in raw.split(","):
+        try:
+            v = float(part.strip())
+            if v >= 0:
+                out.append(v)
+        except ValueError:
+            continue
+    return tuple(out) if out else RPM_RETRY_DELAYS
 
 
 def default_context_budget() -> int:
@@ -65,6 +81,17 @@ _NEUTRAL_SUMMARY_PROMPT = (
 _TRUNCATION_NOTICE = (
     "[系统提示] 由于上下文预算超限且摘要压缩失败，中间执行历史已被截断。"
     "早前步骤的细节已丢失，若涉及早前内容，请先用 read_file / search_files 等工具重新获取核实再继续。"
+)
+
+# L1 折叠扩展：user 消息中的 MOA 黑板/composed 大块（性能诊断建议 4/5）。
+# 这些 user 消息是「轮末注入的黑板摘要 / 指挥官任务派发」，跨轮留在历史里会二次方
+# 膨胀；命中标记且超阈值 → 规则化折叠（零 LLM 开销），普通用户指令不受影响。
+_BOARD_USER_MARKERS = (
+    "## 需要你知晓的协作上下文",
+    "## 当前协作状态",
+    "## 原始总任务",
+    "## 指挥官在第",
+    "## 本轮任务",
 )
 
 
@@ -163,7 +190,9 @@ class ContextManager:
         - tool 消息：超过 FOLD_THRESHOLD 的大块输出（大段 pytest 日志、整文件
           读取）折成带头部预览的占位符——几轮之后只剩诊断价值；
         - assistant 且带 tool_calls 的消息：剥离旧工具轮的思考/前言 content，
-          仅保留 tool_calls（模型跨轮不再需要旧轮思考，零成本零有损）。
+          仅保留 tool_calls（模型跨轮不再需要旧轮思考，零成本零有损）；
+        - user 消息中的 MOA 黑板/composed 大块：命中 _BOARD_USER_MARKERS 且超
+          阈值时折叠（黑板块已由轮末增量注入治理，旧轮黑板块只剩历史价值）。
 
         这些旧内容几轮之后只剩诊断价值，先降级它们往往就不必动用有损的 L2
         摘要。已折叠的幂等跳过。
@@ -193,6 +222,18 @@ class ContextManager:
                 content = m.get("content")
                 if content and not (isinstance(content, str) and content.startswith("[已折叠")):
                     m["content"] = "[已折叠: 旧轮思考过程]"
+                    changed = True
+            elif m.get("role") == "user":
+                # 扩展：MOA 黑板/composed 大块（黑板块已由增量注入治理，旧轮折叠）
+                content = m.get("content")
+                if (isinstance(content, str) and len(content) > FOLD_THRESHOLD
+                        and any(mk in content for mk in _BOARD_USER_MARKERS)
+                        and not content.startswith("[已折叠")):
+                    m["content"] = (
+                        f"[已折叠: 旧轮黑板/任务块 {len(content)} 字，细节已省略；"
+                        f"最新协作状态请以最近轮次的注入为准]\n"
+                        f"[头部预览] {content[:FOLD_KEEP_PREVIEW]}"
+                    )
                     changed = True
         return changed
 

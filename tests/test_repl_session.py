@@ -179,7 +179,9 @@ def test_session_state_persisted_and_resumable(tmp_path):
     import json
     from pathlib import Path
     assert Path(sp).exists()
-    saved = json.loads(Path(sp).read_text(encoding="utf-8"))
+    # JSONL（append-only）：取最后一行的完整快照
+    last_line = [ln for ln in Path(sp).read_text(encoding="utf-8").splitlines() if ln.strip()][-1]
+    saved = json.loads(last_line)
     assert any("turn1 plan" in str(m.get("content", "")) for m in saved["messages"])
 
     # 第二轮：resume_from 续接（先给一条续写指令，再 /exit）

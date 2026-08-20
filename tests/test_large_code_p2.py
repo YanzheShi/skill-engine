@@ -255,7 +255,10 @@ class TestResume:
                    max_iterations=5, state_path=str(state_file))
 
         assert state_file.exists(), "state_path 未落盘状态文件"
-        st = json.loads(state_file.read_text(encoding="utf-8"))
+        # JSONL（append-only）：取最后一行的完整快照
+        lines = [ln for ln in state_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        assert lines, "状态文件为空"
+        st = json.loads(lines[-1])
         assert "messages" in st and len(st["messages"]) >= 3
         assert "final_prompt" in st
         # messages 含 user / assistant(write_file) / tool 三类

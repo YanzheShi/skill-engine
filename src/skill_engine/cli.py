@@ -919,6 +919,14 @@ def session(
         raise typer.Exit(code=1)
 
     print(f"[INFO] 使用 tool_dispatch 模式, 每轮子任务最大迭代 {max_iterations} 次")
+    from .config import get_security_mode
+    if get_security_mode() == "strict":
+        # 性能诊断建议 2：strict 下 LLM 侧 bash 一律 BLOCK，session 的 agent loop
+        # 依赖 bash 的任务会立即快速失败——启动时就讲清楚，避免用户疑惑。
+        print("[WARN] 当前安全模式为 strict：LLM 发起的 bash 命令不会自动执行"
+              "（遇到即快速终止本轮）。")
+        print("       需要 LLM 跑测试/构建等命令时，请设置环境变量"
+              " SKILLS_ENGINE_SECURITY_MODE=permissive 后重试。")
     result = runner.run_repl(
         plan, registry, query=match_query, llm=td_llm,
         max_iterations=max_iterations,
@@ -1285,6 +1293,14 @@ def _moa_execute(registry, workers: list, commander, query: str,
         print(f"[INFO] 续跑模式：从状态文件 {resume_from} 载入断点，继续整轮协作")
     elif state_path:
         print(f"[INFO] 检查点：{state_path}（每轮落盘；崩溃后可加 --resume-from 续跑）")
+    from .config import get_security_mode
+    if get_security_mode() == "strict":
+        # 性能诊断建议 2：strict 下 worker 的 bash 工具调用会被 BLOCK 并快速
+        # 失败（不再空转耗尽迭代），启动时先亮明，避免中途一头雾水。
+        print("[WARN] 当前安全模式为 strict：worker 发起的 bash 命令不会自动执行"
+              "（遇到即快速终止该 worker）。")
+        print("       需要 LLM 跑测试/构建等命令时，请设置环境变量"
+              " SKILLS_ENGINE_SECURITY_MODE=permissive 后重试。")
     result = orch.run(
         workers, commander, registry, query=query or "",
         max_rounds=max_rounds, max_agent_iterations=max_agent_iterations,
