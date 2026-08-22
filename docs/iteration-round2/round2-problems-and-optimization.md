@@ -193,3 +193,26 @@
 **全量 py_compile 通过**；逻辑测试覆盖：Bug2（降序无错位 + 减行场景）、Bug3（列宽容纳数据）、Bug4（限 200 + extra）、Bug5（DELETE/UPDATE CTE 拒、SELECT CTE 放）、Bug6（无前缀）。Bug1 因涉及 messages 注入链路，靠代码审查 + 单消息验证（准备阶段不再 append）。
 
 **提交**：`git commit`（独立于前序 commit）。
+
+---
+
+## 7. 第三轮增强（基于 round2-trace-analysis.md 实测分析）
+
+另一 agent 基于真实 trace 分析"为何只降 21%"，核心论点：**改进是建议性而非强制性**，模型可忽略提示。
+取其中 ROI 最高且风险可控的 4 项实施（不做"强制式软上限/第4次直接拒绝"等高风险硬阻断）：
+
+| 项 | 文件 | 核心改动 | 验证 |
+|---|---|---|---|
+| **T1** Bash Python hint（Pydantic 字段错误） | tool_dispatch.py `_SHELL_ERROR_HINTS` | 新增 `is not a valid field` / `has no attribute` / `ValidationError` 专属提示：先改 models 再改业务 | ✅ 逻辑测试：Pydantic 错误命中 + 通用错误仍正常 |
+| **T2** 编辑顺序引导 | skills/code-builder/SKILL.md | 加"自底向上编辑：先 models → 再 database/service → 最后 router/api" | ✅ B 层指令 |
+| **T3** A3b run_python 工具 | tool_defs.py（schema+注册）+ tool_dispatch.py 分支 | 新增 `run_python(code, timeout)`：临时 .py 文件 + executor（venv）执行，规避 cmd 引号；消 Python 验证临时脚本 | ✅ 逻辑测试：schema/注册/分支(executor+清理) 齐全 |
+| **T4** 重复读第4次强制返全文缓存（非拒绝） | tool_dispatch.py P0-1 块 + read 执行分支 | 第4+次分页读且已有全文缓存 → 标记 `_force_cache_full`，执行阶段直接返回缓存全文（不实际读文件、不消耗迭代） | ✅ 逻辑测试：标记 + 执行阶段复用 |
+
+**全量 py_compile 通过**；4 项逻辑测试通过。
+
+**与 round2-trace-analysis 的偏差澄清**：
+- 该分析引用的 trace（处理记录.txt = 运行记录-1）早于本修复轮，其最担心的"P0-1 警告因重复 tool_call_id 不可见"已在 commit `3f0d9d2`（6 Bug 修复）解决。
+- 它建议的"强制式软上限/第4次直接拒绝"**未做**——硬阻断风险高（可能误伤合理场景），T4 改用"返缓存全文"的软阻断式替代。
+- A3b（T3）此前用户叫停，本次基于 trace 实测（Python 验证脚本仍写）重新评估后实施。
+
+**提交**：`git commit`（独立于 6-Bug 修复 commit）。

@@ -171,6 +171,25 @@ def query_db(sql: str, db_path: str = "") -> str:
 
 
 @tool
+def run_python(code: str, timeout: int = 30) -> str:
+    """在工作目录的 Python 环境（引擎自动注入的 venv）中执行一段 Python 代码，返回 stdout/stderr。
+
+    用于验证业务逻辑（如 import 项目模块、调用函数、检查返回值），替代
+    `write_file 临时脚本 + bash python xxx.py` 或 `bash python -c "..."`（后者在
+    cmd.exe 上多层引号易出错）。代码经 stdin 传给解释器，规避 shell 引号转义问题。
+
+    注意：这是验证/探查工具，不是编辑器——不要用来做文件读写或长期脚本存放。
+
+    Args:
+        code: 要执行的 Python 代码（多行字符串）。
+        timeout: 超时秒数（默认 30，防止死循环卡死）。
+
+    Returns:
+        执行结果（stdout/stderr，经 format_observation 不截断）；或错误信息。
+    """
+
+
+@tool
 def stop(reason: str = "finished") -> str:
     """Signal that the task is complete and stop the tool dispatch loop.
 
@@ -405,7 +424,7 @@ def _take_screenshot(url: str, width: int = 1280, height: int = 800,
     return _take_fullpage_cdp(edge, target, width, out_abs, out_path)
 
 
-TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search, get_current_time, shot_web, view_image, update_plan, query_db]
+TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search, get_current_time, shot_web, view_image, update_plan, query_db, run_python]
 
 # 工具注册表：将硬编码列表升级为可扩展注册表（通用引擎核心，不绑定领域语义）。
 # 各 skill 可经 frontmatter 的 extra_tools 注入领域专属工具，核心不感知具体领域。

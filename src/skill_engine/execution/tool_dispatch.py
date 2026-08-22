@@ -500,6 +500,16 @@ _SHELL_ERROR_HINTS = (
      "对应改用 dir/cd/type/findstr，或直接改用 read_file / search_files 等跨平台工具。"),
     (("WinError 2", "系统找不到指定的文件", "The system cannot find the file specified"),
      "可执行文件或路径不存在。先用 search_files / read_file 确认路径，再执行。"),
+    # 整改 二轮审计分析 T1：Pydantic 字段错误专属提示（放在 Python 错误组最前，优先匹配）。
+    # 典型报错：ValueError: <field> is not a valid field for <Model>
+    #           / AttributeError: <Model> has no attribute '<field>'
+    #           / ValidationError: extra fields not permitted
+    # 根因：先改了业务逻辑（database.py 给 profile.ac_rate 赋值）但数据模型（models.py 的
+    # DBProfile）尚未声明该字段 → Pydantic 拒动态属性。应先改 models 再改业务。
+    (("is not a valid field", "extra fields not permitted", "has no attribute", "ValidationError"),
+     "Pydantic 模型没有该字段——需**先在模型类（models.py / schema.py）中声明字段**，"
+     "再在业务代码中使用。典型顺序：先改数据模型 → 再改业务逻辑（database/service）→ 最后改接口（router/api）。"
+     "不要反过来（先改逻辑导致模型缺字段而验证失败空转）。"),
     # 整改 B7（来自审计）：Python 执行错误提示，打断"看不懂报错→换个花样再试"空转
     (("ModuleNotFoundError", "No module named"),
      "模块未安装或 PYTHONPATH 未覆盖。用 pip install 安装缺失模块，"
@@ -1978,6 +1988,46 @@ class ToolDispatchRunner:
                         })
                         print(f"     [query_db] {sql[:60]}")
 
+                    elif tc["type"] == "run_python":
+                        # 整改 二轮审计分析 T3（A3b）：Python 代码执行工具。
+                        # 替代 write_file 临时脚本 + bash python，或 bash python -c（cmd 引号易错）。
+                        # 用临时文件 + executor（自动注入 venv）执行，规避 shell 引号转义。
+                        import tempfile as _tempfile
+                        code = tc["input"].get("code", "").strip()
+                        try:
+                            timeout = int(tc["input"].get("timeout", 30))
+                        except (TypeError, ValueError):
+                            timeout = 30
+                        if not code:
+                            obs = "[run_python] code 不能为空"
+                        else:
+                            try:
+                                # 临时文件写到系统 temp（不污染工作目录）；del 由上下文离开时清理
+                                with _tempfile.NamedTemporaryFile(
+                                    mode="w", suffix=".py", delete=False, encoding="utf-8"
+                                ) as _tf:
+                                    _tf.write(code)
+                                    _tmp_path = _tf.name
+                                cmd = f'python "{_tmp_path}"'
+                                exec_result = self.executor.run_step(cmd, cwd=base_dir, timeout=timeout)
+                                obs = format_observation("run_python", exec_result)
+                            except Exception as e:
+                                obs = f"[run_python] 执行准备失败：{e}"
+                            finally:
+                                try:
+                                    import os as _os
+                                    _os.unlink(_tmp_path)
+                                except Exception:
+                                    pass
+                        step_results.append({"name": f"run_python_{tc['id']}", "type": "run_python"})
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "name": "run_python",
+                            "content": obs,
+                        })
+                        print(f"     [run_python] {code[:60].replace(chr(10), ' ')}")
+
                     elif tc["type"] == "web_search":
                         query = tc["input"].get("query", "")
                         max_results = int(tc["input"].get("max_results", 5))
@@ -2241,12 +2291,26 @@ class ToolDispatchRunner:
                     # 会与实际读取结果（下方执行阶段同样用 tc["id"]）构成两个同 ID tool 消息，
                     # 触发 OpenAI `duplicate tool call id` 导致整轮 invoke 失败、循环挂掉。
                     # 改为把提示暂存到 tc，由执行阶段拼到读取结果内容开头（只产生一条 tool 消息）。
-                    tc["_repeat_hint"] = (
-                        f"[提示] 你已第 {read_count + 1} 次读取 {filepath}（含 force_refresh 切片读）。"
-                        f"反复分页/切片读取同一大文件会快速消耗迭代预算。请改用 "
-                        f"force_refresh=true 且**不带 offset/limit** 一次性取全文，"
-                        f"或若之前已读过则直接基于上文历史内容工作，不要继续分页重试。\n\n"
-                    )
+                    # 整改 二轮审计分析 T4（阻断式重复读，非拒绝）：第 4+ 次分页读且已有全文缓存时，
+                    # 不真正重读文件，直接复用已读过的全文缓存返回（不消耗迭代、不污染上下文）。
+                    full_hit = None
+                    if read_count >= 4 and self._file_tracker is not None:
+                        full_hit = self._file_tracker.cache_lookup(full_path, 0, 0)
+                    if full_hit is not None:
+                        # 用缓存全文直接满足本次读取（不实际读文件）
+                        tc["_force_cache_full"] = full_hit["content"]
+                        tc["_repeat_hint"] = (
+                            f"[提示] 你已第 {read_count + 1} 次读取 {filepath}（含分页/force_refresh 切片读）。"
+                            f"引擎已直接返回你**之前全文读取过的缓存内容**（见下方），请基于该内容工作，"
+                            f"不要继续分页重试——反复切片读同一大文件会快速消耗迭代预算。\n\n"
+                        )
+                    else:
+                        tc["_repeat_hint"] = (
+                            f"[提示] 你已第 {read_count + 1} 次读取 {filepath}（含 force_refresh 切片读）。"
+                            f"反复分页/切片读取同一大文件会快速消耗迭代预算。请改用 "
+                            f"force_refresh=true 且**不带 offset/limit** 一次性取全文，"
+                            f"或若之前已读过则直接基于上文历史内容工作，不要继续分页重试。\n\n"
+                        )
                     # 仍继续本次读取（不阻断），让模型拿到内容后收敛
                 if not force_refresh and self._file_tracker is not None:
                     hit = self._file_tracker.cache_lookup(full_path, offset, limit)
@@ -2339,11 +2403,17 @@ class ToolDispatchRunner:
             _, out_payload, content = out
             if kind == "read":
                 full_path, offset, limit, filepath = out_payload
-                # P0(S0-1)：登记"已读版本"，供后续 edit 一致性校验
-                self._file_tracker.on_read(full_path)
+                # 整改 二轮审计分析 T4：若准备阶段标记了「直接复用全文缓存」（第4+次分页读且已有全文缓存），
+                # 不实际读文件，用缓存全文满足本次读取（内容等价、不消耗迭代）。
+                if tc.get("_force_cache_full") is not None:
+                    content = tc["_force_cache_full"]
+                else:
+                    # P0(S0-1)：登记"已读版本"，供后续 edit 一致性校验
+                    self._file_tracker.on_read(full_path)
                 formatted = _read_file_with_lines(content, offset, limit)
-                self._file_tracker.cache_read(
-                    full_path, offset, limit, len(content.splitlines()), formatted)
+                if tc.get("_force_cache_full") is None:
+                    self._file_tracker.cache_read(
+                        full_path, offset, limit, len(content.splitlines()), formatted)
                 step_results.append({
                     "name": f"read_{tc['id']}",
                     "type": "read_file",
