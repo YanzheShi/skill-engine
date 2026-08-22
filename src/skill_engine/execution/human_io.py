@@ -17,6 +17,7 @@ except Exception:  # pragma: no cover - 无 prompt_toolkit 环境回退 input()
     _HAS_PROMPT_TOOLKIT = False
 
 from skill_engine.execution.paste_buffer import save_paste
+from skill_engine.execution.tracer import truncate
 
 
 def strip_markdown(text: str) -> str:
@@ -100,9 +101,23 @@ class HumanIO(ABC):
         """CLI 纯文本终端：输出时剥离 Markdown 语法（默认不剥离，Web 端不受影响）。"""
         pass
 
+    def set_tracer(self, tracer) -> None:
+        """挂载可选的 DebugTracer，使 emit*/read 的输出同时落盘（debug 模式）。
+
+        tracer 为 None 或已关闭（enabled()=False）时，所有 _trace 调用直接 no-op。
+        """
+        self._tracer = tracer
+
+    def _trace(self, kind: str, **payload) -> None:
+        """把一条语义通道事件发送给已挂载的 tracer（debug 模式）。"""
+        t = getattr(self, "_tracer", None)
+        if t is not None and t.enabled():
+            t.event(kind, **payload)
+
     def emit_header(self, title: str) -> None:
         """执行开始的总标题，如 '# Running in <skill> @ <root>'。"""
         print(f"\n{title}")
+        self._trace("header", title=title)
 
     def emit_thinking(self, text: str, max_lines: int = 40) -> None:
         """模型的推理/思考文本（每轮 content）——独立视觉通道。
@@ -125,10 +140,12 @@ class HumanIO(ABC):
                 f"完整内容已用于决策)"
             )
         print("\n" + "\n".join(shown) + "\n")
+        self._trace("thinking", text=truncate(text, 4000))
 
     def emit_command(self, cmd: str) -> None:
         """执行的一条 shell 命令，渲染为 $ cmd。"""
         print(f"\n$ {cmd}")
+        self._trace("command", cmd=cmd)
 
     def emit_result(self, out: str, max_lines: int = 2) -> None:
         """工具/shell 的真实输出（替代原先只打 'N chars' 的噪声）。
@@ -138,6 +155,7 @@ class HumanIO(ABC):
         """
         if not out:
             return
+        self._trace("result", out=truncate(out, 4000))
         lines = out.splitlines()
         if len(lines) > max_lines:
             for line in lines[:max_lines]:
@@ -156,6 +174,7 @@ class HumanIO(ABC):
             print(f"  🔧 {label}  {_truncate_detail(detail)}")
         else:
             print(f"  🔧 {label}")
+        self._trace("tool", label=label, detail=truncate(detail, 1000))
 
 
 class CliHumanIO(HumanIO):
@@ -219,6 +238,7 @@ class CliHumanIO(HumanIO):
         if self.plain_text:
             text = strip_markdown(text)
         print(f"\n{label}{text}")
+        self._trace("emit", label=label, text=truncate(text, 4000))
 
     # ---- 用户态执行轨迹：CLI 带 ANSI 着色实现 ----
     def _c(self, code: str) -> str:
@@ -233,6 +253,7 @@ class CliHumanIO(HumanIO):
     def emit_header(self, title: str) -> None:
         R, C = self._c("\033[0m"), self._c("\033[36m")  # 青色标题
         print(f"\n{C}# {title}{R}")
+        self._trace("header", title=title)
 
     def emit_thinking(self, text: str, max_lines: int = 40) -> None:
         if not text:
@@ -251,14 +272,17 @@ class CliHumanIO(HumanIO):
                 f"完整内容已用于决策)"
             )
         print("\n" + "\n".join(f"{T}{ln}{R}" for ln in shown) + "\n")
+        self._trace("thinking", text=truncate(text, 4000))
 
     def emit_command(self, cmd: str) -> None:
         R, G = self._c("\033[0m"), self._c("\033[32m")  # 绿色命令
         print(f"\n{G}$ {cmd}{R}")
+        self._trace("command", cmd=cmd)
 
     def emit_result(self, out: str, max_lines: int = 2) -> None:
         if not out:
             return
+        self._trace("result", out=truncate(out, 4000))
         lines = out.splitlines()
         R, D = self._c("\033[0m"), self._c("\033[2m")  # 暗色输出
         if len(lines) > max_lines:
@@ -276,6 +300,7 @@ class CliHumanIO(HumanIO):
             print(f"  {Y}{sym} {label}{R}  {_truncate_detail(detail)}")
         else:
             print(f"  {Y}{sym} {label}{R}")
+        self._trace("tool", label=label, detail=truncate(detail, 1000))
 
     def input_mode(self) -> str:
         """返回当前输入模式，供启动诊断显示（精准区分回退原因）。"""
@@ -307,13 +332,17 @@ class CliHumanIO(HumanIO):
             else:
                 raw = input(p)
         except (EOFError, KeyboardInterrupt):
+            self._trace("user_input", prompt=prompt, text="/exit")
             return "/exit"
         raw = (raw or "").strip()
         if not raw:
+            self._trace("user_input", prompt=prompt, text=raw)
             return raw
         token = save_paste(raw, base=self._paste_dir)
         if token:
             # 给用户可见反馈（对齐 Hermes：粘贴落盘后展示引用 token）
             print(f"[粘贴已暂存] {token}")
+            self._trace("user_input", prompt=prompt, text=token)
             return token
+        self._trace("user_input", prompt=prompt, text=raw)
         return raw

@@ -97,6 +97,8 @@ _SETTINGS_ENV_MAP = {
     "r2_account_id": "CF_R2_ACCOUNT_ID",
     "r2_bucket": "CF_R2_BUCKET",
     "r2_public_base": "CF_R2_PUBLIC_BASE",
+    "debug_log": "SKILL_ENGINE_DEBUG_LOG",
+    "debug": "SKILL_ENGINE_DEBUG",
 }
 
 

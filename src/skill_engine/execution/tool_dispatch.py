@@ -24,6 +24,7 @@ from skill_engine.execution.executor import Executor
 from skill_engine.execution.tool_defs import TOOL_REGISTRY, load_skill_tools, load_mcp_tools, _take_screenshot
 from skill_engine.execution.context_manager import ContextManager, default_context_budget
 from skill_engine.execution.human_io import HumanIO
+from skill_engine.execution.tracer import DebugTracer, truncate
 from skill_engine.execution.snapshot import FileSnapshot
 from skill_engine.execution.file_tracker import FileStateTracker
 from skill_engine.execution.paths import to_native_path
@@ -619,6 +620,7 @@ class ToolDispatchRunner:
         plain_text: bool = False,
         verbose: bool = False,
         trusted_root: Optional[str] = None,
+        tracer: Optional["DebugTracer"] = None,
     ):
         self.executor = executor
         self.assembler = assembler
@@ -629,6 +631,7 @@ class ToolDispatchRunner:
         self.working_root = to_native_path(working_root)
         self.plain_text = plain_text  # CLI 纯文本终端：禁用 Markdown 输出
         self.verbose = verbose  # 是否显示引擎内部调试态（迭代/历史条数/LLM 响应）
+        self.tracer = tracer  # 可选 DebugTracer；None / 未开启时全程 no-op
         # trusted_root：用户显式指定的受信任工作目录（如 MOA -w）。
         # 目录内的文件读写自动放行（免审批/免 diff 确认）；目录外维持原审批。
         self.trusted_root = to_native_path(trusted_root)
@@ -636,7 +639,26 @@ class ToolDispatchRunner:
         self._file_edit_approvals: set = set()
         self._confirm_edits_mode = ""
         # view_image 的 R2 上传缓存：(path, size, mtime_ns) → 公网 URL，同文件只传一次
-        self._view_image_urls: dict = {} 
+        self._view_image_urls: dict = {}
+
+    def _trace_finish(self, res) -> "RunResult":
+        """包装一次 RunResult 返回：顺带记一条 stop 事件（debug 模式）。
+
+        同时把 stopped_by 存到实例上：run() 的 finally 收尾 dump_context 需要它，
+        但 finally 里的局部变量 ``result`` 可能被主循环里的工具输出字符串覆盖
+        （Python 无块级作用域），不能直接引用——这里是最可靠的采集点，
+        因为所有 RunResult 退出路径（正常完成/提前 stop/error/max_iterations）
+        都经过 _trace_finish。
+        """
+        if self.tracer and self.tracer.enabled():
+            stopped_by = res.ctx.get("stopped_by")
+            self.tracer.event(
+                "stop",
+                stopped_by=stopped_by,
+                iterations=res.ctx.get("iterations"),
+            )
+            self._dbg_stopped_by = stopped_by
+        return res
 
     def _is_trusted_path(self, full_path: Path) -> bool:
         """路径是否位于受信任工作目录（trusted_root）内。规范化后前缀匹配，防 .. 逃逸。"""
@@ -700,6 +722,14 @@ class ToolDispatchRunner:
         Returns:
             (approved, error_message)
         """
+        # 防御：目标路径若为已存在目录，不能当文件做 read/write/edit。
+        # 空 path 会被 _resolve_path 解析成 base_dir 本身（目录），且 _resolve_path 不会对
+        # 已存在目录做特殊处理；Windows 上对目录 read_text/write_text 抛 PermissionError，
+        # 会让整个 worker 崩溃。这里在信任目录判断之前就拦下，优先级最高。
+        base_dir = self.working_root or Path(skill.directory)
+        if _resolve_path(filepath, base_dir).is_dir():
+            return False, f"[拒绝] 目标路径是目录，不能进行{op_type}操作：{filepath}"
+
         from skill_engine.security.scanner import RISKY_FILENAMES
         # 直接检查文件名（不依赖 _path_escapes 的正则提取）
         if Path(filepath).name in RISKY_FILENAMES:
@@ -958,9 +988,21 @@ class ToolDispatchRunner:
             hdr = getattr(self.human_io, "emit_header", None)
             if callable(hdr):
                 hdr(f"Running in {skill.metadata.name} @ {base_dir}")
+
+        # debug 轨迹：run 开始（含 skill / 模式 / 工作目录）
+        if self.tracer and self.tracer.enabled():
+            self.tracer.event(
+                "run_start",
+                skill=skill.metadata.name,
+                session_mode=session_mode,
+                working_root=str(base_dir),
+            )
         try:
             for i in range(max_iterations):
                 iterations += 1
+                # debug 轨迹：每轮迭代起点
+                if self.tracer and self.tracer.enabled():
+                    self.tracer.event("iteration", n=iterations, max=max_iterations)
 
                 # 隐藏迭代轮次计数（正常输出不显示）；每轮之间用空行分割，方便观察。
                 # 仅在 --verbose 调试模式保留「迭代 N/max」与历史条数。
@@ -994,19 +1036,19 @@ class ToolDispatchRunner:
                             if not os.environ.get("PYTEST_CURRENT_TEST"):
                                 time.sleep(wait_time)
                             if attempt == max_retries - 1:
-                                return RunResult(
+                                return self._trace_finish(RunResult(
                                     output=f"[LLM 调用被限流（已重试 {max_retries} 次）: {err_str}]",
                                     ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
                                          "iterations": iterations, "stopped_by": "rate_limited"},
                                     history=messages[:] if 'messages' in dir() else [],
-                                )
+                                ))
                         else:
-                            return RunResult(
+                            return self._trace_finish(RunResult(
                                 output=f"[LLM 调用失败: {err_str}]",
                                 ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
                                      "iterations": iterations, "stopped_by": "error"},
                                 history=messages[:] if 'messages' in dir() else [],
-                            )
+                            ))
 
                 # 标准化 LLM 响应为 dict（兼容 LangChain AIMessage）。
                 # 关键：保留推理字段 reasoning_content —— 推理模型（DeepSeek-R1 /
@@ -1045,8 +1087,23 @@ class ToolDispatchRunner:
                 # 内部调试态仅在 --verbose 显示；工具调用改走语义通道 emit_tool
                 if self.verbose:
                     print(f"  LLM response: content={len(resp.get('content', ''))} chars, tool_calls={len(tool_calls)}")
+                # debug 轨迹：LLM 响应概览（content/推理长度 + 本轮工具调用名）
+                if self.tracer and self.tracer.enabled():
+                    self.tracer.event(
+                        "llm_response",
+                        content_len=len(resp.get("content", "") or ""),
+                        reasoning_len=len(resp.get("reasoning", "") or ""),
+                        tool_calls=[tc.get("type") for tc in tool_calls],
+                    )
                 for tc in tool_calls:
                     self._emit_tool(tc['type'], str(tc['input']))
+                    # debug 轨迹：引擎层工具调用（raw input，human_io 为 None 时也能捕获）
+                    if self.tracer and self.tracer.enabled():
+                        self.tracer.event(
+                            "tool_call",
+                            type=tc.get("type"),
+                            input=truncate(str(tc.get("input", "")), 1000),
+                        )
 
                 if not tool_calls:
                     text = resp.get("content", "")
@@ -1056,24 +1113,24 @@ class ToolDispatchRunner:
                         # session 模式：子任务完成文本，由外层 REPL 处理后等待下条指令。
                         # 禁用内部 human_in_loop 追问循环（决策 2），避免双重提问。
                         step_results.append({"name": "llm_response", "type": "llm", "output": text})
-                        return RunResult(
+                        return self._trace_finish(RunResult(
                             output=text,
                             ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
                                  "iterations": iterations, "stopped_by": "session_turn_end"},
                             history=messages,
-                        )
+                        ))
 
                     if self.human_io and self.turn_policy:
                         # 多轮对话模式
                         if self.turn_policy.should_stop(text):
                             # LLM 说完了  直接结束，不追问用户
                             step_results.append({"name": "llm_response", "type": "llm", "output": text})
-                            return RunResult(
+                            return self._trace_finish(RunResult(
                                 output=text,
                                 ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
                                      "iterations": iterations, "stopped_by": "stop"},
                                 history=messages,
-                            )
+                            ))
                         else:
                             # LLM 在问用户  emit + read + 追 history + 继续
                             self.human_io.emit(text)
@@ -1082,22 +1139,22 @@ class ToolDispatchRunner:
                             # 用户退出
                             if user_input in (self.turn_policy.user_exit or []):
                                 step_results.append({"name": "llm_response", "type": "llm", "output": text})
-                                return RunResult(
+                                return self._trace_finish(RunResult(
                                     output=text,
                                     ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
                                          "iterations": iterations, "stopped_by": "user_exit"},
                                     history=messages,
-                                )
+                                ))
 
                             # 达到最大轮数
                             if iterations >= self.turn_policy.max_turns:
                                 step_results.append({"name": "llm_response", "type": "llm", "output": text})
-                                return RunResult(
+                                return self._trace_finish(RunResult(
                                     output=text,
                                     ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
                                          "iterations": iterations, "stopped_by": "max_turns"},
                                     history=messages,
-                                )
+                                ))
 
                             # 追加用户回答，继续循环
                             messages.append({"role": "user", "content": user_input})
@@ -1105,12 +1162,12 @@ class ToolDispatchRunner:
 
                     # 非多轮模式：原行为
                     step_results.append({"name": "llm_response", "type": "llm", "output": text})
-                    return RunResult(
+                    return self._trace_finish(RunResult(
                         output=text,
                         ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
                              "iterations": iterations, "stopped_by": "stop"},
                         history=messages,
-                    )
+                    ))
 
                 # 有 tool_calls，执行每个
                 lc_tool_calls = []
@@ -1142,15 +1199,18 @@ class ToolDispatchRunner:
                     self._flush_io_batch(io_batch, messages, step_results, skill, base_dir)
                     io_batch = []
                     if tc["type"] == "stop":
-                        return RunResult(
+                        return self._trace_finish(RunResult(
                             output=tc["input"].get("reason", "stopped"),
                             ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
                                  "iterations": iterations, "stopped_by": "tool_stop"},
                             history=messages,
-                        )
+                        ))
 
                     elif tc["type"] == "bash":
                         cmd = tc["input"].get("command", "")
+                        # debug 轨迹：实际执行的 shell 命令
+                        if self.tracer and self.tracer.enabled():
+                            self.tracer.event("command", cmd=cmd, tool_id=tc["id"])
                         decision, reason = should_approve(cmd, skill.directory, risk_hint="tool_dispatch")
                         if decision == "BLOCK":
                             # 性能诊断建议 2（strict 快速失败）：BLOCK 只会出现在 strict
@@ -1179,13 +1239,13 @@ class ToolDispatchRunner:
                                 "content": err,
                             })
                             print(f"     BLOCKED (strict 快速失败): {cmd[:80]}")
-                            return RunResult(
+                            return self._trace_finish(RunResult(
                                 output=err,
                                 ctx={"steps": step_results, "files_created": files_created,
                                      "skill_name": skill.metadata.name,
                                      "iterations": iterations, "stopped_by": "security_blocked"},
                                 history=messages,
-                            )
+                            ))
                         elif decision == "ATTENTION":
                             if self.approval_fn:
                                 approved = self.approval_fn(
@@ -1421,6 +1481,22 @@ class ToolDispatchRunner:
                     elif tc["type"] == "write_file":
                         filepath = tc["input"].get("path", "")
                         content = tc["input"].get("content", "")
+
+                        # 防御：LLM（尤其纯文本模型）可能漏传 path 键，导致 filepath 为空。
+                        # 空 path 会被 _resolve_path 解析成 base_dir 本身（目录），
+                        # 后续 read_text/write_text 在 Windows 上抛 PermissionError，使整个 worker 崩溃。
+                        # 这里提前拦截，回一条错误让模型补全 path 重试，而不是把异常冒泡成崩溃。
+                        if not filepath:
+                            msg = ("[错误] write_file 缺少 path 参数，已跳过本次写入。"
+                                   "请补全要写入的文件路径（如 action_track/index.html）后重试。")
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tc["id"],
+                                "name": "write_file",
+                                "content": msg,
+                            })
+                            print("     [SKIP] write_file 缺少 path 参数，已跳过")
+                            continue
 
                         # 安全门（只查路径，strict 不 BLOCK）
                         approved, err_msg = self._check_file_safety("write", filepath, skill)
@@ -1793,18 +1869,31 @@ class ToolDispatchRunner:
                 ctx.maybe_compress(llm)
 
         # 达到最大迭代次数
-            result = RunResult(
+            result = self._trace_finish(RunResult(
                 output="[达到最大迭代次数]",
                 ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
                      "iterations": iterations, "stopped_by": "max_iterations"},
                 history=messages,
-            )
+            ))
             return result
         finally:
             # P2-3：任一退出路径（含提前 stop / error / max_iterations）都落盘，支撑续跑
             if save_path:
                 self._save_state(save_path, messages, iterations, step_results, files_created,
                                  final_prompt, session_mode)
+            # debug 轨迹：run 收尾，把完整上下文（含 messages）单独 dump 到 .ctx.json
+            if self.tracer and self.tracer.enabled():
+                self.tracer.dump_context(
+                    messages=messages,
+                    step_results=step_results,
+                    files_created=files_created,
+                    skill_name=skill.metadata.name,
+                    iterations=iterations,
+                    # stopped_by 从 _trace_finish 采集（所有 RunResult 退出路径都经过它）。
+                    # 不能引用局部变量 result：主循环里的工具输出会把 result 覆盖成 str，
+                    # 正常完成路径（不经过 max_iterations 赋值）下会 AttributeError。
+                    stopped_by=getattr(self, "_dbg_stopped_by", None) or "unknown",
+                )
         return result
 
     # ---------------- 性能诊断建议 8：IO 工具并行执行 ----------------

@@ -428,6 +428,7 @@ class MoaOrchestrator:
         plain_text: bool = False,
         verbose: bool = False,
         trusted_root: Optional[str] = None,
+        tracer=None,
     ):
         self.executor = executor
         self.assembler = assembler
@@ -437,6 +438,10 @@ class MoaOrchestrator:
         self.trusted_root = trusted_root
         self.plain_text = plain_text
         self.verbose = verbose
+        self.tracer = tracer  # 可选 DebugTracer；None / 未开启时全程 no-op
+        # debug 轨迹：把 tracer 挂到语义通道，MOA 进度/指挥输出自动落盘
+        if tracer is not None and human_io is not None:
+            human_io.set_tracer(tracer)
         self._router = None                     # 懒构建（worker 自动匹配 skill 用）
         self._auto_skill_cache: dict[str, str] = {}  # alias → 自动匹配到的 skill 名
         # JSONL 差量落盘游标（性能诊断建议 9）：记录最近一次 _save_moa_state
@@ -675,6 +680,7 @@ class MoaOrchestrator:
             plain_text=self.plain_text,
             verbose=self.verbose,
             trusted_root=self.trusted_root,
+            tracer=self.tracer,
         )
         result = runner.run(
             mr, agent.llm, max_iterations=max_agent_iterations,

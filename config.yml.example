@@ -44,3 +44,8 @@ settings:
   r2_account_id: ${CF_R2_ACCOUNT_ID}
   r2_bucket: ${CF_R2_BUCKET}
   r2_public_base: ${CF_R2_PUBLIC_BASE}
+  # 调试轨迹落盘（JSONL）：记录上下文/状态栏/交互流程。
+  # debug_log 非空即开启并作为日志路径（CI 也可用环境变量 SKILL_ENGINE_DEBUG_LOG 覆盖，注入优先）；
+  # debug: true 仅开开关、用默认路径 <working_root>/.<时间戳>.skill-engine-debug.log。
+  debug_log: ""
+  debug: false

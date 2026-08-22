@@ -142,6 +142,7 @@ class Runner:
         llm_model: str = "",
         plain_text: bool = False,
         verbose: bool = False,
+        tracer=None,
 
     ):
         self.assembler = assembler
@@ -151,6 +152,7 @@ class Runner:
         self.llm_model = llm_model
         self.plain_text = plain_text  # CLI 纯文本终端：禁用 Markdown 输出
         self.verbose = verbose  # 是否显示引擎内部调试态（--verbose）
+        self.tracer = tracer  # 可选 DebugTracer；None / 未开启时全程 no-op
         self._session_approvals: dict[str, bool] = {}  # op_str → True(允许) / False(拒绝)
         self._session_allow_all: bool = False  # 全部允许（A 键）
 
@@ -494,6 +496,9 @@ class Runner:
             sp = getattr(human_io, "set_plain_text", None)
             if callable(sp):
                 sp(self.plain_text)
+            # debug 轨迹：把 tracer 挂到语义通道，状态栏/交互自动落盘
+            if self.tracer is not None:
+                human_io.set_tracer(self.tracer)
 
         td_runner = tool_dispatch.ToolDispatchRunner(
             executor=self.executor,
@@ -504,6 +509,7 @@ class Runner:
             working_root=working_root,
             plain_text=self.plain_text,
             verbose=self.verbose,
+            tracer=self.tracer,
         )
         return td_runner.run(match_result, llm, max_iterations,
                               state_path=state_path, resume_from=resume_from)
@@ -581,12 +587,16 @@ class Runner:
         sp = getattr(hio, "set_plain_text", None)
         if callable(sp):
             sp(self.plain_text)
+        # debug 轨迹：把 tracer 挂到语义通道，状态栏/交互自动落盘
+        if self.tracer is not None:
+            hio.set_tracer(self.tracer)
         print(f"[session] 输入模式: {getattr(hio, 'input_mode', lambda: '未知')()}")
         td_runner = tool_dispatch.ToolDispatchRunner(
             executor=self.executor, assembler=self.assembler,
             approval_fn=self._check_approval, human_io=hio,
             turn_policy=None, working_root=wr,
             plain_text=self.plain_text, verbose=self.verbose,
+            tracer=self.tracer,
         )
 
         # 未给初始 query：先打印该 skill 的用法提示（含 ASCII art），再等待用户第一条指令

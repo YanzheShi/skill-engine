@@ -16,11 +16,14 @@ CLI — 命令行接口
 
 import json
 import logging
+import os
 import sys
+from datetime import datetime
 import typer
 from typing import Optional
 
 from .execution.paths import to_native_path, native_path_hint
+from .execution.tracer import DebugTracer
 
 # Fix Windows encoding for CLI output
 if sys.platform == "win32":
@@ -35,6 +38,36 @@ app = typer.Typer(
     help="Skills Engine: 独立的 skills 解析和路由工具",
     add_completion=False,
 )
+
+
+def _resolve_debug_tracer(debug: bool, debug_log: Optional[str], working_root: Optional[str]):
+    """解析 debug 落盘 tracer。优先级（高→低）：
+
+    - --debug-log <path>                （显式命令行，最高优先）
+    - SKILL_ENGINE_DEBUG_LOG 环境变量     （CI 注入，或 config.yml settings.debug_log 经 backfill 填入；setdefault 保证 CI 注入优先于配置文件）
+    - --debug                           （命令行开关，用默认路径）
+    - SKILL_ENGINE_DEBUG 环境变量        （config.yml settings.debug: true 经 backfill 填入，用默认路径）
+    - 以上皆无 → 返回 enabled()=False 的 DebugTracer（全程 no-op，零开销）
+
+    返回值始终是 DebugTracer 实例（支持 with 语句自动 close），调用方无需判空。
+    """
+    env_path = os.environ.get("SKILL_ENGINE_DEBUG_LOG")
+    env_debug = os.environ.get("SKILL_ENGINE_DEBUG")
+    want_debug = bool(debug) or str(env_debug).strip().lower() in ("1", "true", "yes", "on")
+    path = debug_log or env_path
+    if not path and want_debug:
+        from pathlib import Path as _P
+        wr = working_root or str(_P.cwd())
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(wr, f".{ts}.skill-engine-debug.log")
+    else:
+        # 相对路径的 debug_log 基于 working_root 解析，使其跟随 -w 指定的工作目录，
+        # 而非引擎进程 cwd。绝对路径（如显式全路径或 CI 注入）保持不变。
+        # 背景：config.yml 里常写 `debug_log: ./run.log`，若直接用 cwd 做 open() 基目录，
+        # 日志会落在引擎启动目录而非 -w 目标目录，造成「指定了工作目录日志却不在那里」的困惑。
+        if path and not os.path.isabs(path) and working_root:
+            path = os.path.join(working_root, path)
+    return DebugTracer(path)
 
 
 @app.command()
@@ -282,6 +315,8 @@ def run(
     resume_from: Optional[str] = typer.Option(None, "--resume-from", "-r", help="P2-3 从指定状态文件续跑"),
     args: str = typer.Option("", "--args", "-a", help="用户实际请求参数（当指定 skill name 时使用）"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="显示引擎调试日志（迭代/历史条数/LLM 响应）"),
+    debug: bool = typer.Option(False, "--debug", help="记录调试轨迹（上下文/状态栏/交互流程）到 JSONL 日志"),
+    debug_log: Optional[str] = typer.Option(None, "--debug-log", help="调试日志路径；或设环境变量 SKILL_ENGINE_DEBUG_LOG（CI 优先）"),
 ):
     """执行 skill
 
@@ -300,6 +335,7 @@ def run(
     from .execution.runner import Runner
 
     working_root = _normalize_working_root(working_root)
+    tracer = _resolve_debug_tracer(debug, debug_log, working_root)
 
     # 1. 发现 + 注册（默认扫描 skills/ 目录）
     from pathlib import Path
@@ -323,6 +359,9 @@ def run(
         match_query = query_or_name
         plan = router.match(match_query)
 
+    tracer.event("route", method=plan.method,
+                 primary=(plan.primary.name if plan.primary else None),
+                 score=plan.score, uncertain=plan.uncertain, reason=plan.reason)
     if not plan.primary and not plan.selections:
         print(f"[ERROR] 未找到匹配的 skill: {query_or_name}")
         if plan.reason:
@@ -335,7 +374,7 @@ def run(
     # 3. 编译 + 执行
     executor = Executor(timeout=30, allow_all=True)
     assembler = Assembler(executor=executor, command_timeout=30)
-    runner = Runner(assembler, executor, plain_text=True, verbose=verbose)
+    runner = Runner(assembler, executor, plain_text=True, verbose=verbose, tracer=tracer)
 
     if dry_run:
         # 只编译，不执行
@@ -350,6 +389,7 @@ def run(
                 print(f"分数: {plan.score or 1.0:.2f}")
                 print(f"{'='*60}")
                 print(prompt[:2000])
+        tracer.close()
         return
 
     # v3: baseline run -td 埋 token（与 MOA 同款 CountingLLM 透明包装）。
@@ -410,7 +450,8 @@ def run(
             print(f"\n创建的文件:")
             for f in result["files_created"]:
                 print(f"  {f}")
-        print()
+    tracer.close()
+    print()
 
 
 def _get_llm_client(purpose: str = "cli-chat"):
@@ -848,6 +889,8 @@ def session(
     model: Optional[str] = typer.Option(None, "--model", "-m",
                                         help="指定模型 profile（默认 default；可用 profile 见 moa --list-models）"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="显示引擎调试日志（迭代/历史条数/LLM 响应）"),
+    debug: bool = typer.Option(False, "--debug", help="记录调试轨迹（上下文/状态栏/交互流程）到 JSONL 日志"),
+    debug_log: Optional[str] = typer.Option(None, "--debug-log", help="调试日志路径；或设环境变量 SKILL_ENGINE_DEBUG_LOG（CI 优先）"),
 ):
     """进入单 skill 持续会话（REPL 模式）
 
@@ -870,6 +913,7 @@ def session(
     from .execution.runner import Runner
 
     working_root = _normalize_working_root(working_root)
+    tracer = _resolve_debug_tracer(debug, debug_log, working_root)
 
     project_skills = Path.cwd() / "skills"
     roots = [str(project_skills)] if project_skills.exists() else []
@@ -889,6 +933,9 @@ def session(
         plan = router.match(query_or_name)
         match_query = query_or_name
 
+    tracer.event("route", method=plan.method,
+                 primary=(plan.primary.name if plan.primary else None),
+                 score=plan.score, uncertain=plan.uncertain, reason=plan.reason)
     if not plan.primary and not plan.selections:
         print(f"[ERROR] 未找到匹配的 skill: {skill or query_or_name}")
         if plan.reason:
@@ -900,7 +947,7 @@ def session(
 
     executor = Executor(timeout=30, allow_all=True)
     assembler = Assembler(executor=executor, command_timeout=30)
-    runner = Runner(assembler, executor, plain_text=True, verbose=verbose)
+    runner = Runner(assembler, executor, plain_text=True, verbose=verbose, tracer=tracer)
 
     if model:
         from .config import get_llm_by_profile, list_model_profiles
@@ -937,6 +984,7 @@ def session(
     stopped = result.get("stopped_by")
     if stopped in ("error", "no_match", "load_failed"):
         print(f"[session] 异常退出（{stopped}）: {result.get('output', '')}")
+    tracer.close()
 
 
 def _moa_menu(hio, title: str, options: list, allow_done: bool = False,
@@ -1071,6 +1119,8 @@ def moa(
     max_llm_calls: int = typer.Option(500, "--max-llm-calls", help="全局 LLM 调用次数上限（闸 #3）"),
     working_root: Optional[str] = typer.Option(None, "--working-root", "-w", help="目标项目目录（默认引擎 cwd）"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="显示引擎调试日志"),
+    debug: bool = typer.Option(False, "--debug", help="记录调试轨迹（上下文/状态栏/交互流程）到 JSONL 日志"),
+    debug_log: Optional[str] = typer.Option(None, "--debug-log", help="调试日志路径；或设环境变量 SKILL_ENGINE_DEBUG_LOG（CI 优先）"),
     state_path: Optional[str] = typer.Option(None, "--state-path", "-s", help="MOA 运行状态落盘路径（每轮检查点，支持断点续跑）"),
     resume_from: Optional[str] = typer.Option(None, "--resume-from", "-r", help="从指定状态文件续跑 MOA（崩溃恢复）；状态文件由上次运行生成于 --state-path 或默认工作目录 moa_session_state.json"),
 ):
@@ -1094,6 +1144,7 @@ def moa(
     from .config import list_model_profiles
 
     working_root = _normalize_working_root(working_root)
+    tracer = _resolve_debug_tracer(debug, debug_log, working_root)
 
     project_skills = Path.cwd() / "skills"
     roots = [str(project_skills)] if project_skills.exists() else []
@@ -1151,7 +1202,8 @@ def moa(
                      max_llm_calls=opts.get("max_llm_calls", max_llm_calls),
                      verbose=verbose, export_after=True, export_source="plan",
                      trusted_root=working_root,
-                     state_path=state_path, resume_from=resume_from)
+                     state_path=state_path, resume_from=resume_from,
+                     tracer=tracer)
         return
 
     # ── 交互向导 ──
@@ -1234,10 +1286,11 @@ def moa(
             print(f'[INFO] 复用方式: skill-engine moa --plan "{path}"')
             return
         if decision == "reconfig":
-            # 重新进入向导
+            # 重新进入向导（递归会新建 tracer，先关闭外层避免句柄泄漏）
+            tracer.close()
             return moa(query=q, working_root=working_root, max_rounds=max_rounds,
                        max_iterations=max_iterations, max_llm_calls=max_llm_calls,
-                       verbose=verbose)
+                       verbose=verbose, debug=debug, debug_log=debug_log)
         if decision == "start":
             break
 
@@ -1246,7 +1299,8 @@ def moa(
                  max_llm_calls=max_llm_calls, verbose=verbose,
                  export_after=True, export_source="wizard",
                  trusted_root=working_root,
-                 state_path=state_path, resume_from=resume_from)
+                 state_path=state_path, resume_from=resume_from,
+                 tracer=tracer)
 
 
 def _moa_execute(registry, workers: list, commander, query: str,
@@ -1255,7 +1309,8 @@ def _moa_execute(registry, workers: list, commander, query: str,
                  export_after: bool = False, export_source: str = "executed",
                  trusted_root: Optional[str] = None,
                  state_path: Optional[str] = None,
-                 resume_from: Optional[str] = None) -> None:
+                 resume_from: Optional[str] = None,
+                 tracer=None) -> None:
     """构造运行环境并执行 MOA，打印最终报告；export_after 时导出配置 JSON。
 
     trusted_root：用户显式指定的受信任工作目录（-w 非空时启用）——其内的文件
@@ -1288,6 +1343,7 @@ def _moa_execute(registry, workers: list, commander, query: str,
         working_root=working_root or str(Path.cwd()),
         plain_text=True, verbose=verbose,
         trusted_root=trusted_root,
+        tracer=tracer,
     )
     if resume_from:
         print(f"[INFO] 续跑模式：从状态文件 {resume_from} 载入断点，继续整轮协作")
@@ -1328,6 +1384,9 @@ def _moa_execute(registry, workers: list, commander, query: str,
             max_llm_calls, working_root or str(Path.cwd()), source=export_source)
         print(f"[INFO] 本次 MOA 配置已导出: {path}")
         print(f'[INFO] 复用方式: skill-engine moa --plan "{path}"')
+
+    if tracer is not None:
+        tracer.close()
 
 
 def main() -> None:
