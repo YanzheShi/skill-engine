@@ -75,13 +75,10 @@ def list(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="详细输出"),
 ):
     """列出所有可用的 skills"""
-    from pathlib import Path
-    from .routing.discovery import discover
+    from .routing.discovery import discover_skills
     from .routing.registry import Registry
 
-    project_skills = Path.cwd() / "skills"
-    roots = [str(project_skills)] if project_skills.exists() else []
-    index = discover(roots=roots)
+    index = discover_skills()
     registry = Registry(index)
 
     active = registry.list_active()
@@ -104,13 +101,10 @@ def info(
     name: str = typer.Argument(..., help="skill 名称"),
 ):
     """查看 skill 的详细信息"""
-    from pathlib import Path
-    from .routing.discovery import discover
+    from .routing.discovery import discover_skills
     from .routing.registry import Registry
 
-    project_skills = Path.cwd() / "skills"
-    roots = [str(project_skills)] if project_skills.exists() else []
-    index = discover(roots=roots)
+    index = discover_skills()
     registry = Registry(index)
 
     skill = registry.load_skill(name)
@@ -134,14 +128,11 @@ def match(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="显示路由详细日志"),
 ):
     """匹配 skills 到用户输入"""
-    from pathlib import Path
-    from .routing.discovery import discover
+    from .routing.discovery import discover_skills
     from .routing.registry import Registry
     from .routing.router import Router
 
-    project_skills = Path.cwd() / "skills"
-    roots = [str(project_skills)] if project_skills.exists() else []
-    index = discover(roots=roots)
+    index = discover_skills()
     registry = Registry(index)
     if verbose:
         logging.getLogger("skill_engine.router").setLevel(logging.INFO)
@@ -209,13 +200,9 @@ def scan(
 ):
     """扫描并显示发现的 skills"""
     from pathlib import Path
-    from .routing.discovery import discover
+    from .routing.discovery import discover_skills
 
-    roots = []
-    if root:
-        roots.append(Path(root))
-
-    index = discover(roots=roots)
+    index = discover_skills(extra_roots=[Path(root)] if root else None)
     print(f"\n发现 {len(index)} 个 skills:\n")
     for name, meta in sorted(index.items(), key=lambda x: (-x[1].priority, x[0])):
         print(f"  {name} (priority={meta.priority}, state={meta.state})")
@@ -227,13 +214,10 @@ def scan(
 @app.command()
 def clear_cache():
     """清空 skill 编译缓存"""
-    from pathlib import Path
+    from .routing.discovery import discover_skills
     from .routing.registry import Registry
-    from .routing.discovery import discover
 
-    project_skills = Path.cwd() / "skills"
-    roots = [str(project_skills)] if project_skills.exists() else []
-    index = discover(roots=roots)
+    index = discover_skills()
     registry = Registry(index)
     registry.clear_cache()
     print("缓存已清空")
@@ -327,21 +311,18 @@ def run(
     4. --llm: 档位 A，单次 LLM 调用
     5. 默认: 纯编译（pipe 模式）
     """
-    from .routing.discovery import discover
     from .routing.registry import Registry
     from .routing.router import Router
     from .execution.assembler import Assembler
     from .execution.executor import Executor
     from .execution.runner import Runner
+    from .routing.discovery import discover_skills
 
     working_root = _normalize_working_root(working_root)
     tracer = _resolve_debug_tracer(debug, debug_log, working_root)
 
-    # 1. 发现 + 注册（默认扫描 skills/ 目录）
-    from pathlib import Path
-    project_skills = Path.cwd() / "skills"
-    roots = [str(project_skills)] if project_skills.exists() else []
-    index = discover(roots=roots)
+    # 1. 发现 + 注册（默认扫描 skills/ 目录，含内置/用户级/项目级）
+    index = discover_skills(working_root=working_root)
     registry = Registry(index)
 
     # 2. 匹配
@@ -656,16 +637,14 @@ def index(
       skill-engine index --rebuild-meta
     """
     from pathlib import Path
-    from .routing.discovery import discover
     from .routing.registry import Registry
     from .config import get_llm
     from .creator.preprocessor import Preprocessor
+    from .routing.discovery import discover_skills
 
     # 1. 扫描
     print("[INFO] 正在扫描 skills...")
-    project_skills = Path.cwd() / "skills"
-    roots = [str(project_skills)] if project_skills.exists() else []
-    index = discover(roots=roots)
+    index = discover_skills()
     registry = Registry(index)
     active = registry.list_active()
 
@@ -820,14 +799,11 @@ def scan_security(
     正则扫描所有 active skill，分析安全性。只提醒，不阻止。
     使用 --deep 可额外使用 LLM 深度分析。
     """
-    from pathlib import Path as _Path
-    from .routing.discovery import discover
+    from .routing.discovery import discover_skills
     from .routing.registry import Registry
     from .security.scanner import scan_skill, scan_skill_deep, scan_all
 
-    project_skills = _Path.cwd() / "skills"
-    roots = [str(project_skills)] if project_skills.exists() else []
-    index = discover(roots=roots)
+    index = discover_skills()
     registry = Registry(index)
 
     if name:
@@ -909,18 +885,16 @@ def session(
     `skill-engine moa --list-models`；不指定则用默认 LLM 配置。
     """
     from pathlib import Path
-    from .routing.discovery import discover
     from .routing.registry import Registry
     from .execution.assembler import Assembler
     from .execution.executor import Executor
     from .execution.runner import Runner
+    from .routing.discovery import discover_skills
 
     working_root = _normalize_working_root(working_root)
     tracer = _resolve_debug_tracer(debug, debug_log, working_root)
 
-    project_skills = Path.cwd() / "skills"
-    roots = [str(project_skills)] if project_skills.exists() else []
-    index = discover(roots=roots)
+    index = discover_skills(working_root=working_root)
     registry = Registry(index)
     router = _create_router(registry)
 
@@ -1138,7 +1112,6 @@ def moa(
     查看可配置的模型：--list-models。
     """
     from pathlib import Path
-    from .routing.discovery import discover
     from .routing.registry import Registry
     from .execution.assembler import Assembler
     from .execution.executor import Executor
@@ -1146,13 +1119,12 @@ def moa(
     from .execution.human_io import CliHumanIO
     from .execution.moa import MoaOrchestrator, MoaAgent
     from .config import list_model_profiles
+    from .routing.discovery import discover_skills
 
     working_root = _normalize_working_root(working_root)
     tracer = _resolve_debug_tracer(debug, debug_log, working_root)
 
-    project_skills = Path.cwd() / "skills"
-    roots = [str(project_skills)] if project_skills.exists() else []
-    index = discover(roots=roots)
+    index = discover_skills(working_root=working_root)
     registry = Registry(index)
 
     profiles = list_model_profiles()

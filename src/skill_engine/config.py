@@ -29,6 +29,7 @@ config.yml 结构：
 """
 
 import os
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
@@ -59,20 +60,73 @@ _project_root = _env_path.parent
 # SECURITY_MODE / MCP_CONFIG_PATH / TAVILY_API_KEY，以及其它模块里的
 # os.getenv 调用，都能从 config.yml 取到值。回填用 setdefault：仅当对应
 # 环境变量未设置时才写，故真实环境变量 / CI 注入始终优先于 config.yml。
+def _normalize_path(raw: str) -> Path:
+    """把各种风格的路径归一化为当前平台可用的绝对路径。
+
+    主要容错 Windows + Git Bash / WSL 下常见的 POSIX 盘符写法：
+      /d/foo      → D:/foo
+      /mnt/d/foo  → D:/foo
+    其余情况交给 pathlib（已支持 D:/foo、\\\\server\\share、~ 展开等）。
+    """
+    s = (raw or "").strip()
+    if os.name == "nt":
+        m = re.match(r"^/(?:mnt/)?([a-zA-Z])/(.*)$", s)
+        if m:
+            s = f"{m.group(1).upper()}:/{m.group(2)}"
+    return Path(s).expanduser()
+
+
+def _resolve_config_yaml_path() -> "Path | None":
+    """定位统一配置 config.yml，按优先级返回首个存在的路径。
+
+    查找顺序（兼容「源码开发」与「uv tool 安装到隔离环境」两种部署形态）：
+      1. 环境变量 SKILL_ENGINE_CONFIG_YAML（兼容旧名 SKILL_ENGINE_MODELS_YAML）显式指定；
+      2. 从当前工作目录 CWD 逐级向上查找 config.yml（项目内运行：在 skill-engine
+         项目目录或其子目录跑命令时自动命中项目根）；
+      3. 用户级全局配置 ~/.skill-engine/config.yml（脱离仓库、任意目录常驻）；
+      4. 兜底：基于本文件位置的「项目根」回溯（源码 / 开发模式；uv tool 安装后
+         此路径落在隔离环境 Lib/，通常不存在，仅作安全网）。
+
+    显式指定但文件不存在时返回 None（不静默回退，避免误导）；其余情况返回
+    首个命中的路径，全未命中返回 None（调用方优雅降级为 {}）。
+    """
+    # 1. 显式覆盖
+    override = os.getenv("SKILL_ENGINE_CONFIG_YAML") or os.getenv("SKILL_ENGINE_MODELS_YAML")
+    if override:
+        p = _normalize_path(os.path.expandvars(override))
+        return p if p.exists() else None
+    # 2. CWD 向上查找（项目内运行）
+    cwd = Path.cwd()
+    for d in [cwd, *cwd.parents]:
+        cand = d / "config.yml"
+        if cand.exists():
+            return cand
+    # 3. 用户级全局配置
+    user_cfg = Path.home() / ".skill-engine" / "config.yml"
+    if user_cfg.exists():
+        return user_cfg
+    # 4. 兜底：源码 / 开发模式（基于 __file__ 回溯）
+    fallback = _project_root / "config.yml"
+    return fallback if fallback.exists() else None
+
+
+# 模块级：先定位 config.yml（供 _load_config_yml 读取与 mcp_config 相对解析共用）
+_CONFIG_YML_PATH = _resolve_config_yaml_path()
+
+
 def _load_config_yml() -> dict:
     """读取统一配置 config.yml。
 
-    路径：环境变量 SKILL_ENGINE_CONFIG_YAML 优先，否则 <项目根>/config.yml。
+    路径解析见 _resolve_config_yaml_path()：环境变量 > CWD 向上查找 >
+    用户级 ~/.skill-engine/config.yml > 基于 __file__ 的兜底。
+
     返回 {"models": [...], "settings": {...}}；文件缺失 / yaml 不可用 /
     解析失败 / 非 dict：均返回 {}（优雅降级，不抛异常）。
     """
     if yaml is None:
         return {}
-    # 主覆盖：SKILL_ENGINE_CONFIG_YAML；兼容旧名 SKILL_ENGINE_MODELS_YAML
-    # （曾用于独立 models.yaml）；两者皆空则默认 <项目根>/config.yml。
-    path = os.getenv("SKILL_ENGINE_CONFIG_YAML") or os.getenv("SKILL_ENGINE_MODELS_YAML")
-    cfg_path = Path(path) if path else (_project_root / "config.yml")
-    if not cfg_path.exists():
+    cfg_path = _CONFIG_YML_PATH
+    if cfg_path is None:
         return {}
     try:
         with open(cfg_path, "r", encoding="utf-8") as f:
@@ -121,7 +175,16 @@ def _apply_config_backfill(cfg: dict) -> None:
             val = settings.get(key)
             if val is None or val == "":
                 continue
-            os.environ.setdefault(env_name, os.path.expandvars(str(val)))
+            if key == "mcp_config":
+                # 相对路径基于 config.yml 所在目录解析，使全局常驻（~/.skill-engine）
+                # 布置时 mcp.json 也能被正确定位，而非错误地相对 CWD。
+                expanded = os.path.expandvars(str(val))
+                if not os.path.isabs(expanded):
+                    base = _CONFIG_YML_PATH.parent if _CONFIG_YML_PATH else Path.cwd()
+                    expanded = str((base / expanded).resolve())
+                os.environ.setdefault(env_name, expanded)
+            else:
+                os.environ.setdefault(env_name, os.path.expandvars(str(val)))
 
     # default / secondary 作为 LLM_CONFIGS 的内置别名，也通过 env 回填，
     # 使 get_llm(purpose) 与 MOA 的 default/secondary 沿用既有路径。

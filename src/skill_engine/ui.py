@@ -17,36 +17,16 @@ from pathlib import Path
 from typing import Optional
 
 
-def _get_project_skills_dir() -> Optional[Path]:
-    """从模块文件路径推导项目根目录下的 skills/ 目录"""
-    try:
-        mod_path = Path(__file__).resolve()
-        project_root = mod_path.parent.parent.parent
-        skills_dir = project_root / "skills"
-        if skills_dir.is_dir():
-            return skills_dir
-    except NameError:
-        pass
-    cwd_skills = Path.cwd() / "skills"
-    if cwd_skills.is_dir():
-        return cwd_skills
-    return None
-
-
-def _get_engine(roots: Optional[list[Path]] = None):
-    """懒加载 engine 组件"""
-    from skill_engine.routing.discovery import discover
+def _get_engine(working_root: Optional[str] = None):
+    """懒加载 engine 组件（含内置/用户级/项目级 skills）"""
+    from skill_engine.routing.discovery import discover_skills
     from skill_engine.routing.registry import Registry
     from skill_engine.routing.router import Router
     from skill_engine.execution.executor import Executor
     from skill_engine.execution.assembler import Assembler
     from skill_engine.execution.runner import Runner
 
-    if roots is None:
-        skills_dir = _get_project_skills_dir()
-        roots = [skills_dir] if skills_dir else []
-
-    index = discover(roots=roots)
+    index = discover_skills(working_root=working_root)
     registry = Registry(index)
 
     from skill_engine.routing.domain_words import register_domain_words
@@ -83,12 +63,10 @@ def list_skills(verbose: bool = False) -> str:
     active = registry.list_active()
 
     if not active:
-        scanned = []
-        mod_skills = _get_project_skills_dir()
-        if mod_skills:
-            scanned.append(f"  - {mod_skills}（项目 skills 目录）")
-        paths = "\n".join(scanned)
-        return f"暂无可用 skills。\n\n扫描路径：\n{paths}\n\n提示：确保 skills/ 目录存在且包含 SKILL.md 的子目录。"
+        return ("暂无可用 skills。\n\n"
+                "已扫描：内置 skills、用户级 ~/.skill-engine/skills、"
+                "项目级 .skill-engine/skills 及当前目录 skills/。\n"
+                "提示：确保 skills/ 目录存在且包含 SKILL.md 的子目录。")
 
     lines = [f"## 共 {len(active)} 个可用 skills\n"]
     groups = registry.get_groups()
@@ -226,17 +204,13 @@ def scan_approval_needs(skill_name: str, query: str):
     if not skill_name:
         return [], ""
 
-    skills_dir = _get_project_skills_dir()
-    if not skills_dir:
-        return [], "未找到 skills 目录"
-
-    from skill_engine.routing.discovery import discover
+    from skill_engine.routing.discovery import discover_skills
     from skill_engine.routing.registry import Registry
     from skill_engine.execution.runner import Runner
     from skill_engine.execution.executor import Executor
     from skill_engine.execution.assembler import Assembler
 
-    index = discover(roots=[skills_dir])
+    index = discover_skills()
     registry = Registry(index)
     skill = registry.load_skill(skill_name)
     if not skill:

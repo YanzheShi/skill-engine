@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional
 import yaml
 import re
+import importlib.resources as _resources
 from skill_engine.models import SkillMeta
 
 # ----- 来源标注（安全设计 v2，第 0 层）-----
@@ -151,6 +152,7 @@ def discover(
     overrides: Optional[dict[str, str]] = None,
     skip_defaults: bool = False,
     extend_skills: bool = False,
+    include_builtin: bool = False,
 ) -> dict[str, SkillMeta]:
     """扫描多根目录，建立 skill 索引。
 
@@ -171,6 +173,16 @@ def discover(
     """
     overrides = overrides or {}
     all_index: dict[str, SkillMeta] = {}
+
+    # 0. 内置 skills（引擎自带，优先级最低=5，用户/项目级可覆盖）
+    if include_builtin:
+        builtin_dir = _builtin_skills_dir()
+        if builtin_dir:
+            builtin_index = _discover_skill_dir(builtin_dir, priority=5)
+            for name, meta in builtin_index.items():
+                meta.state = overrides.get(name, "on")
+                if name not in all_index:       # 最低优先级，不覆盖已有
+                    all_index[name] = meta
 
     # 是否加载外部 skill（兼容旧参数 skip_defaults）
     load_external = extend_skills and not skip_defaults
@@ -238,3 +250,77 @@ def discover(
             all_index[name].state = state
 
     return all_index
+
+
+def _builtin_skills_dir() -> Optional[Path]:
+    """引擎自带 skills 目录（统一来源，开发态与安装态通用）。
+
+    定位优先级：
+      1. 安装态：skills 经 pyproject 的 force-include 打进
+         ``site-packages/skill_engine/skills``，用 importlib.resources 解析；
+      2. 开发态：包内无 skills 子目录时，回退到仓库根 ``skills/``
+         （基于本文件位置向上回溯：src/skill_engine/routing/discovery.py
+          → src/skill_engine → src → 仓库根）。
+    返回 None 表示均不可用。
+    """
+    # 1. 安装态：包内 skills（importlib.resources 解析真实路径）
+    try:
+        ref = _resources.files("skill_engine").joinpath("skills")
+        with _resources.as_file(ref) as p:
+            if p.is_dir():
+                return p
+    except Exception:
+        pass
+    # 2. 开发态：仓库根 skills/（包内无 skills 子目录时回退）
+    #    discovery.py 位于 <repo>/src/skill_engine/routing/，
+    #    向上 3 层到达仓库根：routing → skill_engine → src → <repo>
+    try:
+        routing_dir = Path(__file__).resolve().parent      # .../src/skill_engine/routing
+        repo_skills = routing_dir.parent.parent.parent / "skills"  # 仓库根/skills
+        if repo_skills.is_dir():
+            return repo_skills
+    except Exception:
+        pass
+    return None
+
+
+def discover_skills(
+    working_root: Optional[str] = None,
+    extra_roots: Optional[list] = None,
+    extend_skills: bool = True,
+    include_builtin: bool = True,
+) -> dict[str, SkillMeta]:
+    """统一 skill 索引入口（替代各处重复的 CWD/skills + discover 调用）。
+
+    优先级（高 → 低）：
+      - 命令行 roots（CWD/skills、working_root/skills、extra_roots）  priority=30
+      - 项目级（.skill-engine/skills、.claude/skills）                priority=20
+      - 用户级（~/.skill-engine/skills、~/.claude/skills、~/.agents/skills） priority=10
+      - 内置 skills（引擎自带）                                      priority=5（最低）
+
+    即：用户/项目级 skills 可覆盖同名内置 skill；命令行显式目录优先级最高。
+
+    Args:
+        working_root: -w 指定的目标项目目录（其 skills/ 子目录会被扫描）。
+        extra_roots: 额外扫描根（如 scan 命令的 --root）。
+        extend_skills: 是否扫描用户级/项目级外部路径（默认 True）。
+        include_builtin: 是否包含引擎内置 skills（默认 True）。
+    """
+    roots: list = []
+    cwd_skills = Path.cwd() / "skills"
+    if cwd_skills.is_dir():
+        roots.append(cwd_skills)
+    if working_root:
+        wr_skills = Path(working_root) / "skills"
+        if wr_skills.is_dir():
+            roots.append(wr_skills)
+    if extra_roots:
+        for r in extra_roots:
+            rp = Path(r)
+            if rp.is_dir():
+                roots.append(rp)
+    return discover(
+        roots=roots or None,
+        extend_skills=extend_skills,
+        include_builtin=include_builtin,
+    )

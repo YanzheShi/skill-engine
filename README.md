@@ -84,11 +84,19 @@ CLI 默认只扫描 `当前工作目录下的 skills/` 子目录。因此：
 
 > 引擎还会扫描 `~/.agents/skills/`、`~/.claude/skills/`（Claude Code 生态兼容），通过相应开关开启 `extend_skills`。
 
-### 2. LLM / MCP 配置从哪来
+### 2. LLM / MCP 配置从哪来（config.yml 统一配置源）
 
-`config.py` 固定优先读取**仓库根目录**的 `.env`；脱离仓库后该文件不存在，会依次 fallback 到「当前工作目录的 `.env`」→「系统环境变量」。
+项目已迁移到单一配置源 **`config.yml`**（取代原先分散的 `.env` 与 `models.yaml`）。`config.py` 在 import 时读取它并回填环境变量，因此「位置」成为关键。全局命令（uv tool 安装）下，`config.yml` 按以下优先级自动定位，**无需你手动设路径**：
 
-**最稳的做法**：把 LLM 配置设为 **Windows 系统环境变量**（设置 → 系统 → 关于 → 高级系统设置 → 环境变量 → 用户变量），彻底不依赖任何 `.env` 文件：
+1. **环境变量 `SKILL_ENGINE_CONFIG_YAML`**（兼容旧名 `SKILL_ENGINE_MODELS_YAML`）显式指定——最高优先，可强制指向任意位置；
+2. **当前工作目录向上查找**——你在 skill-engine 项目目录（或其子目录）跑命令时，自动命中项目根的 `config.yml`；
+3. **用户级全局 `~/.skill-engine/config.yml`**（Windows：`C:\Users\<你>\.skill-engine\config.yml`）——脱离仓库、任意目录跑都能读到，最契合「全局 CLI」；
+4. **兜底**：基于包安装位置的回溯（开发 / 源码模式，安装版通常不存在）。
+
+> 优先级即：显式指定 > CWD 向上 > 用户级全局 > 兜底。任选其一布置你的 `config.yml` 即可。
+> `config.yml` 里的 `mcp_config`（如 `./mcp.json`）若是相对路径，会**基于 config.yml 所在目录**解析——所以全局常驻时把 `mcp.json` 和 `config.yml` 放同一目录即可。
+
+**兜底兼容**：真实环境变量（含 CI 注入）始终优先于 `config.yml`；旧名无前缀的 `LLM_MODEL/LLM_BASE_URL/LLM_API_KEY` 仍有过渡回退。因此「系统环境变量」依然是最稳的零文件方案（设置 → 系统 → 关于 → 高级系统设置 → 环境变量 → 用户变量）：
 
 ```
 SKILL_ENGINE_LLM_MODEL=gpt-4o
@@ -96,22 +104,38 @@ SKILL_ENGINE_LLM_BASE_URL=https://api.openai.com/v1
 SKILL_ENGINE_LLM_API_KEY=sk-xxx
 ```
 
-MCP 配置同理，可用环境变量指定：`SKILL_ENGINE_MCP_CONFIG=D:/path/to/mcp.json`。
+## 配置：config.yml（统一配置源）
 
-## 环境变量配置
+项目用单一 `config.yml` 管理 LLM 与全局设置，**密钥用 `${ENV}` 引用、不写明文**，因此 `config.yml` 本体可入库（模板见 [config.yml.example](config.yml.example)）。
 
-复制 `.env.example` 为 `.env` 并填入配置：
+从模板复制出你自己的配置（密钥不入库，需自行创建）：
 
 ```bash
-cp .env.example .env
+cp config.yml.example config.yml              # 项目内布置（在目录里跑自动命中）
+# 或全局常驻（任意目录都能读到）：
+mkdir -p ~/.skill-engine && cp config.yml.example ~/.skill-engine/config.yml
 ```
 
-最小配置只需要一个 LLM 提供商（OpenAI 兼容 API）：
+最小配置（`config.yml`）——一个 OpenAI 兼容模型 + 全局设置：
 
-```ini
-SKILL_ENGINE_LLM_MODEL=gpt-4o
-SKILL_ENGINE_LLM_BASE_URL=https://api.openai.com/v1
-SKILL_ENGINE_LLM_API_KEY=sk-your-api-key
+```yaml
+models:
+  - name: default
+    model: gpt-4o
+    base_url: https://api.openai.com/v1
+    api_key: ${OPENAI_API_KEY}        # 用环境变量引用密钥，避免明文
+    provider: openai
+  - name: deepseek
+    model: deepseek-chat
+    base_url: https://api.deepseek.com
+    api_key: ${DEEPSEEK_API_KEY}
+    provider: openai
+
+settings:
+  security_mode: permissive
+  auto_approve: all
+  mcp_config: ./mcp.json
+  tavily_api_key: ${TAVILY_API_KEY}
 ```
 
 支持任何 OpenAI 兼容的 API 提供商，包括：
@@ -124,7 +148,7 @@ SKILL_ENGINE_LLM_API_KEY=sk-your-api-key
 - Ollama 本地模型
 - 其他任何兼容 OpenAI 接口的服务
 
-> 完整配置项见 [.env.example](.env.example)。
+> 完整配置项与多模型 profile（MOA 协作）见 [config.yml.example](config.yml.example)。
 
 ## 快速开始
 

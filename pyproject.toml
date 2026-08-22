@@ -50,6 +50,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/skill_engine"]
+# 把仓库根的 skills/ 一并打进 wheel 的 skill_engine/skills/，
+# 使 uv tool 全局命令也能用引擎内置 skills（开发态与安装态统一通过
+# importlib.resources 定位，见 routing/discovery.py:_builtin_skills_dir）。
+# hatchling 默认排除 __pycache__/*.pyc（且 .gitignore 已忽略），不会带入缓存。
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "skill_engine/skills"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
