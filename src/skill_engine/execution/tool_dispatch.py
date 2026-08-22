@@ -224,6 +224,12 @@ def _fuzzy_find(content: str, old: str):
 def _apply_edits(content: str, edits: list) -> tuple:
     """对 content 应用 edits，精确匹配优先，失败走行级宽松模糊匹配。
 
+    支持两种 edit：
+    - 普通 edit：``{"oldText", "newText"}``，要求 oldText 在**全局**唯一（与原行为一致）。
+    - 区间 edit：``{"oldText", "newText", "line_range": [start, end]}``（1-indexed 闭区间），
+      仅在指定行范围内定位 oldText，**不要求全局唯一**——消除「oldText 出现 2 次」歧义。
+      这让模型在重复行场景下用 line_range 精确锚定，避免反复 read 找唯一 oldText。
+
     Returns:
         (new_content, None)            成功
         (None, error_message)          失败（error 信息会回传给 LLM 以便重试）
@@ -233,11 +239,52 @@ def _apply_edits(content: str, edits: list) -> tuple:
     for edit in edits:
         if not edit.get("oldText"):
             return None, "error: edit 项缺少 oldText"
+
+    # 第一步：先应用「区间 edit」（按 line_range 锚定，消除全局歧义）
+    lines = content.splitlines(keepends=True)
+    # 按 line_range 处理（可能多次修改同一文件的不同区间，逐 edit 应用）
+    ranged_errors = []
+    plain_edits = []
+    for e in edits:
+        lr = e.get("line_range")
+        if not lr or not isinstance(lr, (list, tuple)) or len(lr) != 2:
+            plain_edits.append(e)
+            continue
+        start, end = int(lr[0]), int(lr[1])  # 1-indexed 闭区间
+        if start < 1 or end < start or end > len(lines):
+            ranged_errors.append(
+                f"error: line_range {lr} 越界（文件共 {len(lines)} 行）: {e['oldText'][:60]}"
+            )
+            continue
+        seg = "".join(lines[start - 1:end])
+        cnt = seg.count(e["oldText"])
+        if cnt == 0:
+            ranged_errors.append(
+                f"error: line_range {lr} 内未找到 oldText: {e['oldText'][:60]}"
+            )
+            continue
+        if cnt > 1:
+            ranged_errors.append(
+                f"error: line_range {lr} 内 oldText 出现 {cnt} 次（区间内仍需唯一）: {e['oldText'][:60]}"
+            )
+            continue
+        # 区间内唯一 → 替换并写回对应行
+        new_seg = seg.replace(e["oldText"], e["newText"], 1)
+        lines[start - 1:end] = [new_seg]
+    if ranged_errors:
+        # 区间 edit 有错直接返回（不部分应用，避免半成品）
+        return None, "\n".join(ranged_errors)
+    content = "".join(lines)
+
+    # 第二步：对「普通 edit」走原逻辑（全局唯一检查 + 精确/模糊）
+    edits = plain_edits
+    if not edits:
+        return content, None
     # 重复歧义：模糊匹配无法消除，直接报错（与原行为一致）
     for e in edits:
         c = content.count(e["oldText"])
         if c > 1:
-            return None, f"error: oldText 在文件中出现 {c} 次（需唯一）: {e['oldText'][:80]}"
+            return None, f"error: oldText 在文件中出现 {c} 次（需唯一，或改用 line_range 锚定）: {e['oldText'][:80]}"
     # 全精确：每个 oldText 恰出现 1 次
     exact = all(content.count(e["oldText"]) == 1 for e in edits)
     if exact:
@@ -1841,6 +1888,56 @@ class ToolDispatchRunner:
                         })
                         print(f"     [计划更新] status={plan_status}")
 
+                    elif tc["type"] == "query_db":
+                        # 整改 二轮 P0-3：只读 SQL 查询工具。消临时脚本（write_file+bash 验证）。
+                        import sqlite3 as _sqlite3
+                        sql = tc["input"].get("sql", "").strip()
+                        db_path_in = tc["input"].get("db_path", "").strip()
+                        if not sql:
+                            obs = "[query_db] sql 不能为空"
+                        elif not re.match(r"^(SELECT|PRAGMA|EXPLAIN|WITH)\b", sql, re.IGNORECASE):
+                            obs = ("[query_db] 仅允许只读语句（SELECT / PRAGMA / EXPLAIN / WITH 开头）。"
+                                   "拒绝执行 DDL/DML，避免误改数据。")
+                        else:
+                            # 解析 db 路径：显式指定优先，否则在 base_dir 递归找第一个 *.db
+                            db_file = None
+                            if db_path_in:
+                                db_file = _resolve_path(db_path_in, base_dir)
+                            else:
+                                candidates = sorted(base_dir.rglob("*.db"))
+                                if candidates:
+                                    db_file = candidates[0]
+                            if not db_file or not db_file.exists():
+                                obs = f"[query_db] 未找到数据库文件（指定={db_path_in or '无'}）。"
+                            else:
+                                try:
+                                    conn = _sqlite3.connect(str(db_file))
+                                    cur = conn.cursor()
+                                    cur.execute(sql)
+                                    rows = cur.fetchall()
+                                    cols = [d[0] for d in cur.description] if cur.description else []
+                                    if not rows:
+                                        obs = f"[query_db] 查询成功，0 行（列：{cols}）"
+                                    else:
+                                        width = max([len(str(c)) for c in cols] + [8])
+                                        header = " | ".join(str(c).ljust(width) for c in cols)
+                                        sep = "-+-".join("-" * width for _ in cols)
+                                        body = "\n".join(
+                                            " | ".join(str(v).ljust(width) for v in r) for r in rows
+                                        )
+                                        obs = f"[query_db] {len(rows)} 行（表：{db_file.name}）\n{header}\n{sep}\n{body}"
+                                    conn.close()
+                                except Exception as e:
+                                    obs = f"[query_db] 执行失败：{e}"
+                        step_results.append({"name": f"query_db_{tc['id']}", "type": "query_db", "sql": sql})
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "name": "query_db",
+                            "content": format_observation("query_db", {"exit_code": 0, "stdout": obs, "stderr": "", "timed_out": False}),
+                        })
+                        print(f"     [query_db] {sql[:60]}")
+
                     elif tc["type"] == "web_search":
                         query = tc["input"].get("query", "")
                         max_results = int(tc["input"].get("max_results", 5))
@@ -2089,20 +2186,24 @@ class ToolDispatchRunner:
                 offset = int(inp.get("offset", 0))
                 limit = int(inp.get("limit", 0))
                 force_refresh = bool(inp.get("force_refresh", False))
-                # 整改 A4 重复读取检测：同文件已达 3 次 read 仍继续（非 force_refresh）
-                # → 注入提示，不阻断本次读取，但警告其正快速消耗迭代预算。
+                # 整改 A4c（二轮 P0-1）：重复读取检测。
+                # 对所有 read（含 force_refresh）累计同文件次数；仅当本次是「分页切片读」
+                # （给了 offset/limit，而非全文）且已达阈值时注入提示——无论是否 force_refresh。
+                # 关键修复：原逻辑用 `not force_refresh` 豁免，导致模型滥用 force_refresh 切片读大文件
+                # 绕过检测（实测 database.py 被读 15+ 次）。全文读（无 offset/limit）不触发，避免干扰正常全文读。
+                is_paged = (offset > 0 or limit > 0)
                 read_count = sum(
                     1 for s in step_results
                     if s.get("type") == "read_file" and s.get("path") == str(full_path)
                 )
-                if read_count >= 3 and not force_refresh:
+                if read_count >= 3 and is_paged:
                     messages.append({
                         "role": "tool", "tool_call_id": tc["id"], "name": "read_file",
                         "content": (
-                            f"[提示] 你已第 {read_count + 1} 次读取 {filepath}。"
-                            f"反复分页读取同一文件会快速消耗迭代预算。请改用 "
-                            f"force_refresh=true 一次性取全文，或若之前已读过则直接基于"
-                            f"上文历史内容工作，不要继续分页重试。"
+                            f"[提示] 你已第 {read_count + 1} 次读取 {filepath}（含 force_refresh 切片读）。"
+                            f"反复分页/切片读取同一大文件会快速消耗迭代预算。请改用 "
+                            f"force_refresh=true 且**不带 offset/limit** 一次性取全文，"
+                            f"或若之前已读过则直接基于上文历史内容工作，不要继续分页重试。"
                         ),
                     })
                     # 仍继续本次读取（不阻断），让模型拿到内容后收敛

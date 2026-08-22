@@ -94,8 +94,15 @@ def edit_file(path: str, edits: list[dict]) -> str:
 
     Args:
         path: Target file path (absolute, or relative to working directory).
-        edits: List of {oldText, newText} dicts. Each `oldText` must appear
-               exactly once in the file, or the entire operation fails.
+        edits: List of edit dicts. Two forms supported:
+               - Plain: {"oldText", "newText"} — `oldText` must appear exactly
+                 once in the whole file, or the whole operation fails.
+               - Anchored: {"oldText", "newText", "line_range": [start, end]}
+                 (1-indexed inclusive line range) — `oldText` is matched ONLY
+                 within those lines, so it does NOT need to be globally unique.
+                 Use this when `oldText` (e.g. a repeated assignment) appears
+                 multiple times: give the line range you actually want to edit
+                 instead of re-reading the file to find a unique snippet.
 
     Returns:
         Success: "applied N edits to <path>"
@@ -139,6 +146,25 @@ def update_plan(plan: str, status: str = "in_progress") -> str:
 
     Returns:
         回显确认（实际存储由引擎内联完成，本函数体仅为 schema 声明）。
+    """
+    # 无 body：执行在 tool_dispatch 主循环内联实现（schema/执行分离，同 search_files）。
+    return ""
+
+
+@tool
+def query_db(sql: str, db_path: str = "") -> str:
+    """对工作目录内的 SQLite 数据库执行只读 SQL 查询，返回结果表格。
+
+    用于快速验证数据（如统计 AC 率、查某表列名），避免为每次验证都 write_file 临时
+    脚本 + bash 执行（那会浪费 2 轮迭代且污染工作目录）。仅允许 SELECT 等只读语句，
+    DDL/DML 会被拒绝。
+
+    Args:
+        sql: 只读 SQL（SELECT / PRAGMA / EXPLAIN 等）。
+        db_path: 数据库文件路径；留空则自动在工作目录下查找第一个 *.db 文件。
+
+    Returns:
+        查询结果（表格文本，经 format_observation 不截断）；或错误信息。
     """
     # 无 body：执行在 tool_dispatch 主循环内联实现（schema/执行分离，同 search_files）。
     return ""
@@ -379,7 +405,7 @@ def _take_screenshot(url: str, width: int = 1280, height: int = 800,
     return _take_fullpage_cdp(edge, target, width, out_abs, out_path)
 
 
-TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search, get_current_time, shot_web, view_image, update_plan]
+TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search, get_current_time, shot_web, view_image, update_plan, query_db]
 
 # 工具注册表：将硬编码列表升级为可扩展注册表（通用引擎核心，不绑定领域语义）。
 # 各 skill 可经 frontmatter 的 extra_tools 注入领域专属工具，核心不感知具体领域。
