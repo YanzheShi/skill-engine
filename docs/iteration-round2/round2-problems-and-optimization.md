@@ -146,7 +146,31 @@
 
 **提交**：`git commit`（独立于首轮 `47a45f6`，单独 commit）。
 
-### 残留（未做，按既定决策）
-- B1 补 pytest 超时分支（P1，未做，属顺手增强）
-- A3b run_python（你之前叫停，P0-3 query_db 已覆盖 DB 验证场景，暂不需要）
-- edit_file 的 diff/patch 格式（P0-2 用 line_range 已解决核心痛点，未做完整 patch 格式）
+### 2026-08-22 补充实施 P1-1 / P1-2（用户实测运行记录-2 后）
+
+实测（运行记录-2）暴露：P0-3 的 query_db 工具已就绪但**模型不知道用**（仍写 5 个临时脚本），
+且 pytest 超时（exit -1）仍无分析重跑。补两个小改动：
+
+| 项 | 文件 | 核心改动 | 验证 |
+|---|---|---|---|
+| **P1-1** query_db 推广 | skills/code-builder/SKILL.md | 验证指南加"DB 数据验证用 query_db 工具，别写临时 .py 脚本" | ✅ 文档指令（B 层） |
+| **P1-2** pytest 超时硬提示 | tool_dispatch.py `format_observation` | `timed_out` 时：若含 pytest 特征 → 专属 hint 收窄单测；否则通用超时 hint | ✅ 逻辑测试：pytest超时/非pytest超时/正常失败 三态正确 |
+
+**全量 py_compile 通过**；P1-2 独立逻辑测试通过（三态分支正确）。
+
+**改动量评估（实测确认）**：
+- P1-1：~4 行 SKILL.md 指令，零引擎代码。
+- P1-2：~14 行 tool_dispatch.py（timed_out 分支加 hint），机制现成（_diagnose_shell_error 同款）。
+
+**提交**：`git commit`（独立于 P0 commit `a6d1276`）。
+
+### 实测效果对比（运行记录-1 → 运行记录-2）
+- 总步数：~65 → ~52（↓ 约 20%）
+- edit 失败循环：7+ 步 → 0（P0-2 line_range 生效，无 "oldText 出现2次"）
+- database.py 反复读：15+ → ~8-10（P0-1 部分生效，cache 命中增多）
+- **残留**：query_db 仍未被模型调用（P1-1 指令刚加，需下次实测验证）；pytest 超时在无 P1-2 时仍浪费 2-3 步
+
+### 残留（仍未做）
+- A3b run_python（你叫停，P0-3 query_db 已覆盖）
+- edit_file 的 diff/patch 格式（P0-2 line_range 已解决核心痛点）
+- database.py 切片读彻底压（P0-1 只检测不阻断，模型惯性仍在；可升级为"第3次强制建议全文"）

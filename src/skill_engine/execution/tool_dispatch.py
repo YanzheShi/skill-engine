@@ -448,6 +448,20 @@ def format_observation(cmd: str, exec_result: dict) -> str:
     lines = [f"exit_code: {exit_code}"]
     if timed_out:
         lines.append("(timed_out)")
+        # 整改 P1（二轮）：测试超时（非失败）专属提示。日志实证 pytest 全量超时后
+        # 模型反复无分析重跑（浪费 2-3 轮）。此处硬提示收窄到单测，避免空转。
+        combined = (stdout + "\n" + stderr)
+        if "pytest" in combined or "test session" in combined or "collected" in combined:
+            lines.append(
+                "hint: 测试超时（非失败），不是用例报错。先收窄范围再跑："
+                "`pytest tests/xxx.py::test_y -x`（单文件/单用例），"
+                "或检查 DB 锁 / 死循环 /  fixture 慢；不要无分析地重复跑全量。"
+            )
+        else:
+            lines.append(
+                "hint: 命令执行超时。先确认是否死循环/长耗时操作，或主动传 timeout 参数；"
+                "不要在没改代码的情况下原样重跑。"
+            )
     if stdout:
         lines.append("stdout:")
         if len(stdout) > 8000:

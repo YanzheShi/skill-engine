@@ -197,6 +197,10 @@ arguments:
   - 运行 `pytest tests/` 或项目对应的测试命令
   - 如果项目有 Makefile，查看是否有 test/lint/check 等目标
 - 验证失败时：读取错误信息，判断是代码问题还是依赖问题，按渐进式降级流程处理
+- **DB 数据验证用 `query_db` 工具，不要写临时 .py 脚本**：需要查库（如统计 AC 率、看某表列名、
+  核对 submissions 记录）时，直接调 `query_db(sql="SELECT ...")` 返回表格结果，
+  不要用 `write_file` 写脚本 + `bash python xxx.py` 验证——那会浪费 2 轮迭代且污染工作目录。
+  `query_db` 仅允许只读 SELECT/PRAGMA，自动定位工作目录的 *.db 文件。
 
 ---
 
