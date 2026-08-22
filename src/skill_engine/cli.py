@@ -412,17 +412,20 @@ def run(
             result = runner.run_plan(plan, registry, query=match_query, tool_dispatch=td_llm,
                                       max_iterations=max_iterations,
                                       working_root=working_root or str(_Path.cwd()),
-                                      state_path=state_path, resume_from=resume_from)
+                                      state_path=state_path, resume_from=resume_from,
+                                      trusted_root=working_root)
     elif llm:
         llm_client = _get_llm_client()
         result = runner.run_plan(plan, registry, query=match_query, llm=llm_client,
-                                 working_root=working_root, state_path=state_path, resume_from=resume_from)
+                                 working_root=working_root, state_path=state_path, resume_from=resume_from,
+                                 trusted_root=working_root)
     elif steps:
         print(f"[INFO] 使用 Steps DSL 确定性执行模式")
         result = runner.run_plan(plan, registry, query=match_query,
-                                 working_root=working_root, state_path=state_path, resume_from=resume_from)
+                                 working_root=working_root, state_path=state_path, resume_from=resume_from,
+                                 trusted_root=working_root)
     else:
-        result = runner.run_plan(plan, registry, query=match_query)
+        result = runner.run_plan(plan, registry, query=match_query, trusted_root=working_root)
 
     # v3: baseline run -td 的 token 用量（与 MOA cli 同格式，driver 统一解析）
     if td_counter is not None:
@@ -979,6 +982,7 @@ def session(
         max_iterations=max_iterations,
         working_root=working_root or str(Path.cwd()),
         state_path=state_path, resume_from=resume_from,
+        trusted_root=working_root,
     )
 
     stopped = result.get("stopped_by")

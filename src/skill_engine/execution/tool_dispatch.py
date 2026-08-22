@@ -2052,7 +2052,6 @@ class ToolDispatchRunner:
                 })
                 print(f"     search '{pattern}' in {search_dir}: {n_matches} matches")
 
-    # ---------------- P2-3：todo 落盘续跑（状态持久化） ----------------
 
     def _save_state(self, path, messages, iterations, step_results, files_created,
                     final_prompt, session_mode: bool = False):

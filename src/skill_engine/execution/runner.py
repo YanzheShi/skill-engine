@@ -348,6 +348,7 @@ class Runner:
         working_root: Optional[str] = None,
         state_path: Optional[str] = None,
         resume_from: Optional[str] = None,
+        trusted_root: Optional[str] = None,
     ) -> dict:
         """Execute skill - 4-route dispatch (auto-detect Steps DSL).
 
@@ -358,8 +359,9 @@ class Runner:
             tool_dispatch: LLM client (optional, for route B)
             max_iterations: Max iterations (route B)
             working_root: Working directory root (file operations base, defaults to skill.directory)
-            state_path: 可选，运行状态落盘路径（P2-3 todo 续跑）
+            state_path: 可选，运行状态落盘路径（P2-3 ）
             resume_from: 可选，从指定状态文件续跑（P2-3）
+            trusted_root: 可选, 信任的工作目录， 用户如果手动指定工作目录，默认信任工作目录
         """
         skill = match_result.skill
         arguments = match_result.arguments
@@ -377,7 +379,8 @@ class Runner:
         # Route 2: route B - tool_dispatch loop
         if tool_dispatch:
             return self._run_tool_dispatch(match_result, tool_dispatch, max_iterations, working_root,
-                                            state_path=state_path, resume_from=resume_from)
+                                            state_path=state_path, resume_from=resume_from,
+                                            trusted_root=trusted_root)
 
         # Route 3: route A - single LLM call
         if llm:
@@ -407,6 +410,7 @@ class Runner:
                     working_root: Optional[str] = None,
                     state_path: Optional[str] = None,
                     resume_from: Optional[str] = None,
+                    trusted_root: Optional[str] = None,
                 ) -> dict:
                     """执行 MatchPlan（直接传入 MatchPlan，不经过 MatchResult 包装）
 
@@ -439,6 +443,7 @@ class Runner:
                             result = self.run(
                                 mr, llm=llm, tool_dispatch=tool_dispatch, max_iterations=max_iterations,
                                 working_root=working_root, state_path=state_path, resume_from=resume_from,
+                                trusted_root=trusted_root,
                             )
                             result["skill_name"] = selected.name
                             all_results.append(result)
@@ -468,7 +473,8 @@ class Runner:
                         method=plan.method, arguments={"$ARGUMENTS": query, "$0": query, **parse_named_params(query)},
                     )
                     return self.run(mr, llm=llm, tool_dispatch=tool_dispatch, max_iterations=max_iterations,
-                       working_root=working_root, state_path=state_path, resume_from=resume_from)
+                       working_root=working_root, state_path=state_path, resume_from=resume_from,
+                       trusted_root=trusted_root)
 
     def _run_tool_dispatch(
         self,
@@ -478,6 +484,7 @@ class Runner:
         working_root: Optional[str] = None,
         state_path: Optional[str] = None,
         resume_from: Optional[str] = None,
+        trusted_root: Optional[str] = None,
     ) -> dict:
         """档位 B：tool_dispatch 循环 — 委派给 ToolDispatchRunner"""
         # 读取 human_in_loop 配置（从 SKILL.md frontmatter 或 .skill-local.yaml）
@@ -510,6 +517,7 @@ class Runner:
             plain_text=self.plain_text,
             verbose=self.verbose,
             tracer=self.tracer,
+            trusted_root=trusted_root,
         )
         return td_runner.run(match_result, llm, max_iterations,
                               state_path=state_path, resume_from=resume_from)
@@ -525,6 +533,7 @@ class Runner:
         state_path: Optional[str] = None,
         resume_from: Optional[str] = None,
         human_io=None,
+        trusted_root: Optional[str] = None,
     ) -> dict:
         """多轮会话（Session/REPL）模式：单 skill 持续执行。详见 docs/多轮会话模式-session-repl设计.md。"""
         from skill_engine.execution.human_io import CliHumanIO
@@ -597,6 +606,7 @@ class Runner:
             turn_policy=None, working_root=wr,
             plain_text=self.plain_text, verbose=self.verbose,
             tracer=self.tracer,
+            trusted_root=trusted_root,
         )
 
         # 未给初始 query：先打印该 skill 的用法提示（含 ASCII art），再等待用户第一条指令
