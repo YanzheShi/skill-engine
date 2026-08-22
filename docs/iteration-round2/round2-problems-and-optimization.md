@@ -174,3 +174,22 @@
 - A3b run_python（你叫停，P0-3 query_db 已覆盖）
 - edit_file 的 diff/patch 格式（P0-2 line_range 已解决核心痛点）
 - database.py 切片读彻底压（P0-1 只检测不阻断，模型惯性仍在；可升级为"第3次强制建议全文"）
+
+---
+
+## 6. 二轮审计报告修复（另一 agent 评审）
+
+另一 agent 对二轮 P0/P1 改动做交叉评审，提 6 个 Bug。逐条核对代码后 **5 个真实 + 1 个表述偏差（Bug1 触发条件描述不准，但 bug 本身属实）**。首轮审计 Bug1/Bug2（`_build_handoff` role、`system` 消息拒收）已在 `47a45f6` 修过，不在本轮。
+
+| Bug | 严重度 | 真实？ | 根因 | 修复 |
+|---|---|---|---|---|
+| **Bug1** 重复 `tool_call_id` | P0 | ✅ 属实 | P0-1 准备阶段 append 独立 tool 消息（tc["id"]），执行阶段再 append 结果（同 tc["id"]）→ 两个同 ID tool 消息 → OpenAI `duplicate tool call id` 报错、循环挂 | 准备阶段不 append，改为把提示存 `tc["_repeat_hint"]`，执行阶段拼到读取结果内容开头（只 1 条 tool 消息） |
+| **Bug2** 多 line_range 行号错位 | P1 | ✅ 属实 | `_apply_edits` 顺序处理 + 就地改 lines，前 edit 改行数后后续 line_range 指错位 | 按 line_range[0] 降序处理（从后往前改） |
+| **Bug3** query_db 列宽只看表头 | P2 | ✅ 属实 | `width = max([len(c) for c in cols]+[8])` 忽略数据 | `all_vals = cols + 所有行值`，width 取最大值 |
+| **Bug4** fetchall 无行数上限 | P2 | ✅ 属实 | `cur.fetchall()` 大表拉几万行 | `cur.fetchmany(200)` + 检测 extra 行，尾部提示"仅显示前 200 行" |
+| **Bug5** WITH 允许数据修改 CTE | P2（安全） | ✅ 属实 | 白名单 `^(...|WITH)` 允许 `WITH x AS (DELETE...)` | 收紧：`WITH\s+\w+\s+AS\s*\(\s*(SELECT|WITH)` 仅允许 SELECT 起步 CTE |
+| **Bug6** format_observation 包装 SQL | P2 | ✅ 属实（轻微） | query_db 非 shell，套 format_observation 带 `exit_code: 0 / stdout:` 前缀语义不纯 | 直接 `content: obs`，不加前缀 |
+
+**全量 py_compile 通过**；逻辑测试覆盖：Bug2（降序无错位 + 减行场景）、Bug3（列宽容纳数据）、Bug4（限 200 + extra）、Bug5（DELETE/UPDATE CTE 拒、SELECT CTE 放）、Bug6（无前缀）。Bug1 因涉及 messages 注入链路，靠代码审查 + 单消息验证（准备阶段不再 append）。
+
+**提交**：`git commit`（独立于前序 commit）。

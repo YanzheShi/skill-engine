@@ -245,11 +245,18 @@ def _apply_edits(content: str, edits: list) -> tuple:
     # 按 line_range 处理（可能多次修改同一文件的不同区间，逐 edit 应用）
     ranged_errors = []
     plain_edits = []
+    ranged = []  # 收集带 line_range 的 edit
     for e in edits:
         lr = e.get("line_range")
         if not lr or not isinstance(lr, (list, tuple)) or len(lr) != 2:
             plain_edits.append(e)
             continue
+        ranged.append(e)
+    # 整改 二轮审计 Bug2：按 line_range[0] **降序**处理（从文件末尾向前改），
+    # 避免前面的区间改了行数后，后面 edit 的 line_range 指向错位行。
+    # LLM 给的行号基于原始文件，不会预知前一个 edit 减少/增加了行数。
+    for e in sorted(ranged, key=lambda x: int(x["line_range"][0]), reverse=True):
+        lr = e["line_range"]
         start, end = int(lr[0]), int(lr[1])  # 1-indexed 闭区间
         if start < 1 or end < start or end > len(lines):
             ranged_errors.append(
@@ -1909,9 +1916,16 @@ class ToolDispatchRunner:
                         db_path_in = tc["input"].get("db_path", "").strip()
                         if not sql:
                             obs = "[query_db] sql 不能为空"
-                        elif not re.match(r"^(SELECT|PRAGMA|EXPLAIN|WITH)\b", sql, re.IGNORECASE):
-                            obs = ("[query_db] 仅允许只读语句（SELECT / PRAGMA / EXPLAIN / WITH 开头）。"
-                                   "拒绝执行 DDL/DML，避免误改数据。")
+                        # 整改 二轮审计 Bug5：收紧只读白名单。
+                        # 允许：SELECT / PRAGMA / EXPLAIN，以及以 SELECT/WITH 起步的 CTE（WITH x AS (SELECT ...)）。
+                        # 禁止：WITH x AS (DELETE/UPDATE/INSERT ...) 这类数据修改 CTE。
+                        elif not re.match(
+                            r"^(SELECT|PRAGMA|EXPLAIN)\b"
+                            r"|^(WITH\s+\w+\s+AS\s*\(\s*(SELECT|WITH)\b)",
+                            sql, re.IGNORECASE | re.VERBOSE,
+                        ):
+                            obs = ("[query_db] 仅允许只读语句（SELECT / PRAGMA / EXPLAIN / 以 SELECT 或 WITH(SELECT) 起步的 CTE）。"
+                                   "拒绝执行 DDL/DML 及含数据修改的 CTE，避免误改数据。")
                         else:
                             # 解析 db 路径：显式指定优先，否则在 base_dir 递归找第一个 *.db
                             db_file = None
@@ -1928,27 +1942,39 @@ class ToolDispatchRunner:
                                     conn = _sqlite3.connect(str(db_file))
                                     cur = conn.cursor()
                                     cur.execute(sql)
-                                    rows = cur.fetchall()
+                                    # 整改 二轮审计 Bug4：限制返回行数，避免大表拉几万行撑爆消息
+                                    MAX_ROWS = 200
+                                    rows = cur.fetchmany(MAX_ROWS)
                                     cols = [d[0] for d in cur.description] if cur.description else []
+                                    # 判断是否还有更多行
+                                    extra = cur.fetchone() is not None
                                     if not rows:
                                         obs = f"[query_db] 查询成功，0 行（列：{cols}）"
                                     else:
-                                        width = max([len(str(c)) for c in cols] + [8])
+                                        # 整改 二轮审计 Bug3：列宽看「数据 + 表头」最大值，避免数据比表头宽错位
+                                        all_vals = [str(c) for c in cols]
+                                        for r in rows:
+                                            all_vals.extend(str(v) for v in r)
+                                        width = max((len(v) for v in all_vals), default=8)
+                                        width = max(width, 8)
                                         header = " | ".join(str(c).ljust(width) for c in cols)
                                         sep = "-+-".join("-" * width for _ in cols)
                                         body = "\n".join(
                                             " | ".join(str(v).ljust(width) for v in r) for r in rows
                                         )
-                                        obs = f"[query_db] {len(rows)} 行（表：{db_file.name}）\n{header}\n{sep}\n{body}"
+                                        tail = f"\n（仅显示前 {MAX_ROWS} 行）" if extra else ""
+                                        obs = f"[query_db] {len(rows)} 行（表：{db_file.name}）\n{header}\n{sep}\n{body}{tail}"
                                     conn.close()
                                 except Exception as e:
                                     obs = f"[query_db] 执行失败：{e}"
                         step_results.append({"name": f"query_db_{tc['id']}", "type": "query_db", "sql": sql})
+                        # 整改 二轮审计 Bug6：query_db 是结构化数据查询，非 shell 执行，
+                        # 不要套 format_observation（那会带 exit_code: 0 / stdout: 前缀，语义不纯）。
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc["id"],
                             "name": "query_db",
-                            "content": format_observation("query_db", {"exit_code": 0, "stdout": obs, "stderr": "", "timed_out": False}),
+                            "content": obs,
                         })
                         print(f"     [query_db] {sql[:60]}")
 
@@ -2211,15 +2237,16 @@ class ToolDispatchRunner:
                     if s.get("type") == "read_file" and s.get("path") == str(full_path)
                 )
                 if read_count >= 3 and is_paged:
-                    messages.append({
-                        "role": "tool", "tool_call_id": tc["id"], "name": "read_file",
-                        "content": (
-                            f"[提示] 你已第 {read_count + 1} 次读取 {filepath}（含 force_refresh 切片读）。"
-                            f"反复分页/切片读取同一大文件会快速消耗迭代预算。请改用 "
-                            f"force_refresh=true 且**不带 offset/limit** 一次性取全文，"
-                            f"或若之前已读过则直接基于上文历史内容工作，不要继续分页重试。"
-                        ),
-                    })
+                    # 整改 二轮审计 Bug1：绝不能在此 append 一条独立 tool 消息——
+                    # 会与实际读取结果（下方执行阶段同样用 tc["id"]）构成两个同 ID tool 消息，
+                    # 触发 OpenAI `duplicate tool call id` 导致整轮 invoke 失败、循环挂掉。
+                    # 改为把提示暂存到 tc，由执行阶段拼到读取结果内容开头（只产生一条 tool 消息）。
+                    tc["_repeat_hint"] = (
+                        f"[提示] 你已第 {read_count + 1} 次读取 {filepath}（含 force_refresh 切片读）。"
+                        f"反复分页/切片读取同一大文件会快速消耗迭代预算。请改用 "
+                        f"force_refresh=true 且**不带 offset/limit** 一次性取全文，"
+                        f"或若之前已读过则直接基于上文历史内容工作，不要继续分页重试。\n\n"
+                    )
                     # 仍继续本次读取（不阻断），让模型拿到内容后收敛
                 if not force_refresh and self._file_tracker is not None:
                     hit = self._file_tracker.cache_lookup(full_path, offset, limit)
@@ -2327,7 +2354,7 @@ class ToolDispatchRunner:
                     "role": "tool",
                     "tool_call_id": tc["id"],
                     "name": "read_file",
-                    "content": self._truncate_msg(formatted),
+                    "content": self._truncate_msg((tc.get("_repeat_hint", "") + formatted)),
                 })
                 self._emit_tool(f"read_file {filepath}")
                 self._emit_result(self._truncate_msg(formatted, max_chars=800))
