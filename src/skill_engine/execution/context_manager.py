@@ -65,13 +65,13 @@ def default_context_budget() -> int:
     return DEFAULT_CONTEXT_BUDGET
 
 
-# L2 默认压缩模板：**任务中立**（原始请求/已完成动作/进展/待办/关键对象引用）。
+# L2 默认压缩模板：**任务中立**（整改 A4b 三段式：已确认结论 / 已排除假设 / 待办）。
 # coding 场景如需"已改文件/验证状态"等专用字段，由 skill 用 compress_template 覆盖。
 _NEUTRAL_SUMMARY_PROMPT = (
     "你是上下文压缩器。下面是一段 agent 执行历史，请压缩为结构化任务状态，"
     "严格按以下字段输出中文（总长 ≤400 字，不要编造新信息）：\n"
-    "- 原始请求：(逐字保留用户最初的指令)\n"
-    "- 已完成动作：[{对象, 做了什么}]\n"
+    "- 已确认结论：(根因、已验证的事实、已作出的决定——不可压缩，后续轮次依赖它)\n"
+    "- 已排除假设：(试过但不对的方向，避免重蹈覆辙)\n"
     "- 当前进展：...\n"
     "- 待办事项：[...]\n"
     "- 关键对象引用：(只留文件路径/命令名等引用，不保留原文；需要细节时用工具重新获取)\n\n"
@@ -261,9 +261,16 @@ class ContextManager:
 
         summary = self._summarize(to_summarize, llm)
         if summary:
+            # 整改 A4b：pinned block —— 提取历史中模型写入的 <key_finding>...</key_finding>
+            # 关键结论，原样保留进压缩历史（不送 LLM 重摘要、不丢失）。这是交叉审计确认的
+            # "压缩失忆"根因（含第 14 轮定位根因的关键思考被折叠）的直接修复。
+            pinned = self._extract_pinned(to_summarize)
+            condensed_body = summary
+            if pinned:
+                condensed_body += f"\n\n<key_finding>\n{pinned}\n</key_finding>"
             condensed = {
                 "role": "user",
-                "content": f"<condensed_history>\n{summary}\n</condensed_history>",
+                "content": f"<condensed_history>\n{condensed_body}\n</condensed_history>",
             }
             # 原地替换，保持外部对 messages 的引用有效
             self.messages[:] = head + [condensed] + tail
@@ -298,6 +305,25 @@ class ContextManager:
                             f"更早内容已省略]",
             })
         return kept
+
+    def _extract_pinned(self, segment: list[dict]) -> str:
+        """整改 A4b：从待压缩历史提取模型写入的 <key_finding>...</key_finding> 块。
+
+        这些块是模型显式标记的关键结论（根因、决定），压缩时原样保留、不送 LLM 重摘要，
+        避免"压缩失忆"（trace 实证：第 14 轮定位根因的关键思考被折叠后模型重蹈覆辙）。
+        跨多条消息、多个块全部收集，用空行连接；无则返回空串。
+        """
+        import re as _re
+        chunks = []
+        for m in segment:
+            txt = self._msg_text(m)
+            if not txt:
+                continue
+            for hit in _re.findall(r"<key_finding>(.*?)</key_finding>", txt, _re.S):
+                hit = hit.strip()
+                if hit and hit not in chunks:
+                    chunks.append(hit)
+        return "\n\n".join(chunks)
 
     def _summarize(self, segment: list[dict], llm) -> str:
         """把一段历史交给 llm 压成结构化摘要。失败返回空串（触发 L3）。

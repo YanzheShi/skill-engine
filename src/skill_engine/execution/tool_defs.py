@@ -127,6 +127,24 @@ def search_files(pattern: str, path: str = ".", file_glob: str = "", max_results
 
 
 @tool
+def update_plan(plan: str, status: str = "in_progress") -> str:
+    """更新结构化任务清单（plan 模式——显式记录当前计划与进度）。
+
+    引擎把每次调用记入执行轨迹（step_results），不污染 messages 历史、不参与上下文压缩、
+    不消耗迭代预算，但续跑/压缩时可被引用，避免"忘了做到哪"。
+
+    Args:
+        plan: 当前计划（Markdown 清单，如 "- [ ] 定位根因\\n- [ ] 修复 database.py"）。
+        status: 整体状态，in_progress / done / blocked。
+
+    Returns:
+        回显确认（实际存储由引擎内联完成，本函数体仅为 schema 声明）。
+    """
+    # 无 body：执行在 tool_dispatch 主循环内联实现（schema/执行分离，同 search_files）。
+    return ""
+
+
+@tool
 def stop(reason: str = "finished") -> str:
     """Signal that the task is complete and stop the tool dispatch loop.
 
@@ -361,7 +379,7 @@ def _take_screenshot(url: str, width: int = 1280, height: int = 800,
     return _take_fullpage_cdp(edge, target, width, out_abs, out_path)
 
 
-TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search, get_current_time, shot_web, view_image]
+TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search, get_current_time, shot_web, view_image, update_plan]
 
 # 工具注册表：将硬编码列表升级为可扩展注册表（通用引擎核心，不绑定领域语义）。
 # 各 skill 可经 frontmatter 的 extra_tools 注入领域专属工具，核心不感知具体领域。

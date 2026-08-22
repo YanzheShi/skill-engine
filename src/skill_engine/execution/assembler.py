@@ -29,6 +29,34 @@ from skill_engine.models import Skill
 from skill_engine.execution.executor import Executor
 
 
+# 整改 B 层（B1/B2/B3）：默认宪法约束切片，编译进每个 skill 的 system prompt 顶部。
+# 三条通用纪律（源自 agent-loop 整改终稿），对所有 skill 生效、零额外调用：
+# - B1 收敛/收尾协议：判定满足即 stop，禁止已完成时继续探索。
+# - B2 搜索纪律：search_files 已默认带上下文+←MATCH，读数用 read_file 完整区间。
+# - B3 测试失败自愈阶梯：测失败先读清单→定位→修→重测，≤3 次仍失败则停手报告（不空转）。
+DEFAULT_CONSTITUTION = """\
+# 通用执行纪律（引擎强制，非建议）
+
+## 1. 收敛与收尾协议（B1）
+- 当你已确认任务完成（读到了所需信息 / 改完了目标 / 验证通过），立即调用 stop 并给总结，**不要继续发起新工具调用**。
+- 上下文压缩后早前轮次的思考过程会被折叠，若需要某段旧信息，用 read_file / search_files 重新读取，不要用"我记得之前看到过"作为依据。
+- 引擎会在进度提示里告知"已用 N / 上限 M 步"。剩余 ≤3 步时必须立即停止探索、用已有信息输出总结或调用 stop。
+
+## 2. 搜索与读取纪律（B2）
+- search_files 已默认带命中行前后上下文并标注 `← MATCH`，直接读结果即可，不要为"看上下文"再发起无谓的 search。
+- 需要文件内容时用 read_file 一次性读完整函数区间（≤800 行的文件直接全文读），不要只盲读单行片段再反复分页。
+- 同一文件不要发起超过 3 次 read_file；第一次就该读全文。
+
+## 3. 测试失败自愈阶梯（B3）
+- 运行测试失败后：①读失败清单（FAILED/ERROR 行）→ ②定位根因 → ③修复 → ④重新运行验证。
+- 同一测试连续失败 ≤3 次仍不通：停止盲目重试，调用 stop 并报告具体失败信息 + 你的诊断，等待人工决策。
+- 禁止"换个花样再试一次"式空转——每次重试都应基于新的根因判断。
+
+## 4. 关键结论固化（A4b pinned block）
+- 当你定位到关键根因 / 作出重要决定 / 确认某事实时，在输出中用 `<key_finding>...</key_finding>` 标签包裹这段文字。
+- 上下文压缩时会原样保留这些标签内的内容（不被重新摘要、不丢失），后续轮次可直接读到，避免"压缩后忘记根因又重蹈覆辙"。
+- 示例：`<key_finding>根因：get_profile 不返回 ac_rate 字段，需补 ELO 计算</key_finding>`
+"""
 class Assembler:
     """Skill 编译器
 
@@ -55,7 +83,7 @@ class Assembler:
         """
         self.executor = executor or Executor(timeout=command_timeout)
         self.shell = shell
-        self.constitution = constitution or ""
+        self.constitution = constitution or DEFAULT_CONSTITUTION
 
     def assemble(
         self,

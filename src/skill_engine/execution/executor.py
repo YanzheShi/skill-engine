@@ -314,14 +314,59 @@ class Executor:
         return cmd_name in allowlist
 
     def _build_env(self, cwd: Path) -> dict:
-        """构建沙箱环境变量"""
+        """构建沙箱环境变量。
+
+        整改 A3a：自动探测 cwd 下的虚拟环境（.venv / venv），并把其 site-packages
+        注入 PYTHONPATH、把 venv 的 python 前置到 PATH、设 VIRTUAL_ENV。这样子进程
+        `python -c "import xxx"` 能直接找到项目依赖，无需退化为 write_file + bash 连环
+        （trace 实证：环境未预置导致 6 次 python -c 失败、7 个临时 .py 脚本）。
+        """
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
         env["LANG"] = "C.UTF-8"
         # 不覆盖 HOME，保留系统真实用户目录
-        # env["HOME"] = str(cwd)  # 已删除：子进程 HOME 应指向用户目录，而非 skill 目录
         sep = ";" if os.name == "nt" else ":"
         env["PATH"] = f"{cwd}/scripts{sep}{cwd}{sep}{env.get('PATH', '/usr/bin:/bin')}"
+
+        # 整改 A3a：注入项目 Python 环境（venv 优先，回退当前解释器 sys.path）
+        site_paths: list[str] = []
+        venv_dir = None
+        for cand in (".venv", "venv"):
+            vd = cwd / cand
+            if vd.is_dir():
+                venv_dir = vd
+                break
+        if venv_dir is not None:
+            # Windows: venv/Scripts/python.exe；POSIX: venv/bin
+            bin_dir = venv_dir / ("Scripts" if os.name == "nt" else "bin")
+            if bin_dir.is_dir():
+                env["PATH"] = f"{bin_dir}{sep}{env['PATH']}"
+            env["VIRTUAL_ENV"] = str(venv_dir)
+            # 主动把 venv site-packages 加进 PYTHONPATH（双保险，覆盖 VIRTUAL_ENV 未被识别的情况）
+            sp = self._find_site_packages(venv_dir)
+            if sp:
+                site_paths.append(sp)
+        else:
+            # 无 venv：用当前解释器的 sys.path，保证 python -c 与引擎同环境
+            import sys as _sys
+            site_paths.extend(p for p in _sys.path if p and Path(p).is_dir())
+        if site_paths:
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = sep.join([*site_paths, existing]) if existing else sep.join(site_paths)
         return env
+
+    @staticmethod
+    def _find_site_packages(venv_dir: Path) -> str:
+        """定位 venv 的 site-packages 目录（Windows: Lib/site-packages；POSIX: lib/pythonX.Y/site-packages）。"""
+        # Windows
+        win_sp = venv_dir / "Lib" / "site-packages"
+        if win_sp.is_dir():
+            return str(win_sp)
+        # POSIX：lib/pythonX.Y/site-packages
+        import glob as _glob
+        matches = _glob.glob(str(venv_dir / "lib" / "python*" / "site-packages"))
+        if matches and Path(matches[0]).is_dir():
+            return matches[0]
+        return ""

@@ -49,6 +49,86 @@ _IO_MAX_WORKERS = 4
 
 
 # ---------------------------------------------------------------------------
+# 整改 A1：预算可见注入（agent-loop-redesign-final.md §3 A1）
+# 模型在循环中看不到自己用了多少步 / 还剩多少步，导致「根因已定位仍无脑探索」
+# 的迭代爆炸。每轮把剩余预算作为一条 system 提示临时注入，invoke 后立即 pop，
+# 不进 messages 历史（不污染压缩 / 重放 / 续跑）。
+# ---------------------------------------------------------------------------
+def _progress_hint(iterations: int, max_iterations: int, step_results: "list|None" = None) -> str:
+    """生成本轮迭代的预算进度提示（供模型自我调节收敛用）。
+
+    三段式紧迫度（对应 trace 痛点：根因常在第 14 轮找到后仍探索 16 轮）：
+    - 剩余 <= 3：紧急，立即停止新工具调用。
+    - 已用 >= 一半：尽快收敛（覆盖 15~27 轮，根因定位后立刻给强信号）。
+    - 否则：温和提示在剩余步内收敛。
+    分阶段约束（整改 A2c）：探索预算（前 1/3）用尽但 step_results 仍无 write/edit
+    → 追加「立即停止探索、转入执行」强信号，防探索阶段无限膨胀。
+    """
+    remaining = max(max_iterations - iterations, 0)
+    pct = int(iterations * 100 / max_iterations) if max_iterations else 0
+    extra = ""
+    if step_results is not None:
+        has_write = any(s.get("type") in ("write_file", "edit_file") for s in step_results)
+        if not has_write and iterations >= max_iterations // 3:
+            extra = " 你已用尽探索预算却尚未开始编辑任何文件——请立即总结已发现信息、输出改动计划并转入执行阶段；若信息不足，用一句话说明缺什么后做一次定向搜索补全。"
+    if remaining <= 3:
+        urgency = "⚠️ 预算即将耗尽：请立即停止发起新工具调用，用当前已有信息输出最终总结或调用 stop。"
+    elif iterations >= max_iterations // 2:
+        urgency = "请尽快收敛：完成判定满足即调用 stop 并给总结，禁止在已完成时继续探索。"
+    else:
+        urgency = "请在剩余步数内收敛：完成判定满足即调用 stop 并给总结，避免无关探索。"
+    return (
+        f"[进度] 已用 {iterations} / 上限 {max_iterations} 步（剩余 {remaining}，已用 {pct}%）。"
+        f"{urgency}{extra}"
+    )
+
+
+def _build_handoff(messages: "list[dict]", step_results: "list[dict]", skill_name: str) -> str:
+    """整改 A2a：硬中断（max_iterations）时的结构化交接摘要。
+
+    从当前上下文抽取三段（已确认结论 / 进行到哪 / 建议下一步），供 MOA commander
+    或人工 resume 时直接续上，避免无人值守任务静默丢失成果。
+    不依赖 LLM（纯规则抽取），保证中断路径零额外调用。
+    """
+    # 1. 已确认结论：优先取压缩历史 <condensed_history>（role 可能是 user 或 system，
+    #    取决于 ContextManager.maybe_compress 的存储；此处两者都查，避免找不到）。
+    condensed = ""
+    for m in messages:
+        if m.get("role") in ("system", "user") and "<condensed_history>" in str(m.get("content", "")):
+            condensed = str(m["content"])
+            break
+    # 2. 进行到哪：最近若干轮 assistant 文本（去重截断）
+    recent = []
+    for m in messages[-8:]:
+        if m.get("role") == "assistant" and m.get("content"):
+            snippet = str(m["content"]).strip()[:200]
+            if snippet and snippet not in recent:
+                recent.append(snippet)
+    recent_txt = "；".join(recent[-3:]) if recent else "（无）"
+    # 3. 已执行的工具步骤（动作轨迹）
+    actions = [s.get("type") for s in step_results if s.get("type")]
+    actions_txt = "、".join(actions[-8:]) if actions else "（无）"
+    summary = (
+        f"【已确认结论/压缩历史】{condensed[:300] or '（无压缩历史）'}\n"
+        f"【进行到哪】最近动作：{actions_txt}\n最近 assistant 文本：{recent_txt}\n"
+        f"【建议下一步】基于已执行步骤续做未完成的编辑/验证；如需恢复根因上下文请阅读上方压缩历史。"
+    )
+    return summary[:800]
+
+
+def _pop_progress_hint(messages: list) -> None:
+    """移除本轮临时注入的预算进度提示（invoke 后调用，保证不残留进 history）。
+
+    仅当末尾确为进度提示时才 pop，避免误删真实消息。进度提示可能是 system 或
+    user 角色（历史实现用 system，现改用 user 以兼容拒绝 mid-conversation system
+    消息的 LLM），两者都识别。
+    """
+    if messages and messages[-1].get("role") in ("system", "user") and \
+            str(messages[-1].get("content", "")).startswith("[进度]"):
+        messages.pop()
+
+
+# ---------------------------------------------------------------------------
 # 性能诊断建议 6：bash 后文件登记选择性失效
 # ---------------------------------------------------------------------------
 # 引号包裹的 token，或裸的相对/盘符路径 token（要求含目录分隔符或形如
@@ -323,14 +403,22 @@ def format_observation(cmd: str, exec_result: dict) -> str:
         lines.append("(timed_out)")
     if stdout:
         lines.append("stdout:")
-        lines.append(stdout[:8000])
+        if len(stdout) > 8000:
+            lines.append(stdout[:8000] + f"\n... (stdout 已截断，原长 {len(stdout)} 字符)")
+        else:
+            lines.append(stdout)
     if stderr:
         lines.append("stderr:")
-        lines.append(stderr[:500])
+        # 整改 A6：stderr 不再静默截断到 500 字（trace 实证：模型只看到 2/6 行报错而瞎猜重试）。
+        # 完整回灌，仅在超长时截断并明确标注截断量，让模型能看到真实报错。
+        if len(stderr) > 8000:
+            lines.append(stderr[:8000] + f"\n... (stderr 已截断，原长 {len(stderr)} 字符)")
+        else:
+            lines.append(stderr)
     hint = _diagnose_shell_error(stderr)
     if hint:
         lines.append(f"hint: {hint}")
-    return "\n".join(lines)[:10000]
+    return "\n".join(lines)[:20000]
 
 
 # stderr 特征 -> 可执行的纠正提示。命中即在 observation 里补一行 hint，
@@ -344,6 +432,18 @@ _SHELL_ERROR_HINTS = (
      "对应改用 dir/cd/type/findstr，或直接改用 read_file / search_files 等跨平台工具。"),
     (("WinError 2", "系统找不到指定的文件", "The system cannot find the file specified"),
      "可执行文件或路径不存在。先用 search_files / read_file 确认路径，再执行。"),
+    # 整改 B7（来自审计）：Python 执行错误提示，打断"看不懂报错→换个花样再试"空转
+    (("ModuleNotFoundError", "No module named"),
+     "模块未安装或 PYTHONPATH 未覆盖。用 pip install 安装缺失模块，"
+     "或确认脚本在正确的虚拟环境（.venv）中运行——引擎已自动注入 venv 环境。"),
+    (("no such column", "OperationalError", "sqlite3.OperationalError"),
+     "SQL 查询引用了不存在的列。先用 PRAGMA table_info(表名) 或 .schema 确认表结构列名，再修正查询。"),
+    (("SyntaxError", "syntax error", "IndentationError"),
+     "Python 语法/缩进错误。检查括号匹配、缩进、引号闭合；"
+     "在 cmd.exe 上 python -c 的多层引号易出错，改用 write_file 写完整脚本再执行。"),
+    (("KeyError", "TypeError", "AttributeError"),
+     "运行时对象访问错误。先用 read_file 确认相关变量/字段的真实结构，"
+     "不要凭记忆假设字段存在（压缩后旧轮思考可能已折叠）。"),
 )
 
 
@@ -411,22 +511,28 @@ _SEARCH_DEFAULT_MAX = 100  # search_files 默认结果上限（旧实现为 50�
 _SEARCH_MAX_CAP = 500      # max_results 硬上限
 
 
-def _format_match(rel: str, lineno, text: str) -> str:
-    """统一的搜索结果行格式：rel:行号: 内容（截 120 字）。"""
-    return f"{rel}:{lineno}: {text.strip()[:120]}"
+def _format_match(rel: str, lineno, text: str, is_match: bool = False) -> str:
+    """统一的搜索结果行格式：rel:行号: 内容（截 120 字）。
+
+    整改 A5：匹配行标注 `← MATCH`，便于模型一眼定位命中行、减少二次 read_file。
+    """
+    marker = "  ← MATCH" if is_match else ""
+    return f"{rel}:{lineno}: {text.strip()[:120]}{marker}"
 
 
-def _run_ripgrep(pattern: str, search_dir: Path, file_glob: str, max_results: int):
+def _run_ripgrep(pattern: str, search_dir: Path, file_glob: str, max_results: int,
+                context_lines: int = 3):
     """ripgrep 实现。返回 None 表示 rg 不可用/执行失败（调用方回退纯 Python）。
 
     rg 原生尊重 .gitignore；以 search_dir 为 cwd、相对路径 '.' 执行，
     避免 Windows 绝对路径的盘符冒号破坏 'path:line:text' 解析。
+    整改 A5：加 -C context_lines 输出命中行前后上下文，匹配行标注 ← MATCH。
     """
     rg = shutil.which("rg")
     if not rg:
         return None
     cmd = [rg, "--line-number", "--no-heading", "--color", "never", "--max-columns", "400",
-           "--no-require-git"]  # 无 git 仓库时也要尊重 .gitignore（rg 默认仅仓库内生效）
+           "--no-require-git", "-C", str(context_lines)]  # 整改 A5：上下文行
     if file_glob:
         cmd += ["--glob", file_glob]
     target = "." if search_dir.is_dir() else search_dir.name
@@ -442,8 +548,11 @@ def _run_ripgrep(pattern: str, search_dir: Path, file_glob: str, max_results: in
     if proc.returncode not in (0, 1):  # 0=有匹配，1=无匹配；其他视为失败 → 回退
         return None
     matches, total = [], 0
+    match_count = 0
     for line in proc.stdout.splitlines():
         if not line.strip():
+            continue
+        if line.startswith("--"):  # rg 文件分组分隔符，跳过
             continue
         parts = line.split(":", 2)
         if len(parts) != 3:
@@ -451,8 +560,13 @@ def _run_ripgrep(pattern: str, search_dir: Path, file_glob: str, max_results: in
         rel, lineno, text = parts
         rel = rel.lstrip("./\\")
         total += 1
-        if len(matches) < max_results:
-            matches.append(_format_match(rel, lineno, text))
+        # 整改 A5/Bug4：is_match 用 Python re 判定（与 rg 的 Rust regex 对常见 pattern 兼容）；
+        # 仅对「匹配行」计数 max_results（而非含上下文的总行数），保证返回 ~max_results 个匹配。
+        is_match = bool(re.search(pattern, text))
+        if is_match:
+            match_count += 1
+        if match_count <= max_results:
+            matches.append(_format_match(rel, lineno, text, is_match))
     if not matches:
         return "no matches found"
     out = "\n".join(matches)
@@ -461,12 +575,17 @@ def _run_ripgrep(pattern: str, search_dir: Path, file_glob: str, max_results: in
     return out
 
 
-def _python_search(pattern: str, search_dir: Path, file_glob: str, max_results: int) -> str:
-    """纯 Python 回退实现（无 rg 依赖）：rglob + 逐行正则，语义与旧内联版一致。"""
+def _python_search(pattern: str, search_dir: Path, file_glob: str, max_results: int,
+                   context_lines: int = 3) -> str:
+    """纯 Python 回退实现（无 rg 依赖）：rglob + 逐行正则，语义与旧内联版一致。
+
+    整改 A5：匹配行带前后各 context_lines 行上下文，匹配行标注 ← MATCH。
+    """
     import fnmatch
     import re as re_module
     matches = []
     total_size = 0
+    match_count = 0
     overflow = False
     try:
         files = [search_dir] if search_dir.is_file() else sorted(search_dir.rglob("*"))
@@ -480,19 +599,26 @@ def _python_search(pattern: str, search_dir: Path, file_glob: str, max_results: 
             if file_glob and not fnmatch.fnmatch(f.name, file_glob):
                 continue
             try:
-                text = f.read_text(encoding="utf-8", errors="replace")
-                for i, line in enumerate(text.splitlines(), 1):
+                all_lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
+                rel = f.relative_to(search_dir) if search_dir.is_dir() else f.name
+                for i, line in enumerate(all_lines, 1):
                     if re_module.search(pattern, line):
-                        if len(matches) < max_results:
-                            rel = f.relative_to(search_dir) if search_dir.is_dir() else f.name
-                            match_line = _format_match(str(rel), i, line)
-                            matches.append(match_line)
-                            total_size += len(match_line) + 1
-                            if total_size > 8000:
-                                overflow = True
-                                break
-                        else:
-                            overflow = True  # 已够数且还有更多 → 记截断
+                        # 整改 A5/Bug4：仅对匹配行计数 max_results（而非含上下文的总行数），
+                        # 保证返回 ~max_results 个匹配，恢复搜索覆盖率。
+                        if match_count >= max_results:
+                            overflow = True
+                            break
+                        match_count += 1
+                        # 整改 A5：输出命中行 + 前后上下文（上下文行 is_match=False）
+                        lo = max(0, i - 1 - context_lines)
+                        hi = min(len(all_lines), i + context_lines)
+                        for j in range(lo, hi):
+                            is_match = (j == i - 1)
+                            ctx_line = _format_match(str(rel), j + 1, all_lines[j], is_match)
+                            matches.append(ctx_line)
+                            total_size += len(ctx_line) + 1
+                        if total_size > 8000:
+                            overflow = True
                             break
                 if overflow:
                     break
@@ -507,13 +633,17 @@ def _python_search(pattern: str, search_dir: Path, file_glob: str, max_results: 
         out += f"\n... (结果已截断，显示 {len(matches)} 条；请收窄 pattern 或 path)"
     return out
 
-def _search_files(pattern: str, search_dir: Path, file_glob: str = "", max_results: int = 0) -> str:
-    """search_files 统一入口：ripgrep 优先，失败回退纯 Python。"""
+def _search_files(pattern: str, search_dir: Path, file_glob: str = "", max_results: int = 0,
+                  context_lines: int = 3) -> str:
+    """search_files 统一入口：ripgrep 优先，失败回退纯 Python。
+
+    整改 A5：context_lines 默认 3，命中行带前后上下文、标注 ← MATCH。
+    """
     mr = max_results if max_results and max_results > 0 else _SEARCH_DEFAULT_MAX
     mr = min(mr, _SEARCH_MAX_CAP)
-    result = _run_ripgrep(pattern, search_dir, file_glob, mr)
+    result = _run_ripgrep(pattern, search_dir, file_glob, mr, context_lines)
     if result is None:
-        result = _python_search(pattern, search_dir, file_glob, mr)
+        result = _python_search(pattern, search_dir, file_glob, mr, context_lines)
     return result
 
 
@@ -553,7 +683,11 @@ def _run_verification(executor, base_dir: Path, verify_command: str, timeout: in
         lines.extend(f"  {x}" for x in fails)
     err = (r.get("stderr") or "").strip()
     if err:
-        lines.append("stderr:\n" + err[:1500])
+        # 整改 A6：验证失败 stderr 也不静默截断，超长时标注截断量
+        if len(err) > 8000:
+            lines.append("stderr:\n" + err[:8000] + f"\n... (stderr 已截断，原长 {len(err)} 字符)")
+        else:
+            lines.append("stderr:\n" + err)
     out = (r.get("stdout") or "").strip()
     if out:
         lines.append("stdout(尾部):\n" + out[-1500:])
@@ -1022,6 +1156,12 @@ class ToolDispatchRunner:
                 interval = llm_call_interval()
                 if interval > 0 and not os.environ.get("PYTEST_CURRENT_TEST"):
                     time.sleep(interval)
+
+                # 整改 A1：预算可见注入。临时把进度提示作为 user 消息追加到
+                # messages（用 user 角色而非 system，避免部分 LLM 拒绝 mid-conversation
+                # system 消息导致 invoke 抛异常、循环直接挂掉），让本轮模型能看到剩余
+                # 预算并自我调节收敛；invoke 后立即 pop 掉，不残留进 history。
+                messages.append({"role": "user", "content": _progress_hint(iterations, max_iterations, step_results)})
                 resp = None
                 max_retries = 5
                 for attempt in range(max_retries):
@@ -1036,19 +1176,24 @@ class ToolDispatchRunner:
                             if not os.environ.get("PYTEST_CURRENT_TEST"):
                                 time.sleep(wait_time)
                             if attempt == max_retries - 1:
+                                _pop_progress_hint(messages)  # 清理临时进度提示
                                 return self._trace_finish(RunResult(
                                     output=f"[LLM 调用被限流（已重试 {max_retries} 次）: {err_str}]",
                                     ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
                                          "iterations": iterations, "stopped_by": "rate_limited"},
-                                    history=messages[:] if 'messages' in dir() else [],
+                                    history=messages[:],
                                 ))
                         else:
+                            _pop_progress_hint(messages)  # 清理临时进度提示
                             return self._trace_finish(RunResult(
                                 output=f"[LLM 调用失败: {err_str}]",
                                 ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
                                      "iterations": iterations, "stopped_by": "error"},
-                                history=messages[:] if 'messages' in dir() else [],
+                                history=messages[:],
                             ))
+
+                # 整改 A1：移除本轮临时预算进度提示，避免残留进 history / 压缩 / 续跑。
+                _pop_progress_hint(messages)
 
                 # 标准化 LLM 响应为 dict（兼容 LangChain AIMessage）。
                 # 关键：保留推理字段 reasoning_content —— 推理模型（DeepSeek-R1 /
@@ -1677,6 +1822,25 @@ class ToolDispatchRunner:
                         # 已在上方批入 io_batch 并行执行（性能诊断建议 8），此分支不可达
                         pass
 
+                    elif tc["type"] == "update_plan":
+                        # 整改 B4：结构化任务追踪。仅记入 step_results，不污染 messages 历史、
+                        # 不参与压缩、不消耗迭代预算；续跑/压缩时可被引用。
+                        plan = tc["input"].get("plan", "")
+                        plan_status = tc["input"].get("status", "in_progress")
+                        step_results.append({
+                            "name": f"plan_{tc['id']}",
+                            "type": "update_plan",
+                            "plan": plan,
+                            "status": plan_status,
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc["id"],
+                            "name": "update_plan",
+                            "content": f"[计划已更新] status={plan_status}\n{plan}",
+                        })
+                        print(f"     [计划更新] status={plan_status}")
+
                     elif tc["type"] == "web_search":
                         query = tc["input"].get("query", "")
                         max_results = int(tc["input"].get("max_results", 5))
@@ -1872,7 +2036,9 @@ class ToolDispatchRunner:
             result = self._trace_finish(RunResult(
                 output="[达到最大迭代次数]",
                 ctx={"steps": step_results, "files_created": files_created, "skill_name": skill.metadata.name,
-                     "iterations": iterations, "stopped_by": "max_iterations"},
+                     "iterations": iterations, "stopped_by": "max_iterations",
+                     # 整改 A2a：硬中断结构化移交，供 resume / 人工续跑，避免静默丢失成果
+                     "handoff_summary": _build_handoff(messages, step_results, skill.metadata.name)},
                 history=messages,
             ))
             return result
@@ -1923,6 +2089,23 @@ class ToolDispatchRunner:
                 offset = int(inp.get("offset", 0))
                 limit = int(inp.get("limit", 0))
                 force_refresh = bool(inp.get("force_refresh", False))
+                # 整改 A4 重复读取检测：同文件已达 3 次 read 仍继续（非 force_refresh）
+                # → 注入提示，不阻断本次读取，但警告其正快速消耗迭代预算。
+                read_count = sum(
+                    1 for s in step_results
+                    if s.get("type") == "read_file" and s.get("path") == str(full_path)
+                )
+                if read_count >= 3 and not force_refresh:
+                    messages.append({
+                        "role": "tool", "tool_call_id": tc["id"], "name": "read_file",
+                        "content": (
+                            f"[提示] 你已第 {read_count + 1} 次读取 {filepath}。"
+                            f"反复分页读取同一文件会快速消耗迭代预算。请改用 "
+                            f"force_refresh=true 一次性取全文，或若之前已读过则直接基于"
+                            f"上文历史内容工作，不要继续分页重试。"
+                        ),
+                    })
+                    # 仍继续本次读取（不阻断），让模型拿到内容后收敛
                 if not force_refresh and self._file_tracker is not None:
                     hit = self._file_tracker.cache_lookup(full_path, offset, limit)
                     if hit is not None:
