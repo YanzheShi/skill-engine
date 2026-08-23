@@ -21,6 +21,7 @@ V0.2 改为 allow_all=False，DEFAULT_ALLOWLIST 生效。
 import subprocess
 import sys
 import os
+import re
 import locale
 import shlex
 import signal
@@ -30,6 +31,10 @@ from typing import Optional
 from .paths import to_native_path, native_path_hint
 
 shell_quote = shlex.quote
+
+# 自排除哨兵：_guard_self_kill 返回该值表示命令会显式杀死引擎自身，
+# 调用方（_run）应直接拒绝执行，不交给 subprocess。
+_SELF_KILL_REFUSE = "___SKILL_ENGINE_SELF_KILL_REFUSED___"
 
 
 def _kill_process_tree(pid: int) -> None:
@@ -189,6 +194,21 @@ class Executor:
                     "timed_out": False,
                 }
 
+        # 防自杀护栏：阻止工具命令杀死 skill-engine 自身进程（MOA 进程内运行时的
+        # 关键修复）。即便安全模式为 off，这道门神也始终生效。
+        guarded = self._guard_self_kill(command)
+        if guarded is _SELF_KILL_REFUSE:
+            return {
+                "stdout": "",
+                "stderr": (
+                    f"[安全拦截: 该命令会杀死 skill-engine 自身进程"
+                    f"(PID {os.getpid()})，已拒绝执行。如需停止某服务，请改用其显式 PID]"
+                ),
+                "exit_code": 1,
+                "timed_out": False,
+            }
+        command = guarded
+
         try:
             env = self._build_env(cwd)
             if self.shell == "wsl":
@@ -298,6 +318,47 @@ class Executor:
         )
         if result.returncode != 0:
             raise IOError(f"WSL write failed: {result.stderr.decode('utf-8', errors='replace')}")
+
+    def _guard_self_kill(self, command: str) -> str:
+        """防止工具命令杀死 skill-engine 自身进程（MOA 进程内运行时的自杀护栏）。
+
+        Windows: 任一 ``taskkill`` 都注入 ``/FI "PID ne <引擎PID>"``，使引擎自身
+            进程被镜像名匹配排除；过滤器紧贴 ``taskkill`` 关键字之后插入，命令其余
+            部分（含引号内的 ``&&``、``&`` 分隔段）完全不动。
+        POSIX: ``kill <引擎PID>``（显式自杀）返回哨兵让调用方拒绝；``pkill``/``killall
+            <名称>`` 改写为 ``pgrep`` 循环，跳过引擎 PID 后再 kill。
+
+        返回改写后的命令；若属显式自杀则返回模块级哨兵 ``_SELF_KILL_REFUSE``。
+        """
+        pid = os.getpid()
+        if os.name == "nt":
+            # 仅当命令含 taskkill 且尚未注入过自排除过滤器时才改写
+            if re.search(r"(?i)\btaskkill\b", command) and f"PID ne {pid}" not in command:
+                command = re.sub(
+                    r"(?i)\btaskkill\b",
+                    f'taskkill /FI "PID ne {pid}"',
+                    command,
+                )
+            return command
+
+        # POSIX
+        if re.search(r"(?i)\bkill\b", command):
+            # 显式自杀：kill [-signal] <引擎PID>
+            if re.search(r"(?i)\bkill\b(?:\s+-\w+)?\s+" + str(pid) + r"\b", command):
+                return _SELF_KILL_REFUSE
+        if re.search(r"(?i)\b(?:pkill|killall)\b", command):
+            def _rew(m):
+                sig = m.group(2) or ""
+                pat = m.group(3) or ""
+                return (
+                    f'for p in $(pgrep {pat} 2>/dev/null); '
+                    f'do [ "$p" -ne {pid} ] && kill {sig} "$p"; done'
+                )
+            command = re.sub(
+                r"(?i)\b(?:pkill|killall)\b(\s+(-\w+))?(\s+(\S+))?",
+                _rew, command,
+            )
+        return command
 
     def _is_safe(self, command: str, allowlist: set[str]) -> bool:
         """检查命令是否安全（白名单检查）

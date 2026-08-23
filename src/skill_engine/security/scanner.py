@@ -21,7 +21,10 @@ from skill_engine.models import Skill, SkillMeta
 # ================================================================
 
 # 危险命令名单（运行时弹审批）
-RISKY_BINARIES: set[str] = {"rm", "cp", "mv", "chmod", "chown", "dd", "mkfs", "python"}
+# 含进程终止类：taskkill / kill / pkill —— 这些命令可能误杀 skill-engine 自身
+# 进程（MOA 进程内运行时尤其危险），permissive 模式下强制弹审批。
+RISKY_BINARIES: set[str] = {"rm", "cp", "mv", "chmod", "chown", "dd", "mkfs",
+                            "python", "taskkill", "kill", "pkill"}
 
 # 敏感路径前缀（读写到此路径外弹审批）
 RISKY_PREFIXES: list[str] = ["/etc/", "~/.ssh/", "~/.aws/", "~/.kube/"]
@@ -51,7 +54,8 @@ def _classify(op_str: str) -> tuple[str, Optional[str]]:
     parts = op_str.strip().split()
     if not parts:
         return ("", None)
-    binary = parts[0]
+    # 二进制名统一转小写，避免模型写 TASKKILL / Kill 之类大小写变体漏判
+    binary = parts[0].lower()
     subcmd = parts[1] if len(parts) > 1 else None
     return (binary, subcmd)
 

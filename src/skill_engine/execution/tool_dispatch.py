@@ -399,7 +399,11 @@ def build_env_header(base_dir: Path, shell: str = "") -> str:
         "它们跨平台且比 bash 可靠；bash 只用于跑测试、构建等真正需要 shell 的场景。\n"
         f"{shell_rule}\n"
         "- 涉及当前日期/时间/年份的问题，必须先调用 get_current_time 获取，"
-        "不要凭训练知识猜测（训练数据有截止时间）。\n\n"
+        "不要凭训练知识猜测（训练数据有截止时间）。\n"
+        "- 禁止用 `taskkill /IM <镜像名>`、`pkill <名称>`、`kill` 按镜像名/进程名"
+        "批量终止进程——这会误杀 skill-engine 自身（它也是 python 进程），导致任务中断。"
+        "需要重启/停止某服务时，用该服务的**显式 PID** 定向操作"
+        "（如 `taskkill /PID 1234`），不要按镜像名全量杀。\n\n"
     )
 
 
