@@ -19,6 +19,10 @@ except Exception:  # pragma: no cover - 无 prompt_toolkit 环境回退 input()
 from skill_engine.execution.paste_buffer import save_paste
 from skill_engine.execution.tracer import truncate
 
+# Z 整改：bash 类结果（以 "exit_code:" 开头）成功时正文极短，整体 ≤ 此阈值行数
+# 时直接展示全文，不折叠成"还有 N 行未显示"（避免每个 bash 都徒增折叠噪声）。
+_RESULT_FULL_THRESHOLD = 8
+
 
 def strip_markdown(text: str) -> str:
     """把 Markdown 转换为纯文本（CLI 纯文本终端输出兜底）。
@@ -139,7 +143,7 @@ class HumanIO(ABC):
                 f"💭 ...(思考过程还有 {len(lines) - max_lines} 行未显示，"
                 f"完整内容已用于决策)"
             )
-        print("\n" + "\n".join(shown) + "\n")
+        print("\n" + "\n".join(shown))
         self._trace("thinking", text=truncate(text, 4000))
 
     def emit_command(self, cmd: str) -> None:
@@ -152,15 +156,22 @@ class HumanIO(ABC):
 
         CLI 用户态展示：超长输出按行截断（默认仅保留 2 行），避免刷屏
         （模型侧 messages 仍保留全文）。
+
+        特例（Z 整改）：bash 类结果经 format_observation 固定带
+        ``exit_code:`` / ``stderr:`` 等多行前缀，成功时正文往往极短，
+        整体 ≤ 8 行，直接展示全文即可，不必折叠成"还有 N 行未显示"
+        （那只会徒增视觉噪声）。超过 _RESULT_FULL_THRESHOLD 行才折叠。
         """
         if not out:
             return
         self._trace("result", out=truncate(out, 4000))
         lines = out.splitlines()
-        if len(lines) > max_lines:
-            for line in lines[:max_lines]:
+        # 成功型短结果（如 exit_code:0 + 少量输出）整体展示，不折叠
+        threshold = _RESULT_FULL_THRESHOLD if out.lstrip().startswith("exit_code:") else max_lines
+        if len(lines) > threshold:
+            for line in lines[:threshold]:
                 print(f"  {line}")
-            print(f"  ...(还有 {len(lines) - max_lines} 行未显示，共 {len(lines)} 行)")
+            print(f"  ...(还有 {len(lines) - threshold} 行未显示，共 {len(lines)} 行)")
         else:
             for line in lines:
                 print(f"  {line}")
@@ -271,7 +282,7 @@ class CliHumanIO(HumanIO):
                 f"{sym} ...(思考过程还有 {len(lines) - max_lines} 行未显示，"
                 f"完整内容已用于决策)"
             )
-        print("\n" + "\n".join(f"{T}{ln}{R}" for ln in shown) + "\n")
+        print("\n" + "\n".join(f"{T}{ln}{R}" for ln in shown))
         self._trace("thinking", text=truncate(text, 4000))
 
     def emit_command(self, cmd: str) -> None:
@@ -285,10 +296,13 @@ class CliHumanIO(HumanIO):
         self._trace("result", out=truncate(out, 4000))
         lines = out.splitlines()
         R, D = self._c("\033[0m"), self._c("\033[2m")  # 暗色输出
-        if len(lines) > max_lines:
-            for line in lines[:max_lines]:
+        # Z 整改：bash 类结果（以 "exit_code:" 开头）成功时正文极短，整体 ≤ 阈值行数
+        # 时直接展示全文，不折叠成"还有 N 行未显示"（避免每个 bash 都徒增折叠噪声）。
+        threshold = _RESULT_FULL_THRESHOLD if out.lstrip().startswith("exit_code:") else max_lines
+        if len(lines) > threshold:
+            for line in lines[:threshold]:
                 print(f"  {D}{line}{R}")
-            print(f"  {D}...(还有 {len(lines) - max_lines} 行未显示，共 {len(lines)} 行){R}")
+            print(f"  {D}...(还有 {len(lines) - threshold} 行未显示，共 {len(lines)} 行){R}")
         else:
             for line in lines:
                 print(f"  {D}{line}{R}")
