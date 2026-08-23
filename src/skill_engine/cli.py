@@ -22,7 +22,7 @@ from datetime import datetime
 import typer
 from typing import Optional
 
-from .execution.paths import to_native_path, native_path_hint
+from .execution.paths import to_native_path, native_path_hint, runtime_dir
 from .execution.tracer import DebugTracer
 
 # Fix Windows encoding for CLI output
@@ -59,7 +59,7 @@ def _resolve_debug_tracer(debug: bool, debug_log: Optional[str], working_root: O
         from pathlib import Path as _P
         wr = working_root or str(_P.cwd())
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        path = os.path.join(wr, f".{ts}.skill-engine-debug.log")
+        path = os.path.join(str(runtime_dir(wr)), "debug", f"{ts}.skill-engine-debug.log")
     else:
         # 相对路径的 debug_log 基于 working_root 解析，使其跟随 -w 指定的工作目录，
         # 而非引擎进程 cwd。绝对路径（如显式全路径或 CI 注入）保持不变。
@@ -1183,7 +1183,7 @@ def moa(
         return
 
     # ── 交互向导 ──
-    hio = CliHumanIO(paste_dir=str(Path(working_root or Path.cwd()) / "pastes"))
+    hio = CliHumanIO(paste_dir=str(runtime_dir(working_root or Path.cwd()) / "pastes"))
     _moa_banner()
 
     active_skills = registry.list_active()
@@ -1194,7 +1194,7 @@ def moa(
     q = query or ""
     if not q.strip():
         q = _moa_read_instruction(
-            hio, str(Path(working_root or Path.cwd()) / "pastes"),
+            hio, str(runtime_dir(working_root or Path.cwd()) / "pastes"),
             prompt="[总任务] 这次 MOA 要解决的原始任务是什么？\n你> ")
     print(f"  总任务已记录: {q[:60]}{'…' if len(q) > 60 else ''}")
 
@@ -1213,7 +1213,7 @@ def moa(
         skill_name = _moa_menu(hio, f"[Worker {alias}] 选择 skill（留空=按指示自动匹配）：", skill_opts)
         # 3) 填指示
         instr = _moa_read_instruction(
-            hio, str(Path(working_root or Path.cwd()) / "pastes"),
+            hio, str(runtime_dir(working_root or Path.cwd()) / "pastes"),
             prompt=f"[Worker {alias}] 该模型+skill 要做什么？（可 :paste 多行 / :load <文件>）\n你> ")
         if not instr.strip():
             print("  [指示为空，已跳过本 worker]")
@@ -1237,7 +1237,7 @@ def moa(
     c_model = _moa_menu(hio, "[指挥官] 选择模型：", model_opts)
     c_skill = _moa_pick_commander_skill(hio, active_skills)
     c_instr = _moa_read_instruction(
-        hio, str(Path(working_root or Path.cwd()) / "pastes"),
+        hio, str(runtime_dir(working_root or Path.cwd()) / "pastes"),
         prompt="[指挥官] 它的指挥策略 / 终止条件是什么？（如：达到质量门禁即 STOP）\n你> ")
     commander = MoaAgent(alias="C", model_profile=c_model, skill_name=c_skill or "",
                          instruction=c_instr, role="commander")
@@ -1309,7 +1309,7 @@ def _moa_execute(registry, workers: list, commander, query: str,
 
     # 执行期复用 CliHumanIO 语义通道（颜色/图标/截断），与 session 模式观感一致；
     # 交互已在向导阶段完成，这里仅用于输出（emit 系），不读输入。
-    hio = CliHumanIO(paste_dir=str(Path(working_root or Path.cwd()) / "pastes"))
+    hio = CliHumanIO(paste_dir=str(runtime_dir(working_root or Path.cwd()) / "pastes"))
     hio.set_plain_text(True)
 
     orch = MoaOrchestrator(

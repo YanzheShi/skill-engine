@@ -26,7 +26,7 @@ from skill_engine.execution.executor import Executor
 from skill_engine.execution import tool_dispatch
 from skill_engine.execution import steps as steps_runner
 from skill_engine.execution.tool_defs import parse_named_params
-from skill_engine.execution.paths import to_native_path, native_path_hint
+from skill_engine.execution.paths import to_native_path, native_path_hint, runtime_dir
 from skill_engine.execution.paste_buffer import resolve_refs, save_paste
 
 # ANSI 颜色常量（零依赖，纯转义码）
@@ -84,7 +84,7 @@ class SkillSession:
     不含执行逻辑（执行统一在 ToolDispatchRunner.run）。
 
     - messages: 跨轮累积的完整对话历史（含 system/user/assistant/tool）
-    - state_path: 落盘路径；缺省落到 <working_root>/sessions/<skill-name>/<yyyy-MM-dd_HH-mm-ss>.json
+    - state_path: 落盘路径；缺省落到 <working_root>/.skill-engine/sessions/<skill-name>/<yyyy-MM-dd_HH-mm-SS>.json
     - snapshot: 会话级文件检查点。整个 session 共用一个 FileSnapshot 实例，
       使 restore_file 能回滚到「会话起点」而非「本轮起点」。
     - file_tracker: 会话级文件状态跟踪。整个 session 共用一个 FileStateTracker
@@ -109,7 +109,7 @@ class SkillSession:
             from datetime import datetime
             base = Path(working_root) if working_root else Path.cwd()
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            self.state_path = str(base / "sessions" / skill_name / f"{timestamp}.json")
+            self.state_path = str(runtime_dir(base) / "sessions" / skill_name / f"{timestamp}.json")
         self.messages: list = list(messages or [])
         if snapshot is None:
             from skill_engine.execution.snapshot import FileSnapshot
@@ -589,7 +589,7 @@ class Runner:
                 print(f"[session] 已从 {resume_from} 续接（{len(session.messages)} 条历史）")
 
         # 3. 构造 runner：session 模式 human_io 始终提供（供 ask_user），turn_policy=None 禁用内部循环
-        hio = human_io or CliHumanIO(paste_dir=os.path.join(wr, "pastes"))
+        hio = human_io or CliHumanIO(paste_dir=str(runtime_dir(wr) / "pastes"))
         sv = getattr(hio, "set_verbose", None)
         if callable(sv):
             sv(self.verbose)
@@ -845,14 +845,14 @@ class Runner:
                 # 终端无关的元命令：解决 input() 回退时多行粘贴被按行拆分的问题
                 if user_cmd.startswith(":load "):
                     loaded = _load_file_as_paste(user_cmd[6:].strip(),
-                                                 os.path.join(session.working_root, "pastes"))
+                                                 os.path.join(str(runtime_dir(session.working_root)), "pastes"))
                     if loaded.startswith("[session] :load 失败"):
                         print(loaded)
                         iteration -= 1
                         continue
                     user_cmd = loaded
                 elif user_cmd.strip() == ":paste":
-                    pasted = _capture_paste(hio, os.path.join(session.working_root, "pastes"))
+                    pasted = _capture_paste(hio, os.path.join(str(runtime_dir(session.working_root)), "pastes"))
                     if not pasted.strip():
                         print("[session] 未捕获到内容，已忽略")
                         iteration -= 1

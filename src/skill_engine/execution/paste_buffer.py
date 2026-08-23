@@ -16,8 +16,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Tuple
 
-# 默认落盘目录；REPL 启动时会覆盖为 working_root 下的 .pastes，保证 agent 可读
-DEFAULT_PASTE_DIR = Path(tempfile.gettempdir()) / "skill_engine_pastes"
+from skill_engine.execution.paths import runtime_dir
+
+# 默认落盘目录兜底：REPL 启动时会显式传 base=working_root/.skill-engine/pastes，
+# 故此处仅在无任何 base 时惰性解析为 <cwd>/.skill-engine/pastes（不污染项目目录）。
+# 早期版本默认落到系统 temp（tempfile.gettempdir()/"skill_engine_pastes"），改为
+# 跟随工作目录的 .skill-engine 子目录，使产物集中、可清理。
+DEFAULT_PASTE_DIR = None
 
 # 触发外置的阈值：行数或字符数超过任意一个即落盘
 MIN_LINES = 3
@@ -40,7 +45,7 @@ def save_paste(content: str, base: Path | None = None) -> str | None:
     lines = content.splitlines()
     if len(lines) < MIN_LINES and len(content) < MIN_CHARS:
         return None
-    base = Path(base) if base else DEFAULT_PASTE_DIR
+    base = Path(base) if base else (DEFAULT_PASTE_DIR or (runtime_dir() / "pastes"))
     try:
         base.mkdir(parents=True, exist_ok=True)
     except Exception:

@@ -86,3 +86,29 @@ def native_path_hint(original: Union[str, Path]) -> str:
     if guess != str(original):
         return f"在 Windows 上请改用原生写法：{guess}"
     return "在 Windows 上请使用 D:\\path\\to\\dir 或 D:/path/to/dir 形式的路径"
+
+
+def runtime_dir(working_root: Optional[Union[str, Path]] = None) -> Path:
+    """返回引擎运行时产物目录 ``<working_root>/.skill-engine``，并自动建目录。
+
+    用途：把引擎运行时散落生成的产物（文件快照、session 状态、pastes、
+    截图、debug 日志、MOA 检查点）统一收口到该子目录，避免污染被操作的
+    项目目录。所有下游写入点从此处取根，避免路径拼接散落重复。
+
+    兼容性：
+    - ``working_root`` 应为入口处经 ``to_native_path()`` 归一化后的 native 路径
+      （如 ``D:/Code/proj``）。此处**不再**做 POSIX→Windows 二次转换，直接拼接，
+      避免把已正确的路径破坏（保持幂等）。
+    - ``working_root`` 为 None 时回退到进程 cwd（与既有 ``Path.cwd()`` 行为一致）。
+    - ``.skill-engine`` 在 Windows / Linux 均为合法目录名；``mkdir`` 双平台正常。
+
+    Args:
+        working_root: 工作目录（native 形式）。None → 用 ``Path.cwd()``。
+
+    Returns:
+        已确保存在的 ``Path``（``<working_root>/.skill-engine``）。
+    """
+    base = Path(working_root) if working_root else Path.cwd()
+    d = base / ".skill-engine"
+    d.mkdir(parents=True, exist_ok=True)
+    return d

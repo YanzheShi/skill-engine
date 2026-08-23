@@ -1,7 +1,7 @@
 """通用文件快照（检查点）能力 —— 引擎核心，不绑定 git。
 
 在每次修改文件前自动记录其"进入本次运行前的原始内容"到
-<base_dir>/.skill_engine_snapshots/，供回滚使用。
+<base_dir>/.skill-engine/snapshots/，供回滚使用（统一收口到 .skill-engine/ 子目录，避免污染项目目录）。
 
 设计纪律（见 docs/large-code-capability-design.md §1）：
 - 这是**通用**能力，沉引擎核心，不依赖 git，任何 skill 写文件都能受益。
@@ -12,19 +12,21 @@ import hashlib
 import json
 from pathlib import Path
 
+from skill_engine.execution.paths import runtime_dir
+
 
 class FileSnapshot:
     """记录文件进入本次运行前的原始内容，支持按需回滚。
 
     特性：
     - record() 对同一文件只记录第一次（即"进入前状态"），后续编辑不覆盖检查点。
-    - 快照落盘到 .skill_engine_snapshots/ 并维护 manifest.json，跨进程/续跑可见。
+    - 快照落盘到 .skill-engine/snapshots/ 并维护 manifest.json，跨进程/续跑可见。
     - 任何异常都被吞掉，快照失败绝不影响主执行流程。
     """
 
     def __init__(self, base_dir):
         self.base_dir = Path(base_dir)
-        self.dir = self.base_dir / ".skill_engine_snapshots"
+        self.dir = runtime_dir(self.base_dir) / "snapshots"
         self.manifest: dict[str, str] = {}   # 绝对路径 -> .bak 文件名
         self._recorded: set[str] = set()     # 已记录路径（仅首次）
         self._load_manifest()

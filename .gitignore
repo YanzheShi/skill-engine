@@ -56,9 +56,9 @@ fix_indent.py
 .workbuddy/
 
 # --- Runtime artifacts (never commit) ---
-.skill_engine_snapshots/
-pastes/
-sessions/
+# 引擎运行时产物统一收口到工作目录的 .skill-engine/ 子目录（见 docs/runtime-artifacts-runtime-dir-redirect.md），
+# 覆盖：文件快照 snapshots/、交互 session/、pastes/、截图 screenshots/、debug 日志、MOA 检查点等。
+.skill-engine/
 junit.xml
 junit_full.xml
 demo/
@@ -67,9 +67,6 @@ _approval_debug.log
 bt.log
 p6.log
 pt_result.log
-
-# MOA 自动检查点（每轮落盘，正常结束自动删除；崩溃后用于 --resume-from）
-moa_session_state.json
 
 # Isolated venv used by some scripts (already self-ignored, belt-and-suspenders)
 active/

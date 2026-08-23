@@ -10,6 +10,8 @@ import logging
 from pathlib import Path
 from langchain_core.tools import tool, BaseTool
 
+from skill_engine.execution.paths import runtime_dir
+
 
 @tool
 def bash(command: str, timeout: int = 0) -> str:
@@ -392,7 +394,9 @@ def _take_screenshot(url: str, width: int = 1280, height: int = 800,
         return f"[截图失败] 目标不可识别或本地文件不存在: {url}"
     out_path = Path(out)
     if not out_path.is_absolute():
-        out_path = base_dir / out_path
+        # 相对路径（含默认 "screenshot.png"）统一收口到 <base_dir>/.skill-engine/screenshots/，
+        # 避免截图污染工作目录；绝对路径（用户显式指定）则原样透传。
+        out_path = runtime_dir(base_dir) / "screenshots" / out_path
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_abs = str(out_path.resolve())
 

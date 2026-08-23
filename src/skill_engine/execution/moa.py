@@ -50,7 +50,7 @@ from skill_engine.execution.tool_dispatch import ToolDispatchRunner
 from skill_engine.execution.tool_defs import parse_named_params
 from skill_engine.execution.snapshot import FileSnapshot
 from skill_engine.execution.file_tracker import FileStateTracker
-from skill_engine.execution.paths import to_native_path
+from skill_engine.execution.paths import to_native_path, runtime_dir
 from skill_engine.routing.router import Router
 from skill_engine import ensure_utf8_io
 
@@ -837,7 +837,7 @@ class MoaOrchestrator:
                 决策轨迹 / 计数器，从断点继续整轮协作）。文件不存在/损坏 →
                 返回 resume_state_missing 终止。
             state_path: 可选，运行状态落盘路径（每轮完成后写检查点，崩溃最多丢
-                本轮在途工作）。省略时默认落到工作目录 moa_session_state.json；
+                本轮在途工作）。省略时默认落到工作目录 .skill-engine/moa_session_state.json；
                 正常完成后自动删除，避免陈旧文件误导后续 --resume-from。
 
         Returns:
@@ -873,7 +873,7 @@ class MoaOrchestrator:
         # 每轮正常完成后落盘，崩溃最多丢失本轮在途工作；正常完成后删除，避免
         # 陈旧文件误导后续 --resume-from（续跑命令见 cli 提示）。
         if state_path is None:
-            state_path = os.path.join(self.working_root, "moa_session_state.json")
+            state_path = os.path.join(str(runtime_dir(self.working_root)), "moa_session_state.json")
 
         # ── 实例化各 agent 的模型客户端（延迟到运行期，便于提前报缺配置） ──
         # 若调用方已预注入 a.llm（测试 / 复用客户端场景），则跳过联网取模型，
