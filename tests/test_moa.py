@@ -470,6 +470,92 @@ def test_strict_false_rescues_multiline_task(tmp_path):
     assert "第一行" in d["task"] and "第二行" in d["task"]
 
 
+# ── 4.7.y 指挥官 LLM 调用失败重试（瞬时故障自愈 / 鉴权 fail-fast） ──
+class _FlakyLLM:
+    """前 fail_times 次 invoke 抛异常，之后**每次**都返回成功响应（模拟瞬时故障自愈）。
+
+    注意：commander 私有上下文的 maybe_compress 也可能调用 llm 做摘要，
+    故失败计数会把压缩调用也算进去；这里用"失败后恒返回成功"而非"pop 队列"，
+    避免压缩偷吃 responses 导致后续决策拿到错误内容。
+    """
+
+    def __init__(self, fail_times=0, exc=RuntimeError, success="ok"):
+        self.fail_times = fail_times
+        self.exc = exc
+        self.success = success
+        self.call_count = 0
+
+    def invoke(self, messages, **kwargs):
+        self.call_count += 1
+        if self.call_count <= self.fail_times:
+            raise self.exc(f"transient boom #{self.call_count}")
+        return self.success
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
+def test_commander_retries_on_transient_failure_then_succeeds(tmp_path, monkeypatch):
+    """指挥官前 2 次调用抛瞬时异常、之后成功 → 重试后正常派活，不终止。"""
+    monkeypatch.setattr("skill_engine.execution.moa.time.sleep", lambda *a, **k: None)  # 跳过真实等待
+    orch = _make_orchestrator(tmp_path)
+    agent_llm = ScriptedLLM(["A1 完成"])
+    # 指挥官：前 2 次抛 RuntimeError，第 3 次返回合法决策
+    commander_llm = _FlakyLLM(
+        fail_times=2, exc=RuntimeError,
+        success='<moa_decision>{"next":"STOP","task":"","rationale":"done"}</moa_decision>',
+    )
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "cmd"},
+        agent_llm, commander_llm,
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="task", max_rounds=8,
+                      max_agent_iterations=5, max_llm_calls=100)
+    assert result["stopped_by"] == "commander_stop"      # 重试成功，正常结束
+    assert commander_llm.call_count >= 3                  # 首试 + 2 次重试（压缩可能更多）
+
+
+def test_commander_gives_up_after_max_retries(tmp_path, monkeypatch):
+    """指挥官连续调用失败（超过上限）→ commander_error 终止，不无限重试。"""
+    monkeypatch.setattr("skill_engine.execution.moa.time.sleep", lambda *a, **k: None)
+    orch = _make_orchestrator(tmp_path)
+    agent_llm = ScriptedLLM(["A1 完成"])
+    commander_llm = _FlakyLLM(fail_times=99, exc=RuntimeError)   # 永远抛
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "cmd"},
+        agent_llm, commander_llm,
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="task", max_rounds=8,
+                      max_agent_iterations=5, max_llm_calls=100)
+    assert result["stopped_by"] == "commander_error"
+    assert commander_llm.call_count >= 3                  # 首试 + 2 次重试 = 至少上限
+
+
+def test_commander_auth_error_fails_fast(tmp_path, monkeypatch):
+    """鉴权失败（401/api key）不重试，直接 commander_error（fail-fast）。"""
+    monkeypatch.setattr("skill_engine.execution.moa.time.sleep", lambda *a, **k: None)
+    orch = _make_orchestrator(tmp_path)
+    agent_llm = ScriptedLLM(["A1 完成"])
+    commander_llm = _FlakyLLM(fail_times=99, exc=RuntimeError)
+    # 让 invoke 抛带鉴权关键词的异常
+    def _auth_boom(messages, **kwargs):
+        raise RuntimeError("401 Unauthorized: invalid api key")
+    commander_llm.invoke = _auth_boom
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "cmd"},
+        agent_llm, commander_llm,
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="task", max_rounds=8,
+                      max_agent_iterations=5, max_llm_calls=100)
+    assert result["stopped_by"] == "commander_error"
+    # 鉴权失败 fail-fast：重试循环内只调用 1 次（首试），不重试；
+    # 压缩可能额外调 1 次，故断言 < 3（无 2 次重试）
+    assert commander_llm.call_count < 3
+
+
 def _make_blank_orchestrator_for_parse():
     """构造一个只用于调用 _parse_decision 的轻量编排器（不跑完整 run）。"""
     from skill_engine.execution.moa import MoaOrchestrator

@@ -36,6 +36,7 @@ skill-engine 原本的执行核心是单一的 ``ToolDispatchRunner.run(skill, l
 import os
 import re
 import json
+import time
 import hashlib
 import logging
 from pathlib import Path
@@ -57,7 +58,7 @@ from skill_engine import ensure_utf8_io
 # ── 全局 LLM 调用计数包装（成本闸门 #3） ────────────────────────────────────
 # 抽成共享模块，供 moa 与 run 命令（baseline run -td 埋 token）共用同一套机制。
 from .counting_llm import CountingLLM, _accumulate_tokens
-from .context_manager import ContextManager, default_context_budget
+from .context_manager import ContextManager, default_context_budget, _is_rate_limited
 
 
 # ── 指挥官专用 skill 白名单（问题 3：只能从这里选，未来可扩展） ────────────
@@ -307,6 +308,20 @@ _CLEAN_STOP_REASONS = {
     "max_llm_calls",
     "anti_loop_forced_stop",
 }
+
+# 指挥官 LLM 调用失败重试配置（见 _run_commander_decision）
+_COMMANDER_MAX_RETRIES = 3          # 首试 + 2 次重试
+_COMMANDER_RETRY_429_DELAY = 40     # 429/RPM 限流：固定 40s 跨分钟（RPM 窗口维度）
+
+
+def _is_auth_error(e: Exception) -> bool:
+    """判断异常是否为鉴权失败（401/403/api key 失效）。
+
+    这类错误重试永远过不了，直接 fail-fast 认输，避免无谓的长等待。
+    """
+    text = f"{e}".lower()
+    return any(k in text for k in ("401", "403", "unauthorized", "api key",
+                                   "authentication", "permission denied", "invalid api"))
 
 _STATUS_TEXT = {
     "max_iterations": "达到最大迭代次数",
@@ -900,24 +915,38 @@ class MoaOrchestrator:
             # 1) 指挥官决策（指挥官拥有独立隔离上下文，跨轮累积决策轨迹）
             c_prompt = self._commander_prompt(commander, session, agents, query,
                                               round_no, max_rounds)
-            try:
-                c_ctx = session.ctx(commander.alias)
-                c_ctx.messages.append({"role": "user", "content": c_prompt})
-                c_cm = ContextManager(budget=default_context_budget())
-                c_cm.messages = c_ctx.messages
-                c_cm.maybe_compress(commander.llm)   # 复用 L1/L2/L3（指挥官无工具，仅压缩）
-                c_resp = commander.llm.invoke(c_cm.messages)
-                c_text = (c_resp.get("content") if isinstance(c_resp, dict)
-                          else getattr(c_resp, "content", str(c_resp)))
-                if isinstance(c_text, (list, dict)):
-                    c_text = str(c_text)
-                c_ctx.messages.append({"role": "assistant", "content": c_text})
-                c_ctx.messages_version += 1
-                c_ctx.last_output = c_text
-            except Exception as e:
+            c_ctx = session.ctx(commander.alias)
+            # user 消息只 append 一次（重试前），失败不重复堆积污染私有上下文
+            c_ctx.messages.append({"role": "user", "content": c_prompt})
+            c_cm = ContextManager(budget=default_context_budget())
+            c_cm.messages = c_ctx.messages
+            c_cm.maybe_compress(commander.llm)   # 复用 L1/L2/L3（指挥官无工具，仅压缩）
+            # 指挥官是每轮入口 gate，调用失败应重试以扛瞬时故障（429/RPM、超时、5xx），
+            # 但鉴权失败（401/403/api key）重试无意义，直接 fail-fast。
+            c_resp, last_err = None, None
+            for attempt in range(_COMMANDER_MAX_RETRIES):
+                try:
+                    c_resp = commander.llm.invoke(c_cm.messages)
+                    break
+                except Exception as e:
+                    last_err = e
+                    if attempt == _COMMANDER_MAX_RETRIES - 1 or _is_auth_error(e):
+                        break
+                    delay = _COMMANDER_RETRY_429_DELAY if _is_rate_limited(e) else 1
+                    self._emit(f"[WARN] 指挥官调用失败（第{attempt+1}次），{delay}s 后重试: {e}")
+                    time.sleep(delay)
+            if c_resp is None:                    # 全部重试失败才认输
                 stopped_by = "commander_error"
-                self._emit(f"[ERROR] 指挥官调用失败: {e}")
+                self._emit(f"[ERROR] 指挥官调用连续 {_COMMANDER_MAX_RETRIES} 次失败: {last_err}")
                 break
+            # 仅成功后才 append assistant，避免失败消息污染私有上下文
+            c_text = (c_resp.get("content") if isinstance(c_resp, dict)
+                      else getattr(c_resp, "content", str(c_resp)))
+            if isinstance(c_text, (list, dict)):
+                c_text = str(c_text)
+            c_ctx.messages.append({"role": "assistant", "content": c_text})
+            c_ctx.messages_version += 1
+            c_ctx.last_output = c_text
             decision = self._parse_decision(c_text, agents)
             last_rationale = decision.get("rationale", "")
             # 决策理由回写（供跨轮决策参考 + 最终综合）
