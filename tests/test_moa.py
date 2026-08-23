@@ -398,6 +398,7 @@ def test_commander_stop_blocked_when_worker_idle(tmp_path):
     # 指挥官两轮都输出 STOP（第 1 轮被硬闸拦截，第 2 轮才真正生效）
     commander_llm = ScriptedLLM([
         '<moa_decision>{"next":"STOP","task":"","rationale":"我判断完成了"}</moa_decision>',
+        '<moa_decision>{"next":"STOP","task":"","rationale":"我判断完成了"}</moa_decision>',
     ])
     workers, commander = _agents_with_injected_llm(
         [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"}],
@@ -409,6 +410,73 @@ def test_commander_stop_blocked_when_worker_idle(tmp_path):
     assert result["stopped_by"] == "commander_stop"
     assert agent_llm.call_count == 1          # A1 被强制首轮执行
     assert result["rounds"] == 2
+
+
+# ── 4.7.x MOA 指挥官决策解析失败止血（对应 pomodoro3 故障：解析失败伪装成达成 + 删检查点） ──
+def test_unparseable_decision_keeps_checkpoint_and_does_not_fake_stop(tmp_path):
+    """指挥官 JSON 解析失败 → 标记 commander_unparseable（非 commander_stop）、
+    已存在的检查点不被删除（可 --resume-from）、不伪装成任务达成。
+
+    回归：修复前解析失败会走 STOP 分支，stopped_by=commander_stop 且检查点被删。
+
+    场景构造：先正常派 A1 跑一轮（写出检查点），第 2 轮故意给坏 JSON，
+    验证检查点在中断后依然保留（而非被 _CLEAN_STOP_REASONS 路径删除）。
+    """
+    orch = _make_orchestrator(tmp_path)
+    agent_llm = ScriptedLLM(["A1 完成"])
+    commander_llm = ScriptedLLM([
+        '<moa_decision>{"next":"A1","task":"做","rationale":"go"}</moa_decision>',  # 正常派活，写出检查点
+        "<moa_decision>{这不是合法JSON</moa_decision>",                            # 解析失败
+    ])
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "cmd"},
+        agent_llm, commander_llm,
+    )
+    state_path = str(tmp_path / "moa_session_state.json")
+    result = orch.run(workers, commander, FakeRegistry(), query="task", max_rounds=8,
+                      max_agent_iterations=5, max_llm_calls=100, state_path=state_path)
+    # 第 2 轮解析失败应被识别为格式故障，而非伪装成任务达成
+    assert result["stopped_by"] == "commander_unparseable"
+    # 第 1 轮已写出检查点，中断后必须保留（不在 _CLEAN_STOP_REASONS 中），以便续跑
+    assert os.path.exists(state_path)
+
+
+def test_unparseable_decision_reports_unparseable_flag(tmp_path):
+    """_parse_decision 在各类格式故障时返回 unparseable=True 标记，
+    使主循环能据此与真实 STOP 区分（不依赖具体坏形态，覆盖：裸换行/未知代号/无围栏）。"""
+    orch = _make_blank_orchestrator_for_parse()
+    agents = [type("A", (), {"alias": "A1"})()]
+    # 裸换行（strict=False 应救回，这里故意用 strict 失效形态验证标记逻辑之外的健壮性）
+    bad = [
+        "<moa_decision>{坏JSON</moa_decision>",                       # 解析失败
+        '<moa_decision>{"next":"ZZ9","task":"","rationale":""}</moa_decision>',  # 未知代号
+        "完全没有围栏的闲聊文本",                                       # 无围栏非 STOP
+    ]
+    for text in bad:
+        d = orch._parse_decision(text, agents)
+        assert d.get("unparseable") is True, f"应为格式故障: {text!r}"
+        assert d["next"] == "STOP"  # 兼容字段保留，既有断言不受影响
+
+
+def test_strict_false_rescues_multiline_task(tmp_path):
+    """JSON 字符串内含裸换行（控制字符）应在 strict=False 下正常解析（本次故障头号嫌疑）。"""
+    orch = _make_orchestrator(tmp_path)
+    agents = [type("A", (), {"alias": "A1"})()]
+    text = '<moa_decision>{"next":"A1","task":"第一行\n第二行","rationale":"多行任务"}</moa_decision>'
+    d = orch._parse_decision(text, agents)
+    assert d.get("unparseable") is not True
+    assert d["next"] == "A1"
+    assert "第一行" in d["task"] and "第二行" in d["task"]
+
+
+def _make_blank_orchestrator_for_parse():
+    """构造一个只用于调用 _parse_decision 的轻量编排器（不跑完整 run）。"""
+    from skill_engine.execution.moa import MoaOrchestrator
+    return MoaOrchestrator(
+        executor=None, assembler=None, approval_fn=lambda *a, **k: True,
+        human_io=None, working_root="/tmp", plain_text=True, verbose=False,
+    )
 
 
 def test_commander_stop_allowed_after_worker_acted(tmp_path):

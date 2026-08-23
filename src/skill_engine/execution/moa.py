@@ -313,6 +313,7 @@ _STATUS_TEXT = {
     "error": "异常终止",
     "rate_limited": "被限流终止",
     "commander_stop": "正常停止",
+    "commander_unparseable": "指挥官决策格式故障（已保留检查点）",
     "anti_loop_forced_stop": "防死循环强制停止",
 }
 
@@ -585,14 +586,16 @@ class MoaOrchestrator:
             # 取围栏内全部内容再 json.loads，避免因 rationale 含花括号导致
             # 非贪婪 \{.*?\} 误截。解析失败一律安全 STOP。
             try:
-                data = json.loads(m.group(1).strip())
+                # strict=False：允许 JSON 字符串内的控制字符（如裸换行 \n），
+                # 兼容模型在 task 字段中写多行内容导致的 Invalid control character。
+                data = json.loads(m.group(1).strip(), strict=False)
             except Exception:
-                return {"next": "STOP", "task": "", "rationale": "（JSON 解析失败，安全停止）"}
+                return {"next": "STOP", "task": "", "rationale": "（JSON 解析失败，安全停止）", "unparseable": True}
         else:
             # 容错：无围栏时检测 STOP 关键词
             if re.search(r"\b(STOP|停止|结束任务|完成)\b", text, re.IGNORECASE):
                 return {"next": "STOP", "task": "", "rationale": "（关键词 STOP）"}
-            return {"next": "STOP", "task": "", "rationale": "（决策块解析失败，安全停止）"}
+            return {"next": "STOP", "task": "", "rationale": "（决策块解析失败，安全停止）", "unparseable": True}
         nxt = str(data.get("next", "")).strip().upper()
         valid = {a.alias.upper(): a.alias for a in agents}
         if nxt in ("STOP", "结束", "完成", "DONE"):
@@ -601,7 +604,7 @@ class MoaOrchestrator:
         if nxt in valid:
             return {"next": valid[nxt], "task": str(data.get("task", "")),
                     "rationale": str(data.get("rationale", ""))}
-        return {"next": "STOP", "task": "", "rationale": f"（未知 agent 代号 {nxt}，安全停止）"}
+        return {"next": "STOP", "task": "", "rationale": f"（未知 agent 代号 {nxt}，安全停止）", "unparseable": True}
 
     # ---- worker 执行 ----
     def _run_agent(self, agent: MoaAgent, session: MoaSession, task: str,
@@ -927,6 +930,15 @@ class MoaOrchestrator:
                 f"> 第 {round_no}/{max_rounds} 轮 · 指挥官决策: "
                 f"next={decision['next']} · {decision.get('rationale','')}"
             )
+
+            # 格式故障（解析失败 / 未知代号 / 无围栏非 STOP）≠ 语义决策 STOP：
+            # 标记 unparseable 时不应伪装成"任务达成"，且必须保留检查点以便续跑。
+            if decision.get("unparseable"):
+                stopped_by = "commander_unparseable"
+                self._emit("⚠ 指挥官决策解析失败（格式故障），中断但保留检查点，可 --resume-from 续跑")
+                # 仅在故障时落盘原文，便于据此定位坏 JSON 形态（正常路径不输出，避免刷屏）
+                self._emit(f"[commander_raw] 决策原文（前 800 字）:\n{c_text[:800]}")
+                break
 
             if decision["next"] == "STOP":
                 # 防早停硬闸：存在从未行动且已声明职责的 worker → 禁止 STOP，改派。
