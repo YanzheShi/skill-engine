@@ -1,5 +1,5 @@
 """
-Gradio Web UI — skill-engine 的使用界面
+Gradio Web UI — skill-engine 的使用界面，目前暂不支持session和MOA模式。
 
 提供四个面板：
 1. Skill 列表：展示所有已安装的 skills（含分组信息）

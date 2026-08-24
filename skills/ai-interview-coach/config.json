@@ -1,0 +1,119 @@
+{
+  "skill_name": "ai-interview-coach",
+  "version": "2.0.0",
+  "description": "AI大模型应用开发专属深度面试教练 - 数字孪生驱动、多风格模拟、黄金话术纠偏",
+  "author": "Yuanbao AI",
+  "config": {
+    "resume_dir": "resume/",
+    "reports_dir": "reports/",
+    "state_file": "state/interview-history.json",
+    "default_round_weights": {
+      "round1": {
+        "fundamentals": 0.25,
+        "project_intro": 0.30,
+        "coding": 0.25,
+        "ai_usage": 0.10,
+        "communication": 0.10
+      },
+      "round2": {
+        "project_depth": 0.35,
+        "system_design": 0.30,
+        "tech_selection": 0.20,
+        "engineering": 0.15
+      },
+      "round3": {
+        "business_thinking": 0.25,
+        "star_narrative": 0.25,
+        "teamwork": 0.20,
+        "career_plan": 0.15,
+        "reverse_question": 0.15
+      }
+    },
+    "scoring": {
+      "scale": [1, 2, 3, 4, 5],
+      "pass_threshold": 3.0,
+      "strong_hire_threshold": 4.0,
+      "overall_weights": {
+        "round1": 0.30,
+        "round2": 0.40,
+        "round3": 0.30
+      }
+    },
+    "interview_settings": {
+      "round1_duration_minutes": 50,
+      "round2_duration_minutes": 60,
+      "round3_duration_minutes": 45,
+      "questions_per_round": {
+        "round1": "8-12",
+        "round2": "5-8",
+        "round3": "5-7"
+      },
+      "language": "zh-CN"
+    },
+    "digital_twin": {
+      "enabled": true,
+      "resume_formats": [".md", ".txt", ".pdf", ".docx"],
+      "self_assessment_file": "self-assessment.json",
+      "project_deep_dive_dir": "project-deep-dive/",
+      "target_jd_dir": "target-jd/",
+      "prompt_logs_dir": "prompt-logs/",
+      "online_cases_dir": "online-cases/",
+      "auto_detect_red_flags": true,
+      "anti_cheating": true
+    },
+    "interviewer_styles": {
+      "default": "压力挑战型",
+      "available": ["温和引导型", "压力挑战型", "技术深挖型", "业务导向型"],
+      "dynamic_switch": true,
+      "silence_pressure_seconds": 5,
+      "challenge_on_weak_spots": true,
+      "challenge_on_boasting": true
+    },
+    "golden_answer": {
+      "enabled": true,
+      "min_questions_for_review": 3,
+      "defect_patterns": [
+        "没有数字", "只说工具名", "背八股无经验", "回避模糊",
+        "甩锅团队", "过度承诺", "缺少trade_off", "逻辑混乱"
+      ],
+      "output_in_report": true
+    },
+    "jd_gap_analysis": {
+      "enabled": true,
+      "gap_threshold_critical": 3,
+      "gap_threshold_moderate": 1,
+      "generate_mock_questions": true,
+      "pre_interview_warning": true,
+      "post_interview_update": true
+    },
+    "targeted_pressure_test": {
+      "enabled": true,
+      "trigger_conditions": [
+        "self_score <= 3",
+        "candidate_boasting",
+        "vague_answer",
+        "contradiction_with_resume"
+      ],
+      "pressure_intensity": "high"
+    }
+  },
+  "features": {
+    "resume_parsing": true,
+    "digital_twin_input": true,
+    "multi_round_tracking": true,
+    "score_aggregation": true,
+    "report_generation": true,
+    "next_round_recommendation": true,
+    "improvement_plan": true,
+    "radar_chart_data": true,
+    "interviewer_style_engine": true,
+    "dynamic_style_switch": true,
+    "golden_answer_contrast": true,
+    "speech_defect_diagnosis": true,
+    "jd_gap_analysis": true,
+    "targeted_mock_generation": true,
+    "targeted_pressure_test": true,
+    "emotional_stability_tracking": true,
+    "anti_cheating_verification": true
+  }
+}

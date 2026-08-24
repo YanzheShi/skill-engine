@@ -1,24 +1,60 @@
 # Skills Engine
 
-独立的 skills 解析、路由和执行引擎。兼容 Claude Code Agent Skills 开放标准核心子集，提供 CLI 和 Web UI 双界面。
+围绕 skills 解析、路由、调试、执行的CLI 工具。提供较为完整的Agent harness能力，可以作为个人学习和使用的**Agent Harness**，也可以作为个人开发skill的调试工具。
 
-## 特性
+## 核心特性
 
-- **独立于任何 AI 产品** — 不依赖 Claude Code、Cursor 等，自带 CLI 和 Web UI
-- **兼容 CC 生态** — 能加载和运行 `.agents` 仓库中的 skill
-- **四种运行模式** — Steps DSL（确定性）/ tool_dispatch LLM 循环（档位 B）/ 单次 LLM（档位 A）/ 纯编译（pipe）
-- **三级路由匹配** — 精确名称 / 关键词打分（jieba + intention 权重）/ LLM 兜底
-- **安全审批系统** — 离线扫描 + 运行时审批，strict/permissive/off 三种模式
-- **会话级审批缓存** — y(本次)/Y(会话允许)/N(拒绝)/r(会话拒绝)/A(全部允许)
-- **自动审批** — 支持 `skill_name:binary` 粒度格式
-- **MCP 服务器支持** — 通过 `mcp.json` 连接外部 MCP 服务器（stdio/HTTP/SSE）
-- **文件快照** — 执行前自动创建文件检查点，支持回滚
-- **多轮 REPL 会话** — 同一 skill 的持续交互式会话
-- **元数据预处理** — 自动抽取 intention / synonyms / purpose / keywords 增强匹配
-- **Skill 创建** — 通过自然语言描述，LLM 自动生成 skill
-- **Web UI** — Gradio 界面，含逐步交互审批
-- **跨平台路径** — 自动归一化 Git Bash / WSL / Cygwin 路径到 Windows 原生路径
-- **Windows 原生支持** — WriteConsoleW 控制台交互，UTF-8 编码
+skill-engine 是一个用于个人开发和日常工作的**Agent harness**，并围绕三种核心运行模式构建：
+
+- **Skill 检索与执行引擎** —— 不依赖任何 AI 产品，自带三级路由（精确名称 / 关键词打分 / LLM 兜底）与四路执行分流（Steps DSL 确定性执行 / tool_dispatch LLM 循环 / 单次 LLM 调用/ 纯编译（dry-run）），可以高效调试和运行个人开发的小型skill。
+- **Session 模式（长任务）** —— 小型Agent harness，基于 code-harness 的持久 REPL 会话，支持状态持久化与断点恢复，适合多轮调试、代码优化、联网查询等需要持续交互的长任务。
+- **MOA 模式（多模型协作）** —— 主要用于解决当前编码能力强的模型不具备图片识别导致无法根据UI设计稿开发前端的痛点，可以由指挥官统筹，VLM 负责视觉/截图审查、LLM 负责编码，协同攻克复杂逻辑或「VLM + LLM 协作」类任务。
+
+> 档位 A（单次 LLM 调用）与档位 B（tool_dispatch 工具循环）是上述三种模式的底层执行档位，按需自动选择，无需单独记忆。
+
+## 功能展示
+
+> 以下截图来自真实运行环境，展示 skill-engine 的核心能力与界面。图片随仓库 `demo/` 目录一起发布。
+
+### 整体介绍与项目结构
+引擎CLI整体介绍 
+
+![skill-engine 整体介绍](demo/skill-engine整体介绍.png)
+
+### 两种核心运行模式
+
+| MOA 多模型协作 | Session 多轮代码会话（code-harness） |
+| --- | --- |
+| ![MOA 模式](demo/MOA模式.png) | ![Session 模式](demo/session模式-code-harness.png) |
+
+- **MOA 模式（多模型协作）**：指挥官（Commander）统筹，VLM 负责视觉/截图审查、LLM 负责编码，多模型协同攻克复杂任务（详见下方「实战案例 · 设计稿驱动 UI 开发」）。
+- **Session 模式（多轮会话）**：基于 code-harness 的持久 REPL 会话，支持状态持久化与断点恢复，适合多轮调试、代码优化与联网查询。
+
+## 实战案例（Demo）
+
+以下案例均包含**完整运行记录**（含工具调用、思考过程、最终结果），可点击链接直达 `demo/` 目录查看原始日志与全部截图。
+
+### 案例一：MOA + VLM 指导 LLM 根据设计稿完成 UI 开发
+
+多模型协作实战：指挥官拆解任务，VLM 对生成的 UI 截图做视觉审查并给出审判意见，LLM 据此修复，多轮迭代直至交付。
+
+| 开始执行 | 初版 UI | VLM 截图审查 | 最终交付 |
+| --- | --- | --- | --- |
+| ![开始执行](demo/moa-VLM指导LLM根据设计稿完成ui开发/开始执行.png) | ![初版 UI](demo/moa-VLM指导LLM根据设计稿完成ui开发/初版ui.png) | ![A2 截图审查结果](demo/moa-VLM指导LLM根据设计稿完成ui开发/A2截图审查结果.png) | ![最终交付](demo/moa-VLM指导LLM根据设计稿完成ui开发/最终交付.png) |
+
+- 📂 [查看完整 demo 文件夹](demo/moa-VLM指导LLM根据设计稿完成ui开发/)
+- 📄 [完整运行记录（txt）](demo/moa-VLM指导LLM根据设计稿完成ui开发/完整运行记录.json)
+
+### 案例二：Session 模式解决「AC 率始终为 0」问题（第四轮优化）
+
+多轮 code-harness 会话：Agent 在 code-tutor-agent 项目中排查画像 AC 率显示异常，逐轮读取源码、查询数据库、定位根因（`get_user_profile_v2()` 缺少 AC 率计算），最终修复并验证 42.86%（36/84）。
+
+| 开始执行 | 发现问题 | 最终执行结果 |
+| --- | --- | --- |
+| ![开始执行](demo/session%20解决AC为零的问题。-第四轮优化/开始执行.png) | ![发现问题](demo/session%20解决AC为零的问题。-第四轮优化/发现问题.png) | ![最终执行结果](demo/session%20解决AC为零的问题。-第四轮优化/最终执行结果.png) |
+
+- 📂 [查看完整 demo 文件夹](demo/session%20解决AC为零的问题。-第四轮优化/)
+- 📄 [执行记录（txt）](demo/session%20解决AC为零的问题/执行记录.txt)
 
 ## 安装
 
@@ -123,7 +159,7 @@ models:
   - name: default
     model: gpt-4o
     base_url: https://api.openai.com/v1
-    api_key: ${OPENAI_API_KEY}        # 用环境变量引用密钥，避免明文
+    api_key: ${OPENAI_API_KEY}
     provider: openai
   - name: deepseek
     model: deepseek-chat
@@ -141,7 +177,6 @@ settings:
 支持任何 OpenAI 兼容的 API 提供商，包括：
 
 - OpenAI（GPT 系列）
-- SenseNova（商汤）
 - DeepSeek
 - 通义千问（DashScope）
 - vLLM 本地部署
@@ -159,21 +194,20 @@ skill-engine list
 # 匹配 skills
 skill-engine match "生成题解"
 
-# 执行 skill（档位 A：单次 LLM）
-skill-engine run "生成题解" --llm
+# 执行 skill（默认：路由自动选择最合适的执行档位）
+skill-engine run "生成题解"
 
-# 执行 skill（Steps DSL 确定性执行）
-skill-engine run "生成题解" --steps
+# Session 模式：长任务 / 多轮调试 / 代码优化（可持续交互、断点恢复）
+skill-engine session "帮我重构这段代码" --skill leetcode-solution-writer --max-iter 20
 
-# 执行 skill（tool_dispatch LLM 循环）
-skill-engine run "生成题解" --tool-dispatch
-
-# 安全扫描
-skill-engine scan-security
+# MOA 模式：复杂逻辑 / VLM+LLM 协作（如按设计稿开发 UI）
+skill-engine moa "根据 designs/home.png 实现首页 UI"
 
 # 启动 Web UI
 skill-engine web
 ```
+
+> Session / MOA 的实战运行截图见上方「功能展示」与「实战案例」章节。
 
 ## 目录结构
 
@@ -314,6 +348,14 @@ skill-engine index --rebuild-meta
 
 支持 stdio、HTTP、SSE 三种传输方式。
 
+## MOA 多模型协作模式
+
+针对「复杂逻辑」或「VLM + LLM 协作」类任务：由指挥官（Commander）拆解任务并统筹，VLM 负责视觉/截图审查，LLM 负责编码实现，多模型协同迭代直至交付。
+
+典型场景：根据设计稿完成 UI 开发——VLM 对生成截图做视觉审查并给出审判意见，LLM 据此修复，多轮收敛（见上方「实战案例 · 案例一」）。
+
+多模型 profile 配置见 [config.yml.example](config.yml.example)（MOA 协作）。
+
 ## 多轮 REPL 会话
 
 对同一 skill 发起持续交互式会话：
@@ -374,20 +416,23 @@ RISKY_BINARIES = {"rm", "cp", "mv", "chmod", "chown", "dd", "mkfs", "python"}
 ## CLI 命令
 
 ```bash
-# 路由匹配
+# 路由匹配（--explain 查看打分细节）
 skill-engine match "查询" [--explain]
 
-# 执行
-skill-engine run "查询" [--llm] [--steps] [--tool-dispatch]
+# 执行（路由自动选择档位；--steps 强制 Steps DSL，--tool-dispatch 强制档位 B）
+skill-engine run "查询" [--steps] [--tool-dispatch]
                        [--dry-run] [--args "参数"]
                        [--max-iter <N>] [--non-interactive]
-                       [--working-root <DIR>] [--state-path <PATH>]
-                       [--resume-from <PATH>]
+                       [--working-root <DIR>]
 
-# 多轮会话
+# Session 模式：长任务多轮会话（--state-path 持久化，--resume-from 断点恢复）
 skill-engine session "查询" [--skill <NAME>] [--max-iter <N>]
                             [--working-root <DIR>] [--state-path <PATH>]
                             [--resume-from <PATH>]
+
+# MOA 模式：多模型协作（指挥官 + VLM 视觉审查 + LLM 编码）
+skill-engine moa "任务描述" [--skill <NAME>] [--max-iter <N>]
+                      [--working-root <DIR>] [--state-path <PATH>]
 
 # 扫描
 skill-engine scan [--root DIR]
@@ -410,9 +455,6 @@ skill-engine scan-security [name] [--deep] [--json]
 
 # 缓存
 skill-engine clear-cache
-
-# Web UI
-skill-engine web
 ```
 
 ## SKILL.md 格式
@@ -466,6 +508,7 @@ $ARGUMENTS
 | 手动执行 | 选择 skill + 参数（支持逐步交互审批） |
 
 审批流：点击「扫描审批」→ 逐条显示待批命令 → y/Y/N/r 按钮 → 全部完成 →「执行」
+暂不支持session和MOA模式
 
 ## 测试
 

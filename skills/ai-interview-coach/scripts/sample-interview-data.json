@@ -1,0 +1,131 @@
+{
+  "candidate_name": "张三",
+  "level": "中级",
+  "round_name": "基础技术面",
+  "duration": 50,
+  "total_score": 3.6,
+  "decision": "待定，建议进入第2轮",
+  "decision_icon": "⚠️",
+  "decision_reason": "项目表述较好，八股基础有盲区，编码能力达标。建议第2轮重点验证项目第三层深度。",
+  "next_round_decision": "建议进入第2轮",
+  "next_round_reason": "基础技术能力达标，需要深度验证项目实战能力和系统设计能力。",
+  "days_until_next": 7,
+  "dimensions": [
+    {"name": "基础八股", "weight": "25%", "score": "3.2", "weighted": "0.80"},
+    {"name": "项目初步表述", "weight": "30%", "score": "4.0", "weighted": "1.20"},
+    {"name": "编码能力", "weight": "25%", "score": "3.5", "weighted": "0.88"},
+    {"name": "AI使用与工具意识", "weight": "10%", "score": "3.8", "weighted": "0.38"},
+    {"name": "沟通表达", "weight": "10%", "score": "4.0", "weighted": "0.40"}
+  ],
+  "questions": [
+    {
+      "question": "请描述 Transformer 的 Self-Attention 计算过程",
+      "answer_summary": "能说出 Q/K/V 矩阵和 softmax，但推导公式时卡壳，追问 sqrt(d_k) 的作用后回答正确",
+      "followups": ["为什么要除以 sqrt(d_k)？", "时间复杂度是多少？"],
+      "assessment": "核心流程正确，数学推导不够熟练，追问后能补充",
+      "score": 3
+    },
+    {
+      "question": "介绍你做过的一个 AI 项目",
+      "answer_summary": "详细介绍了 RAG 知识库项目，技术栈清晰，能说出分块策略和检索方案，但缺少量化指标",
+      "followups": ["召回率怎么衡量的？", "上线后用户反馈如何？"],
+      "assessment": "项目真实度高，技术选型有思考，但缺少量化数据",
+      "score": 4
+    },
+    {
+      "question": "实现 LRU Cache",
+      "answer_summary": "用 dict + 双向链表实现，15分钟内完成，边界处理正确，主动分析了 O(1) 复杂度",
+      "followups": [],
+      "assessment": "编码能力扎实，代码整洁，有复杂度意识",
+      "score": 4
+    }
+  ],
+  "golden_answers": [
+    {
+      "question": "请描述 Transformer 的 Self-Attention 计算过程",
+      "level": 2,
+      "candidate_answer": "Self-Attention 就是 Q 乘以 K 的转置，除以根号 d_k，然后 softmax，再乘以 V。",
+      "golden_answer": "Self-Attention 的核心直觉是：让每个 token 去'查字典'，找到和它相关的其他 token，然后加权汇总信息。\n\n具体流程：\n1. 每个 token 的 embedding 通过三个线性层变成 Q、K、V 三个向量\n   - Q（Query）= 我想找什么\n   - K（Key）= 我是什么\n   - V（Value）= 我携带的信息\n2. Q 和 K 做点积 → 得到注意力分数（相似度）\n3. 除以根号 d_k → 如果 d_k 很大，点积的方差会很大，softmax 会进入饱和区（梯度接近 0）。除以根号 d_k 相当于做了方差归一化\n4. Softmax → 变成概率分布\n5. 用这个分布对 V 做加权求和 → 输出",
+      "diagnoses": [
+        "没有解释每个步骤的直觉，像背公式",
+        "不知道为什么除以根号 d_k",
+        "没有维度变化说明"
+      ],
+      "tips": [
+        "加'直觉'：先说'为什么这样设计'，再说'怎么算'",
+        "加'维度'：Q 的 shape 是什么、输出是什么",
+        "加'延伸'：这个公式的瓶颈在哪？后续工作怎么解决的？"
+      ]
+    }
+  ],
+  "jd_gap": {
+    "skills": [
+      {"name": "RAG", "self_score": 8, "actual_score": 7, "required": 8, "gap": -1, "status": "✅ 接近"},
+      {"name": "Agent", "self_score": 6, "actual_score": 6, "required": 7, "gap": 1, "status": "🟡 略低"},
+      {"name": "系统设计", "self_score": 5, "actual_score": 4, "required": 7, "gap": 3, "status": "🔴 缺口"},
+      {"name": "Python", "self_score": 8, "actual_score": 8, "required": 8, "gap": 0, "status": "✅ 匹配"},
+      {"name": "推理优化", "self_score": 2, "actual_score": 2, "required": 5, "gap": 3, "status": "🔴 严重缺口"}
+    ],
+    "critical_gaps": [
+      {"name": "系统设计", "detail": "自评 5 分，实测 4 分，JD 要求 7 分。被压力题打回原形，说不出限流/降级/监控方案。", "fix": "本周精读《Designing Data-Intensive Applications》第 8-11 章，画 3 张架构图"},
+      {"name": "推理优化", "detail": "自评 2 分，JD 加分项。对 KV Cache / vLLM / 量化只知概念。", "fix": "准备'诚实 + 学习意愿'话术，不要硬编"}
+    ],
+    "surprises": [
+      {"name": "RAG 实战", "self_score": 8, "actual_score": 7}
+    ]
+  },
+  "emotional_stability": {
+    "score_1": "4",
+    "score_2": "3",
+    "score_3": "4",
+    "score_4": "5",
+    "note_1": "被质疑时能冷静回应，条理清晰",
+    "note_2": "卡壳后能快速调整，但偶有沉默过长",
+    "note_3": "面对压力题节奏感好，不慌乱",
+    "note_4": "遇到不懂的坦率承认，不编造",
+    "total": "4",
+    "summary": "情绪稳定性良好，压力下表现正常",
+    "stress_behavior": "被连续追问后，呼吸节奏略微加快，但仍能保持逻辑清晰。回答变短但质量不变。"
+  },
+  "strengths": [
+    {"name": "RAG 全链路经验", "evidence": "能清晰描述从文档解析到生成的全流程，知道分块策略和检索方案"},
+    {"name": "编码能力扎实", "evidence": "LRU Cache 15 分钟完成，边界处理正确，主动分析复杂度"},
+    {"name": "沟通表达清晰", "evidence": "项目描述结构清晰，先总后分，逻辑性强"}
+  ],
+  "weaknesses": {
+    "critical": [
+      {"name": "系统设计深度不足", "symptom": "说不出高并发下的限流/降级方案，没有容量规划经验", "resource": "《Designing Data-Intensive Applications》第 8-11 章", "practice": "画 RAG 系统架构图 + 压测方案", "time": "3 天", "impact": "第2轮必考，不补必挂"}
+    ],
+    "medium": [
+      {"name": "数学推导不够熟练", "symptom": "Attention 公式推导卡壳，说不清除以 sqrt(d_k) 的原因", "resource": "Transformer 原论文 + 3Blue1Brown 视频", "practice": "手推 3 遍 Attention 公式", "time": "1 天"}
+    ],
+    "minor": [
+      {"name": "项目缺乏量化指标", "symptom": "项目描述缺少数字，只说'效果不错'", "tip": "每个结论必须跟一个数字，哪怕是估算"}
+    ]
+  },
+  "defects": [
+    {"type": "没有数字型", "count": 2, "question": "项目介绍", "fix": "每个结论必须跟一个数字"},
+    {"type": "背八股型", "count": 1, "question": "Self-Attention", "fix": "加个人经验和场景化案例"}
+  ],
+  "improvement_plan": {
+    "days_until_next": 7,
+    "day1_2_task": "补系统设计基础",
+    "day1_2_item_1": "精读 DDIA 第 8 章（分布式系统挑战）",
+    "day1_2_item_2": "画 RAG 系统架构图（入口/检索/生成/监控）",
+    "day1_2_item_3": "准备限流/降级/熔断的 3 个具体方案",
+    "day3_5_task": "强化薄弱八股",
+    "day3_5_item_1": "手推 Attention 公式 3 遍",
+    "day3_5_item_2": "复习 LoRA 和 DPO 原理",
+    "day3_5_item_3": "了解 vLLM PagedAttention 基本概念",
+    "day3_5_item_4": "准备'诚实话术'（推理优化不会时怎么说）",
+    "day6_7_task": "模拟面试 + 复盘",
+    "day6_7_item_1": "用本 Skill 做第2轮模拟面试",
+    "day6_7_item_2": "根据第1轮报告逐项检查改进"
+  },
+  "radar_scores": [3.2, 4.0, 3.0, 3.8, 3.5, 4.0, 3.0, 3.5],
+  "total_questions": 12,
+  "completeness": "75",
+  "early_end": "否",
+  "early_end_reason": "N/A",
+  "prev_weakness_check": "首次面试"
+}
