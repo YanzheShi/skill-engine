@@ -45,13 +45,13 @@ skill-engine 是一个用于个人开发和日常工作的**Agent harness**，�
 - 📂 [查看完整 demo 文件夹](demo/moa-VLM指导LLM根据设计稿完成ui开发/)
 - 📄 [完整运行记录（txt）](demo/moa-VLM指导LLM根据设计稿完成ui开发/完整运行记录.json)
 
-### 案例二：Session 模式解决「AC 率始终为 0」问题（第四轮优化）
+### 案例二：Session 模式解决「AC 率始终为 0」问题
 
 多轮 code-harness 会话：Agent 在 code-tutor-agent 项目中排查画像 AC 率显示异常，逐轮读取源码、查询数据库、定位根因（`get_user_profile_v2()` 缺少 AC 率计算），最终修复并验证 42.86%（36/84）。
 
 | 开始执行 | 发现问题 | 最终执行结果 |
 | --- | --- | --- |
-| ![开始执行](demo/session%20解决AC为零的问题。-第四轮优化/开始执行.png) | ![发现问题](demo/session%20解决AC为零的问题。-第四轮优化/发现问题.png) | ![最终执行结果](demo/session%20解决AC为零的问题。-第四轮优化/最终执行结果.png) |
+| ![开始执行](demo/session%20解决AC为零的问题/开始执行.png) | ![发现问题](demo/session%20解决AC为零的问题/发现问题.png) | ![最终执行结果](demo/session%20解决AC为零的问题/最终执行结果.png) |
 
 - 📂 [查看完整 demo 文件夹](demo/session%20解决AC为零的问题。-第四轮优化/)
 - 📄 [执行记录（txt）](demo/session%20解决AC为零的问题/执行记录.txt)
@@ -270,9 +270,23 @@ src/skill_engine/
  返回 MatchPlan (single/multi)
 ```
 
-## 执行流程（四路分流）
+## 执行流程
+
+skill-engine 提供三种运行模式，对应不同复杂度的任务：
 
 ```
+用户请求
+   │
+   ├─ run    → 单轮执行（四路分流，见下）
+   │
+   ├─ session → 长任务多轮 REPL 会话（持续交互、断点恢复）
+   │
+   └─ moa    → 多模型协作（指挥官 + VLM 视觉审查 + LLM 编码）
+```
+
+### run() 四路分流（单轮执行）
+
+```text
 runner.run()
    │
    ├─ ① 自动解析 Steps（body 中有 ## Steps？）
@@ -286,7 +300,7 @@ runner.run()
 
 ### 档位 B（tool_dispatch）工作流
 
-```
+```text
 tool_dispatch_loop()
    │
    ├─ 初始化上下文管理器（token 预算）
@@ -300,6 +314,36 @@ tool_dispatch_loop()
    ├─ 达到 max_iterations 或 LLM 返回最终结果时退出
    └─ 清理 MCP 连接
 ```
+
+### Session 模式流程（长任务多轮会话）
+
+```text
+session.start()
+   │
+   ├─ 载入/恢复状态（--state-path / --resume-from 断点恢复）
+   ├─ 循环（直到用户 /exit 或达到 --max-iter）：
+   │   ├─ 读取用户输入（prompt_toolkit，支持多行粘贴）
+   │   ├─ 路由匹配目标 skill（复用 run() 四路分流）
+   │   ├─ 执行并回写上下文（文件改动 / 工具结果累积进会话）
+   │   └─ 持久化本轮状态
+   └─ 输出最终结论
+```
+
+### MOA 模式流程（多模型协作）
+
+```text
+moa.start()
+   │
+   ├─ 指挥官（Commander）拆解任务、制定子计划
+   ├─ 循环（直到交付）：
+   │   ├─ LLM 编码实现（产出代码 / 文件）
+   │   ├─ VLM 对运行截图 / 产物做视觉审查、给出审判意见
+   │   ├─ 指挥官汇总意见，指挥 LLM 修复
+   │   └─ 收敛判定（达标则交付，否则进入下一轮）
+   └─ 输出最终交付物
+```
+
+> 两种模式的真实运行截图与完整记录见上方「实战案例」章节。
 
 ### 内建工具（tool_dispatch 模式可用）
 
