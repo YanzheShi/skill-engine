@@ -23,6 +23,66 @@ from skill_engine.models import Skill
 
 
 # ================================================================
+# Meta 缓存落点（out-of-tree，用户级）
+# ================================================================
+# 设计决策（详见 session 讨论）：
+# - .skill-meta.yaml 是 LLM 从 SKILL.md 抽取的**派生缓存**，可随时重建，
+#   不应留在 skill 源树（会与 git/可移植 skill 资产耦合，且读路径产生写副作用）。
+# - 落点：用户级 ~/.skill-engine/cache/meta/（与 scanner 的 approvals/blocklist
+#   同根，但放在 cache/ 子目录下，明确标"可重建"语义，区别于必须留存的 data）。
+# - 寻址：文件名 = <source_hash>__v<EXTRACTOR_VERSION>.yaml（内容寻址 + 抽取器
+#   版本）。同一份 SKILL.md 内容在全机器任何项目只抽一次（跨项目共享）。
+#   改抽取 prompt 时只需 bump EXTRACTOR_VERSION，旧缓存自动失效重抽。
+# - 旧 sidecar 文件 ./skills/<name>/.skill-meta.yaml 已删除；引擎下次自动在 cache 重建。
+
+# 抽取器版本：PROMPT_EXTRACT 语义变化时 +1（旧缓存凭文件名自动失效）
+EXTRACTOR_VERSION = 2
+
+# 引擎派生缓存统一前缀（与 .skill-local.yaml 用户覆写区分：local 是 data，meta 是 cache）
+_META_CACHE_PREFIX = ".skill-engine"
+
+# 派生文件/目录黑名单：绝不作为 supporting_files 喂给 LLM 上下文
+META_DERIVED_NAMES = {
+    ".skill-meta.yaml",   # 旧 sidecar（迁移后不再生成，留作防御）
+    ".skill-local.yaml",  # 用户覆写，非 skill 资产，避免进 LLM 上下文
+}
+META_DERIVED_DIRS = {".git", "__pycache__", ".skill-engine"}
+
+
+def meta_cache_dir(root: Optional[Path] = None) -> Path:
+    """返回 meta 缓存目录并确保存在。
+
+    默认用户级 ~/.skill-engine/cache/meta；传入 root 时用于隔离（如测试）。
+
+    Args:
+        root: 自定义缓存根目录（None → 用户级 ~/.skill-engine/cache/meta）
+
+    Returns:
+        已 mkdir 的 Path
+    """
+    if root is not None:
+        d = Path(root)
+    else:
+        d = Path.home() / _META_CACHE_PREFIX / "cache" / "meta"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def meta_cache_path(skill: Skill, root: Optional[Path] = None) -> Path:
+    """计算某 skill 的 meta 缓存文件路径（内容寻址 + 抽取器版本）。
+
+    Args:
+        skill: Skill 对象
+        root: 自定义缓存根目录（None → 用户级）
+
+    Returns:
+        <cache_dir>/<source_hash>__v<ver>.yaml
+    """
+    src_hash = Preprocessor._hash_skill(skill)
+    return meta_cache_dir(root) / f"{src_hash}__v{EXTRACTOR_VERSION}.yaml"
+
+
+# ================================================================
 # LLM 抽取 Prompt
 # ================================================================
 
@@ -96,7 +156,8 @@ class Preprocessor:
 
     Args:
         llm: LangChain LLM 客户端实例
-        cache_dir: 可选，默认 skill 目录下 .skill-meta.yaml
+        cache_dir: 可选自定义缓存根目录。None → 用户级 ~/.skill-engine/cache/meta
+                   （内容寻址，跨项目共享）。测试可传入临时目录隔离。
     """
 
     def __init__(
@@ -105,27 +166,31 @@ class Preprocessor:
         cache_dir: Optional[Path] = None,
     ):
         self.llm = llm
-        self.cache_dir = cache_dir
+        self.cache_root = cache_dir
 
     def ensure_meta(self, skill: Skill) -> dict:
-        """增量保证 .skill-meta.yaml 存在且最新
+        """增量保证 meta 缓存存在且最新（落点：用户级 ~/.skill-engine/cache/meta）
 
         如果缓存命中且 SKILL.md 未变（source_hash 一致），
         直接返回缓存内容，不调 LLM。
+
+        注意：meta 是 LLM 从 SKILL.md 抽取的**派生缓存**，落点不在 skill 源树，
+        因此本方法对 skill 目录零写副作用（读路径安全）。
 
         Args:
             skill: Skill 对象
 
         Returns:
-            .skill-meta.yaml 的 dict 内容
+            meta 缓存的 dict 内容
         """
-        skill_dir = Path(skill.directory)
-        meta_path = skill_dir / ".skill-meta.yaml"
+        # 落点：cache（内容寻址 + 抽取器版本），不在 skill 源树
+        # cache_root 为空 → 用户级 ~/.skill-engine/cache/meta；测试可注入临时根隔离
+        meta_path = meta_cache_path(skill, self.cache_root)
 
         # 计算 SKILL.md 的 hash
         src_hash = self._hash_skill(skill)
 
-        # 缓存命中且 SKILL.md 未变
+        # 缓存命中且 SKILL.md 未变（文件名已含 source_hash，双保险再比字段）
         if meta_path.exists():
             try:
                 old = yaml.safe_load(meta_path.read_text(encoding="utf-8")) or {}
@@ -136,12 +201,12 @@ class Preprocessor:
 
         # 需重抽
         data = self._extract_with_llm(skill)
-        data["meta_version"] = 2
+        data["meta_version"] = EXTRACTOR_VERSION
         data["source_hash"] = src_hash
         data["computed_at"] = datetime.now(timezone.utc).isoformat()
         data["provider"] = "llm"
 
-        # 写回磁盘
+        # 写回 cache 目录（不影响 skill 源树）
         try:
             meta_path.parent.mkdir(parents=True, exist_ok=True)
             meta_path.write_text(

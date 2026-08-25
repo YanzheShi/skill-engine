@@ -32,6 +32,10 @@ htmlcov/
 *.coverage.*
 .tox/
 
+# --- Skill Engine derived cache (LLM-extracted meta, rebuildable; NOT skill assets) ---
+.skill-meta.yaml
+.skill-engine/cache/
+
 # --- Linting ---
 .ruff_cache/
 .mypy_cache/

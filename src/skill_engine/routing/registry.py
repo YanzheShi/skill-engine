@@ -13,6 +13,11 @@ from typing import Optional
 import yaml
 from skill_engine.models import Skill, SkillMetadata, SkillMeta, MergedMeta
 from skill_engine.routing.discovery import _parse_frontmatter
+from skill_engine.creator.preprocessor import (
+    meta_cache_path,
+    META_DERIVED_NAMES,
+    META_DERIVED_DIRS,
+)
 
 
 class Registry:
@@ -146,11 +151,17 @@ class Registry:
         content = skill_path.read_text(encoding="utf-8")
         fm_dict, body = _parse_frontmatter(content)
 
-        # 查找支持文件
+        # 查找支持文件（排除引擎派生文件/目录，避免污染 LLM 上下文）
+        # - .skill-meta.yaml：LLM 抽取缓存（已迁至用户级 cache，源树不再生成）
+        # - .skill-local.yaml：用户覆写，非 skill 资产
+        # - .git / __pycache__ / .skill-engine：工程/运行时目录
         supporting_files = []
         for f in skill_path.parent.iterdir():
-            if f.is_file() and f.name != "SKILL.md":
-                supporting_files.append(str(f))
+            if not f.is_file():
+                continue
+            if f.name == "SKILL.md" or f.name in META_DERIVED_NAMES:
+                continue
+            supporting_files.append(str(f))
 
         skill = Skill(
             metadata=SkillMetadata(**fm_dict),
@@ -177,10 +188,13 @@ class Registry:
         self._meta_mtime.clear()
 
     def load_meta(self, name: str) -> Optional[MergedMeta]:
-        """三层合并加载 skill 元数据（SKILL.md + .skill-meta.yaml + .skill-local.yaml）
+        """三层合并加载 skill 元数据（SKILL.md + meta缓存 + .skill-local.yaml）
 
-        缓存 key=name，失效盯 .skill-local.yaml 的 mtime。
-        .skill-meta.yaml 的 source_hash 由 Preprocessor 保证。
+        第二层 meta 来自用户级 cache（~/.skill-engine/cache/meta/<hash>__v<ver>.yaml），
+        由 Preprocessor 抽取并维护（内容寻址，跨项目共享、不重复抽）。
+        因此对 skill 源树无副作用。
+
+        缓存 key=name，失效盯 .skill-local.yaml 的 mtime（用户覆写优先级最高）。
 
         Args:
             name: skill 名称
@@ -193,7 +207,7 @@ class Registry:
             return None
 
         skill_dir = Path(skill.directory)
-        meta_path = skill_dir / ".skill-meta.yaml"
+        meta_path = meta_cache_path(skill)  # 用户级 cache，不在源树
         local_path = skill_dir / ".skill-local.yaml"
 
         # 失效检测

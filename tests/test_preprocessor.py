@@ -72,10 +72,10 @@ class TestPreprocessorEnsureMeta:
             directory=str(tmp_skill_dir),
         )
 
-    def test_first_run_creates_meta(self, skill):
-        """首次调用 ensure_meta 应创建 .skill-meta.yaml"""
+    def test_first_run_creates_meta(self, skill, tmp_path):
+        """首次调用 ensure_meta 应创建 meta 缓存（隔离到 tmp cache，不在 skill 源树）"""
         llm = MockLLM()
-        pp = Preprocessor(llm=llm)
+        pp = Preprocessor(llm=llm, cache_dir=tmp_path)
 
         meta = pp.ensure_meta(skill)
 
@@ -86,11 +86,13 @@ class TestPreprocessorEnsureMeta:
         assert "source_hash" in meta
         assert "computed_at" in meta
 
-        # 文件应写入磁盘
-        meta_path = Path(skill.directory) / ".skill-meta.yaml"
+        # 文件应写入隔离 cache 目录（内容寻址），不在 skill 源树
+        from skill_engine.creator.preprocessor import meta_cache_path
+        meta_path = meta_cache_path(skill, tmp_path)
+        assert not (Path(skill.directory) / ".skill-meta.yaml").exists()
         assert meta_path.exists()
 
-    def test_cache_hit_skips_llm(self, skill):
+    def test_cache_hit_skips_llm(self, skill, tmp_path):
         """第二次调用（hash 一致）应跳过 LLM"""
         call_count = [0]
 
@@ -100,7 +102,7 @@ class TestPreprocessorEnsureMeta:
                 return MockLLM().invoke(prompt)
 
         llm = CountingMockLLM()
-        pp = Preprocessor(llm=llm)
+        pp = Preprocessor(llm=llm, cache_dir=tmp_path)
 
         # 第一次：调 LLM
         meta1 = pp.ensure_meta(skill)
@@ -111,9 +113,9 @@ class TestPreprocessorEnsureMeta:
         assert call_count[0] == 1  # 没增加
         assert meta2 == meta1
 
-    def test_hash_change_triggers_re_extract(self, skill):
+    def test_hash_change_triggers_re_extract(self, skill, tmp_path):
         """SKILL.md 变更后应重新抽取"""
-        pp = Preprocessor(llm=MockLLM())
+        pp = Preprocessor(llm=MockLLM(), cache_dir=tmp_path)
 
         # 第一次
         pp.ensure_meta(skill)
@@ -134,13 +136,13 @@ class TestPreprocessorEnsureMeta:
             "purpose": "生成题目",
             "keywords": {"动词": ["出题"], "名词": ["leetcode"]},
         }))
-        pp2 = Preprocessor(llm=llm2)
+        pp2 = Preprocessor(llm=llm2, cache_dir=tmp_path)
         meta2 = pp2.ensure_meta(skill)
         assert meta2["intention"] == ["出题"]
 
-    def test_batch_ensure(self, tmp_skill_dir, skill):
+    def test_batch_ensure(self, tmp_skill_dir, skill, tmp_path):
         """batch_ensure 批量处理"""
-        pp = Preprocessor(llm=MockLLM())
+        pp = Preprocessor(llm=MockLLM(), cache_dir=tmp_path)
         results = pp.batch_ensure([skill])
         assert "test-skill" in results
         assert results["test-skill"]["intention"] == ["解题", "写题解"]
@@ -152,7 +154,7 @@ class TestPreprocessorEdgeCases:
     def test_llm_returns_invalid_json(self, tmp_path):
         """LLM 返回非 JSON 时应抛出 ValueError"""
         llm = MockLLM(response="这不是 JSON")
-        pp = Preprocessor(llm=llm)
+        pp = Preprocessor(llm=llm, cache_dir=tmp_path)
         skill = Skill(
             metadata=SkillMetadata(name="test", description="test"),
             body="test",
@@ -161,14 +163,14 @@ class TestPreprocessorEdgeCases:
         with pytest.raises(ValueError):
             pp.ensure_meta(skill)
 
-    def test_llm_returns_partial_json(self):
+    def test_llm_returns_partial_json(self, tmp_path):
         """LLM 返回不完整 JSON 时补默认字段"""
         llm = MockLLM(response=json.dumps({"intention": ["解题"]}))
-        pp = Preprocessor(llm=llm)
+        pp = Preprocessor(llm=llm, cache_dir=tmp_path)
         skill = Skill(
             metadata=SkillMetadata(name="test", description="test"),
             body="test",
-            directory="/tmp/nonexistent",
+            directory=str(tmp_path / "nonexistent"),
         )
         meta = pp.ensure_meta(skill)
         assert meta["intention"] == ["解题"]

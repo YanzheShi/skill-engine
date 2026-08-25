@@ -617,12 +617,13 @@ def uninstall(
 
 @app.command()
 def index(
-    build_meta: bool = typer.Option(False, "--build-meta", help="强制全量构建 .skill-meta.yaml（首次使用）"),
-    rebuild_meta: bool = typer.Option(False, "--rebuild-meta", help="强制全量重抽 .skill-meta.yaml（SKILL.md 大改后）"),
+    build_meta: bool = typer.Option(False, "--build-meta", help="强制全量构建 meta 缓存（首次使用）"),
+    rebuild_meta: bool = typer.Option(False, "--rebuild-meta", help="强制全量重抽 meta 缓存（SKILL.md 大改后）"),
 ):
     """扫描 skills 并预处理元数据
 
     默认增量模式：只有 SKILL.md 内容变更时才重新抽取 intention/synonyms。
+    meta 缓存落在用户级 ~/.skill-engine/cache/meta（不在 skill 源树），
     首次使用建议加 --build-meta 强制全量构建。
 
     使用示例：
@@ -638,6 +639,7 @@ def index(
     """
     from pathlib import Path
     from .routing.registry import Registry
+    from .creator.preprocessor import meta_cache_path, Preprocessor as P
     from .config import get_llm
     from .creator.preprocessor import Preprocessor
     from .routing.discovery import discover_skills
@@ -680,11 +682,10 @@ def index(
             continue
 
         skill_dir = Path(skill.directory)
-        meta_path = skill_dir / ".skill-meta.yaml"
+        meta_path = meta_cache_path(skill)  # 用户级 cache，不在源树
 
         if not force and meta_path.exists():
             # 增量模式：检查 hash
-            from .creator.preprocessor import Preprocessor as P
             current_hash = P._hash_skill(skill)
             try:
                 import yaml
@@ -697,8 +698,8 @@ def index(
                 pass  # 文件损坏，重抽
 
         if rebuild_meta:
-            # 强制重抽：删旧文件，不走 hash 缓存
-            meta_path = skill_dir / ".skill-meta.yaml"
+            # 强制重抽：删旧 cache 文件，不走 hash 缓存
+            meta_path = meta_cache_path(skill)
             if meta_path.exists():
                 meta_path.unlink()
 

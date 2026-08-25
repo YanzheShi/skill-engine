@@ -27,7 +27,7 @@ skill-engine 是一个用于个人开发和日常工作的**Agent harness**，�
 | --- | --- |
 | ![MOA 模式](demo/MOA模式.png) | ![Session 模式](demo/session模式-code-harness.png) |
 
-- **MOA 模式（多模型协作）**：指挥官（Commander）统筹，VLM 负责视觉/截图审查、LLM 负责编码，多模型协同攻克复杂任务（详见下方「实战案例 · 设计稿驱动 UI 开发」）。
+- **MOA 模式（多模型协作）**：多Agent，多Skill模式，用于处理对于交付质量要求高或者不同模态分工合作的场景。也可以用于需要多个skill共同完成一项任务的场景。（详见下方「实战案例 · 设计稿驱动 UI 开发」）。
 - **Session 模式（多轮会话）**：基于 code-harness 的持久 REPL 会话，支持状态持久化与断点恢复，适合多轮调试、代码优化与联网查询。
 
 ## 实战案例（Demo）
@@ -244,7 +244,7 @@ src/skill_engine/
 └── creator/
     ├── creator.py        # Skill 创建
     ├── designer.py       # Skill 设计（LLM prompt）
-    ├── preprocessor.py   # Meta 增量抽取（intention/synonyms/purpose/keywords）
+    ├── preprocessor.py       # Meta 抽取（LLM 驱动）→ 内容寻址落用户级 ~/.skill-engine/cache/meta
     └── builtins.py       # 内置脚本模板
 ```
 
@@ -365,14 +365,32 @@ moa.start()
 `skill-engine index` 命令会对所有 skill 进行 LLM 驱动的元数据抽取：
 
 ```bash
-# 增量预处理（仅处理新 skill）
+# 增量预处理（仅处理新 skill / SKILL.md 已变更的 skill）
 skill-engine index
 
-# 全量重建
+# 首次全量构建
+skill-engine index --build-meta
+
+# 强制全量重抽（如抽取 prompt 大改后）
 skill-engine index --rebuild-meta
 ```
 
 抽取的元数据字段：`intention`、`synonyms`、`purpose`、`keywords`，这些信息会参与路由匹配的第二阶段关键词打分。
+
+### Meta 缓存落点与生命周期
+
+抽取结果（LLM 派生）**不写入 skill 源树**，而是按内容寻址落到用户级缓存目录：
+
+```
+~/.skill-engine/cache/meta/<source_hash>__v<ver>.yaml
+```
+
+设计要点：
+
+- **内容寻址 + 跨项目共享**：文件名由 SKILL.md 正文 hash 与抽取器版本（`EXTRACTOR_VERSION`）决定。同一份 SKILL.md 内容在全机任何项目只抽一次，换项目 / 换目录不重复抽。
+- **可删可重建**：这是派生缓存，不是 skill 资产。`rm -rf ~/.skill-engine/cache` 安全，引擎下次匹配时自动按内容寻址重建；`--rebuild-meta` 会按抽取器版本让旧缓存失效重抽。
+- **`.skill-local.yaml` 是另一类**：用户覆写（authoritative，应保留），与 meta 缓存（rebuildable）性质不同，不要混淆。
+- `.gitignore` 已忽略 `.skill-meta.yaml` 与 `.skill-engine/cache/`，作为双保险。
 
 ## MCP 服务器集成
 
@@ -497,8 +515,15 @@ skill-engine uninstall <name>
 # 安全
 skill-engine scan-security [name] [--deep] [--json]
 
-# 缓存
+## 缓存
+
+派生缓存统一位于用户级 `~/.skill-engine/cache/`（含 `meta/` 目录的 LLM 抽取结果，按内容寻址）。这是可重建产物，删了不影响功能，引擎按需自动重建。
+
+```bash
+# 清空全部派生缓存（meta 等）
 skill-engine clear-cache
+# 或手动：
+rm -rf ~/.skill-engine/cache
 ```
 
 ## SKILL.md 格式
