@@ -1650,29 +1650,22 @@ class ToolDispatchRunner:
                             except Exception:
                                 pass
                             b64 = base64.b64encode(payload).decode("ascii")
-                            # R2 外链模式：配置了 R2 时上传压缩后字节换公网 URL（sensenova
-                            # 等不吃 base64 的模型）。失败/未配置回退 base64 内联（fail-soft）。
-                            # 同文件（大小+mtime 不变）会话内只传一次，避免重复上传。
-                            image_url = ""
-                            cache_key = (str(full_path), orig_size,
-                                         int(full_path.stat().st_mtime_ns))
-                            if cache_key in self._view_image_urls:
-                                image_url = self._view_image_urls[cache_key]
-                            else:
-                                try:
-                                    from skill_engine.execution.image_hosting import (
-                                        upload_image_to_r2,
-                                    )
-                                    got = upload_image_to_r2(payload, mime)
-                                    if got:
-                                        image_url = got
-                                        self._view_image_urls[cache_key] = got
-                                except Exception:
-                                    image_url = ""
-                            if image_url:
-                                url = image_url
-                                url_note = f"，已上传 R2 公网 URL"
-                            else:
+                            # 图片注入策略（实测纠正）：默认 base64 内联，SenseNova 等模型
+                            # 支持 base64 且拉不到公网 URL；仅当显式开启 R2 时才回退公网 URL。
+                            # 见 skill_engine.execution.image_hosting.resolve_image_url。
+                            try:
+                                from skill_engine.execution.image_hosting import (
+                                    resolve_image_url,
+                                )
+                                cache_key = (str(full_path), orig_size,
+                                             int(full_path.stat().st_mtime_ns))
+                                url, url_note = resolve_image_url(
+                                    payload, mime,
+                                    b64=b64,
+                                    cache=self._view_image_urls,
+                                    cache_key=cache_key,
+                                )
+                            except Exception:
                                 url = f"data:{mime};base64,{b64}"
                                 url_note = ""
                             # 先落 tool 文本消息（保持 OpenAI 协议顺序），

@@ -58,10 +58,11 @@ def view_image(path: str) -> str:
     pricing (e.g. sensenova: ~1 token per 1024 px) any downscale strictly
     reduces tokens; the smaller of JPEG(q85)/PNG is sent. Images within the
     cap, or environments without Pillow, pass through unchanged.
-    When R2 hosting is configured (settings r2_token/r2_bucket/...), the image
-    is uploaded and injected as a public R2 URL instead of inline base64 —
-    required by some providers (e.g. sensenova) that reject base64 images;
-    otherwise it falls back to base64 automatically.
+    By default the image is injected inline as a base64 data URL — empirically
+    SenseNova (sensenova-6.8-flash-lite) and the agnes gateway both accept
+    base64 and *reject* public URLs (server-side egress blocked → HTTP400).
+    R2 hosting is only used as an opt-in fallback when SKILL_ENGINE_USE_R2_IMAGES=1
+    is set, for providers that genuinely require a public URL.
     ONLY works on models that support vision (vision: true in model profile).
     On text-only models it returns a notice instead of loading the image.
     Use this to check screenshots (e.g. from shot_web) and verify UI rendering.
