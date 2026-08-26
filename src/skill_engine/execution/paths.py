@@ -88,6 +88,33 @@ def native_path_hint(original: Union[str, Path]) -> str:
     return "在 Windows 上请使用 D:\\path\\to\\dir 或 D:/path/to/dir 形式的路径"
 
 
+def resolve_path(filepath: str, base_dir: Path) -> Path:
+    """解析文件路径：绝对路径透传，否则基于 base_dir。
+
+    工具执行侧的统一入口（原 tool_dispatch._resolve_path，Phase 1 搬迁至此）。
+
+    Args:
+        filepath: 用户/LLM 传入的路径字符串
+        base_dir: 基准目录（working_root 或 skill.directory）
+
+    Returns:
+        解析后的 Path 对象（filepath 为空/无效时回退为 base_dir 本身）
+    """
+    # 归一化：展开 ~，并在 Windows 上把 /d/x、/mnt/d/x 转成 D:\x
+    # （模型常按 Git Bash 习惯给路径，不转换会被当成相对路径拼错）
+    p = to_native_path(filepath)
+    if p is None:
+        return Path(base_dir)
+    if p.is_absolute():
+        return p
+    # 相对路径
+    return Path(base_dir) / p
+
+
+# 旧名兼容：原 tool_dispatch 模块级函数名以 _ 开头，保留别名便于平滑迁移。
+_resolve_path = resolve_path
+
+
 def runtime_dir(working_root: Optional[Union[str, Path]] = None) -> Path:
     """返回引擎运行时产物目录 ``<working_root>/.skill-engine``，并自动建目录。
 

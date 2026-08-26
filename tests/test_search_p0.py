@@ -77,23 +77,24 @@ class TestRipgrepSearch:
 class TestSearchEntry:
     def test_fallback_when_rg_missing(self, tmp_path, monkeypatch):
         _mk_project(tmp_path)
-        import skill_engine.execution.tool_dispatch as td
-        monkeypatch.setattr(td.shutil, "which", lambda name: None)
+        # 实现已搬迁至 tool_exec/search.py，patch 目标随实现走（tool_dispatch 仅 re-export）
+        import skill_engine.execution.tool_exec.search as ts
+        monkeypatch.setattr(ts.shutil, "which", lambda name: None)
         out = _search_files("hello_target", tmp_path)
         assert "kept.py" in out
 
     def test_default_max_applied(self, tmp_path, monkeypatch):
-        import skill_engine.execution.tool_dispatch as td
+        import skill_engine.execution.tool_exec.search as ts
         captured = {}
 
         def fake_py(pattern, search_dir, file_glob, max_results, context_lines):
             captured["max"] = max_results
             return "no matches found"
 
-        monkeypatch.setattr(td, "_run_ripgrep", lambda *a, **k: None)
-        monkeypatch.setattr(td, "_python_search", fake_py)
+        monkeypatch.setattr(ts, "_run_ripgrep", lambda *a, **k: None)
+        monkeypatch.setattr(ts, "_python_search", fake_py)
         _search_files("x", tmp_path)
-        assert captured["max"] == td._SEARCH_DEFAULT_MAX
+        assert captured["max"] == ts._SEARCH_DEFAULT_MAX
 
 
 # ---------------- 集成：dispatch 循环内调用 ----------------

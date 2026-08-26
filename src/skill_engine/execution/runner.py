@@ -18,8 +18,11 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from skill_engine.models import Skill, MatchResult, Step
+
+if TYPE_CHECKING:
+    from skill_engine.routing.registry import Registry
 from skill_engine.execution.assembler import Assembler
 from skill_engine.security.scanner import should_approve, _is_approved, _is_blocked, _save_approval, _save_blocklist
 from skill_engine.execution.executor import Executor
