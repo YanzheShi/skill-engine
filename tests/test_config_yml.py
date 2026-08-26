@@ -26,6 +26,11 @@ def _write(p: Path, text: str) -> None:
     p.write_text(textwrap.dedent(text), encoding="utf-8")
 
 
+def _set_cfg_path(monkeypatch, p) -> None:
+    """让 _load_config_yml 直接读取指定路径（绕过 import 时的路径缓存）。"""
+    monkeypatch.setattr(config, "_CONFIG_YML_PATH", p)
+
+
 # ── 单元：_load_config_yml ──
 
 def test_load_config_yml_models_and_settings(monkeypatch, tmp_path):
@@ -40,7 +45,7 @@ def test_load_config_yml_models_and_settings(monkeypatch, tmp_path):
       auto_approve: all
       tavily_api_key: tvly-abc
     """)
-    monkeypatch.setenv("SKILL_ENGINE_CONFIG_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     cfg = config._load_config_yml()
     assert [m["name"] for m in cfg["models"]] == ["deepseek"]
     assert cfg["settings"]["security_mode"] == "permissive"
@@ -48,7 +53,7 @@ def test_load_config_yml_models_and_settings(monkeypatch, tmp_path):
 
 
 def test_load_config_yml_missing_file(monkeypatch, tmp_path):
-    monkeypatch.setenv("SKILL_ENGINE_CONFIG_YAML", str(tmp_path / "nope.yml"))
+    _set_cfg_path(monkeypatch, None)
     assert config._load_config_yml() == {}
 
 
@@ -56,14 +61,14 @@ def test_load_config_yml_dep_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "yaml", None)
     p = tmp_path / "config.yml"
     _write(p, "models:\n  - name: x\n    model: m\n    api_key: k\n")
-    monkeypatch.setenv("SKILL_ENGINE_CONFIG_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     assert config._load_config_yml() == {}
 
 
 def test_load_config_yml_malformed(monkeypatch, tmp_path):
     p = tmp_path / "config.yml"
     p.write_text("models: [unclosed\n", encoding="utf-8")
-    monkeypatch.setenv("SKILL_ENGINE_CONFIG_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     assert config._load_config_yml() == {}
 
 
@@ -74,6 +79,8 @@ def test_backfill_settings_to_environ(monkeypatch, tmp_path):
               "SKILL_ENGINE_MCP_CONFIG", "TAVILY_API_KEY",
               "SKILLS_ENGINE_CONTEXT_BUDGET"):
         monkeypatch.delenv(k, raising=False)
+    # mcp_config 相对路径基于 _CONFIG_YML_PATH 所在目录展开，这里固定到 tmp_path
+    _set_cfg_path(monkeypatch, tmp_path / "config.yml")
     cfg = {"settings": {
         "security_mode": "permissive",
         "auto_approve": "all",
@@ -84,7 +91,7 @@ def test_backfill_settings_to_environ(monkeypatch, tmp_path):
     config._apply_config_backfill(cfg)
     assert os.environ["SKILLS_ENGINE_SECURITY_MODE"] == "permissive"
     assert os.environ["SKILLS_ENGINE_AUTO_APPROVE"] == "all"
-    assert os.environ["SKILL_ENGINE_MCP_CONFIG"] == "./mcp.json"
+    assert os.environ["SKILL_ENGINE_MCP_CONFIG"] == str((tmp_path / "mcp.json").resolve())
     assert os.environ["TAVILY_API_KEY"] == "tvly-xyz"
     assert os.environ["SKILLS_ENGINE_CONTEXT_BUDGET"] == "12000"
 
@@ -143,7 +150,7 @@ def test_models_from_config_yml_priority(monkeypatch, tmp_path):
     settings:
       security_mode: permissive
     """)
-    monkeypatch.setenv("SKILL_ENGINE_CONFIG_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     prof = config._build_model_profiles()
     assert prof["claude-vl"]["model"] == "model-B"
     assert prof["claude-vl"]["api_key"] == "sk-B"
@@ -158,8 +165,8 @@ def test_load_models_yaml_default_reads_config_yml(monkeypatch, tmp_path):
         model: m
         api_key: sk-m
     """)
-    monkeypatch.setenv("SKILL_ENGINE_CONFIG_YAML", str(p))
     monkeypatch.delenv("SKILL_ENGINE_MODELS_YAML", raising=False)
+    _set_cfg_path(monkeypatch, p)
     prof = config._load_models_yaml()
     assert prof["fromcfg"]["api_key"] == "sk-m"
 
@@ -173,7 +180,7 @@ def test_load_models_yaml_legacy_override(monkeypatch, tmp_path):
         model: lm
         api_key: sk-legacy
     """)
-    monkeypatch.setenv("SKILL_ENGINE_MODELS_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     prof = config._load_models_yaml()
     assert prof["legacy"]["api_key"] == "sk-legacy"
 
@@ -188,7 +195,7 @@ def test_integration_and_masking(monkeypatch, tmp_path):
     settings:
       security_mode: permissive
     """)
-    monkeypatch.setenv("SKILL_ENGINE_CONFIG_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     prof = config._build_model_profiles()
     assert "yamlonly" in prof
     monkeypatch.setattr(config, "MODEL_PROFILES", prof)

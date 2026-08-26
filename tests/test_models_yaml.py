@@ -21,6 +21,12 @@ def _write(p: Path, text: str) -> None:
     p.write_text(textwrap.dedent(text), encoding="utf-8")
 
 
+def _set_cfg_path(monkeypatch, p) -> None:
+    """让 _load_config_yml / _load_models_yaml 直接读取指定路径（绕过 import 缓存）。"""
+    from skill_engine import config
+    monkeypatch.setattr(config, "_CONFIG_YML_PATH", p)
+
+
 # ── 单元：_load_models_yaml ──
 
 def test_yaml_plaintext_and_envref(monkeypatch, tmp_path):
@@ -39,7 +45,7 @@ def test_yaml_plaintext_and_envref(monkeypatch, tmp_path):
         api_key: ${SKILL_ENGINE_DEEPSEEK_API_KEY}
         provider: anthropic
     """)
-    monkeypatch.setenv("SKILL_ENGINE_MODELS_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     prof = config._load_models_yaml()
     assert prof["deepseek"]["api_key"] == "sk-plain"
     assert prof["claude-vl"]["api_key"] == "sk-from-env"      # ${ENV} 已展开
@@ -48,7 +54,7 @@ def test_yaml_plaintext_and_envref(monkeypatch, tmp_path):
 
 
 def test_yaml_missing_file_returns_empty(monkeypatch, tmp_path):
-    monkeypatch.setenv("SKILL_ENGINE_MODELS_YAML", str(tmp_path / "nope.yaml"))
+    _set_cfg_path(monkeypatch, None)
     assert config._load_models_yaml() == {}
 
 
@@ -61,14 +67,14 @@ def test_yaml_dep_missing_degrades(monkeypatch, tmp_path):
         model: m
         api_key: k
     """)
-    monkeypatch.setenv("SKILL_ENGINE_MODELS_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     assert config._load_models_yaml() == {}
 
 
 def test_yaml_malformed_degrades(monkeypatch, tmp_path):
     p = tmp_path / "m.yaml"
     p.write_text("models: [unclosed\n", encoding="utf-8")
-    monkeypatch.setenv("SKILL_ENGINE_MODELS_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     assert config._load_models_yaml() == {}
 
 
@@ -80,7 +86,7 @@ def test_yaml_unresolved_env_filtered(monkeypatch, tmp_path):
         model: x
         api_key: ${THIS_VAR_IS_NOT_SET}
     """)
-    monkeypatch.setenv("SKILL_ENGINE_MODELS_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     assert config._load_models_yaml() == {}
 
 
@@ -97,7 +103,7 @@ def test_yaml_incomplete_filtered(monkeypatch, tmp_path):
         model: x
         api_key: sk-x
     """)
-    monkeypatch.setenv("SKILL_ENGINE_MODELS_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     prof = config._load_models_yaml()
     assert "ok" in prof
     assert "noname" not in prof     # 缺 api_key
@@ -118,7 +124,7 @@ def test_yaml_priority_over_env_declared(monkeypatch, tmp_path):
         model: model-B
         api_key: sk-B
     """)
-    monkeypatch.setenv("SKILL_ENGINE_MODELS_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     prof = config._build_model_profiles()
     assert prof["claude-vl"]["model"] == "model-B"
     assert prof["claude-vl"]["api_key"] == "sk-B"
@@ -132,7 +138,7 @@ def test_yaml_integration_and_masking(monkeypatch, tmp_path):
         model: yaml-model
         api_key: sk-yaml
     """)
-    monkeypatch.setenv("SKILL_ENGINE_MODELS_YAML", str(p))
+    _set_cfg_path(monkeypatch, p)
     prof = config._build_model_profiles()
     assert "yamlonly" in prof
     # list_model_profiles 读取模块级 MODEL_PROFILES 缓存，注入新鲜构建后验脱敏

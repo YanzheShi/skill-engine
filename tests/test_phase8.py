@@ -325,8 +325,8 @@ class TestToolDispatchIntegration:
             Executor(timeout=10)
         )
 
-    def test_run_with_tool_dispatch(self, runner):
-        """run() 方法支持 tool_dispatch"""
+    def test_run_with_tool_dispatch(self, runner, monkeypatch):
+        """run() 方法支持 tool_dispatch；strict 模式下 bash 被快速拦截"""
         from skill_engine.models import Skill, SkillMetadata, MatchResult
 
         skill = Skill(
@@ -341,10 +341,8 @@ class TestToolDispatchIntegration:
             arguments={},
         )
 
-        # 先设 strict 模式，验证拦截机制
-        import os
-        old_mode = os.environ.get("SKILLS_ENGINE_SECURITY_MODE", "")
-        os.environ["SKILLS_ENGINE_SECURITY_MODE"] = "strict"
+        # 显式 strict 模式（隔离，避免泄漏到其它测试），验证拦截机制
+        monkeypatch.setenv("SKILLS_ENGINE_SECURITY_MODE", "strict")
 
         llm = MockLLMWithTools([
             {"content": "", "tool_calls": [
@@ -355,16 +353,12 @@ class TestToolDispatchIntegration:
 
         result = runner.run(match, tool_dispatch=llm)
         assert result["skill_name"] == "test"
-        assert result["iterations"] == 2
-        assert result["stopped_by"] == "stop"
+        # strict 快速失败：bash 被拦截后本轮直接终止
+        assert result["iterations"] == 1
+        assert result["stopped_by"] == "security_blocked"
         assert any("安全拦截" in s.get("error", "") for s in result["steps"])
 
-        if old_mode:
-            os.environ["SKILLS_ENGINE_SECURITY_MODE"] = old_mode
-        else:
-            del os.environ["SKILLS_ENGINE_SECURITY_MODE"]
-
-    def test_run_tool_dispatch_overrides_llm(self, runner):
+    def test_run_tool_dispatch_overrides_llm(self, runner, monkeypatch):
         """tool_dispatch 优先级高于 llm（档位 A）"""
         from skill_engine.models import Skill, SkillMetadata, MatchResult
 
@@ -379,6 +373,9 @@ class TestToolDispatchIntegration:
             method="name",
             arguments={},
         )
+
+        # 确保非 strict（允许 bash 执行），隔离全局安全模式状态
+        monkeypatch.setenv("SKILLS_ENGINE_SECURITY_MODE", "permissive")
 
         llm_a = MockLLMWithTools([
             {"content": "", "tool_calls": [

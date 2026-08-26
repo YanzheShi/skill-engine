@@ -15,6 +15,12 @@ import tempfile
 import shutil
 
 
+@pytest.fixture(autouse=True)
+def _permissive_security(monkeypatch):
+    """隔离全局安全模式：本文件 bash 类测试需要在非 strict 下执行命令。"""
+    monkeypatch.setenv("SKILLS_ENGINE_SECURITY_MODE", "permissive")
+
+
 # ================================================================
 # 测试 1：内建工具定义
 # ================================================================

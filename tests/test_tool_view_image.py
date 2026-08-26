@@ -160,6 +160,8 @@ def _no_r2_upload(monkeypatch):
 
 def test_view_image_r2_url_injection(tmp_path, monkeypatch):
     """R2 可用时：注入公网 URL，不再内联 base64，且上传的是压缩后的字节。"""
+    # USE_R2_FOR_IMAGES 默认关闭（实测纠偏），测试显式开启以验证公网 URL 分支
+    monkeypatch.setattr("skill_engine.execution.image_hosting.USE_R2_FOR_IMAGES", True)
     uploaded = []
 
     def fake_upload(data, mime):
@@ -196,6 +198,7 @@ def test_view_image_r2_upload_fails_falls_back_base64(tmp_path, monkeypatch):
 
 def test_view_image_r2_same_file_uploads_once(tmp_path, monkeypatch):
     """同文件二次 view_image：复用会话内 URL，不重复上传。"""
+    monkeypatch.setattr("skill_engine.execution.image_hosting.USE_R2_FOR_IMAGES", True)
     calls = []
 
     def fake_upload(data, mime):

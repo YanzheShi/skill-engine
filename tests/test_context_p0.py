@@ -91,7 +91,7 @@ class TestL2StructuredSummary:
         assert cm.maybe_compress(llm) is True
         assert llm.calls == 1
         # 默认模板是任务中立 schema（不含 coding 专属字段）
-        assert "原始请求" in llm.last_prompt
+        assert "已确认结论" in llm.last_prompt
         assert "关键对象引用" in llm.last_prompt
         assert any("<condensed_history>" in m.get("content", "") for m in cm.messages)
 

@@ -86,7 +86,7 @@ class TestSearchEntry:
         import skill_engine.execution.tool_dispatch as td
         captured = {}
 
-        def fake_py(pattern, search_dir, file_glob, max_results):
+        def fake_py(pattern, search_dir, file_glob, max_results, context_lines):
             captured["max"] = max_results
             return "no matches found"
 

@@ -11,6 +11,12 @@ import pytest
 from skill_engine.models import Skill, SkillMetadata, MatchResult
 
 
+@pytest.fixture(autouse=True)
+def _permissive_security(monkeypatch):
+    """隔离全局安全模式：bash 失效缓存测试需真正执行命令以触发缓存失效。"""
+    monkeypatch.setenv("SKILLS_ENGINE_SECURITY_MODE", "permissive")
+
+
 def _make_file(tmp_path, lines=60):
     p = tmp_path / "app.js"
     p.write_text("\n".join(f"line {i}" for i in range(lines)) + "\n", encoding="utf-8")
