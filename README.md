@@ -231,9 +231,26 @@ src/skill_engine/
 │   ├── assembler.py      # Prompt 编译 + !cmd 预处理
 │   ├── steps.py          # Steps DSL 执行器
 │   ├── orchestrator.py   # 多 skill 编排
-│   ├── tool_dispatch.py  # 档位 B LLM 工具循环
-│   ├── tool_defs.py      # 内建工具定义（bash/read/write/search 等）
+│   ├── moa.py            # MOA 多模型协作（指挥官 + worker 调度 + 防死循环闸）
+│   ├── tool_dispatch.py  # 档位 B LLM 工具循环（handler 分发表 + IO 并行调度）
+│   ├── tool_defs.py      # 内建工具 schema 定义（@tool 桩）
+│   ├── tool_exec/        # 档位 B 工具执行引擎（每工具一个 handler）
+│   │   ├── handler.py    # ToolHandler 协议 + BatchableHandler 三段式基类
+│   │   ├── result.py     # ToolResult（统一五步仪式的数据载体）
+│   │   ├── context.py    # ToolContext（handler 共享态，替代闭包捕获）
+│   │   ├── registry.py   # 内建工具分发表（switch-on-type → {name: handler}）
+│   │   ├── io_sched.py   # read/search 并行批调度器（保序回灌）
+│   │   ├── parse.py      # LLM 响应 tool_calls 归一化
+│   │   ├── verify.py     # verify_command 自动验证钩子
+│   │   ├── bash_util.py  # bash 路径提取 + 观测格式化
+│   │   ├── edit_patch.py # edit 模糊匹配 + unified diff
+│   │   ├── search.py     # ripgrep + python 兜底搜索
+│   │   └── handlers/     # 每工具一个 handler（bash/read_file/write_file/...）
 │   ├── context_manager.py # token 预算 + 历史压缩
+│   ├── file_tracker.py   # 已读版本追踪 + 缓存（edit 一致性校验）
+│   ├── image_hosting.py  # view_image 图片公网上传（R2）
+│   ├── tracer.py         # 调试轨迹记录器
+│   ├── counting_llm.py   # LLM 调用/token 计数代理（MOA 预算闸）
 │   ├── mcp_client.py     # MCP 服务器连接客户端
 │   ├── snapshot.py       # 文件检查点 / 回滚系统
 │   ├── human_io.py       # 人机交互抽象层（CLI / prompt_toolkit）
@@ -301,18 +318,22 @@ runner.run()
 ### 档位 B（tool_dispatch）工作流
 
 ```text
-tool_dispatch_loop()
+tool_dispatch.run()
    │
-   ├─ 初始化上下文管理器（token 预算）
-   ├─ 连接 MCP 服务器（如有配置）
-   ├─ 循环：
-   │   ├─ LLM 选择工具并生成参数
-   │   ├─ 安全审批检查
-   │   ├─ 执行工具
-   │   ├─ 文件快照（执行前自动备份）
-   │   └─ 结果反馈给 LLM
-   ├─ 达到 max_iterations 或 LLM 返回最终结果时退出
-   └─ 清理 MCP 连接
+   ├─ 编译 final prompt（Assembler）+ 绑定工具（bind_tools）
+   ├─ 初始化上下文管理器 / 文件快照 / 已读追踪 / IO 调度器
+   ├─ 循环（每轮一次 LLM 调用）：
+   │   ├─ LLM 返回 tool_calls → 解析归一化
+   │   ├─ 可并行工具（read/search）入 IO 批，串行工具先 flush 批
+   │   ├─ 分发表执行：handlers[tc.type].execute(tc, ctx) → ToolResult
+   │   ├─ _apply_result 统一落 messages / step_results / files_created
+   │   ├─ 写盘后触发 verify_command 钩子（失败回灌结构化信号）
+   │   └─ 轮末压缩上下文
+   ├─ 无 tool_calls → 返回最终答案 / 达到 max_iterations 退出
+   └─ 落盘状态（支持 --resume-from 续跑）
+
+加第 N 个工具 = 在 tool_exec/handlers/ 新建 handler + registry 注册一行，
+不再动 run() 循环。
 ```
 
 ### Session 模式流程（长任务多轮会话）
@@ -349,16 +370,25 @@ moa.start()
 
 | 工具 | 功能 |
 |------|------|
-| `bash` | 执行 shell 命令 |
-| `read_file` | 读取文件内容 |
-| `write_file` | 写入文件 |
-| `edit_file` | 编辑文件（行级替换） |
-| `search_files` | 搜索文件内容 |
+| `bash` | 执行 shell 命令（超时钳制 + 文件登记选择性失效） |
+| `read_file` | 读取文件内容（分页 / 缓存命中 / 重复读检测） |
+| `write_file` | 写入文件（安全门 + diff 预览 + 快照） |
+| `edit_file` | 定点编辑（精确优先 + 模糊匹配 + diff 预览） |
+| `search_files` | 搜索文件内容（ripgrep，并行批） |
+| `view_image` | 查看图片（多模态注入 / R2 公网上传） |
 | `web_search` | 网络搜索（需配置 Tavily） |
+| `run_python` | 运行 Python 脚本 |
+| `query_db` | 查询数据库 |
+| `shot_web` | 网页截图 |
+| `update_plan` | 更新任务计划 |
+| `restore_file` | 回滚文件到检查点（通用文件回滚，不依赖 git） |
 | `get_current_time` | 获取当前时间 |
 | `stop` | 停止执行 |
+| `ask_user` | 轮内向用户提问（session 模式专属） |
 
-可通过 `extra_tools` 和 `mcp_servers` 扩展工具集。
+read_file / search_files 是可并行批工具（纯磁盘读，IO 调度器统一调度），
+其余为串行工具。可通过 `extra_tools` 和 `mcp_servers` 扩展工具集；
+新增内建工具只需在 `tool_exec/handlers/` 加一个 handler 并在 `registry.py` 注册。
 
 ## 元数据预处理
 
