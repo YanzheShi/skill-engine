@@ -8,7 +8,7 @@ skill-engine 是一个用于个人开发和日常工作的**Agent harness**，�
 
 - **Skill 检索与执行引擎** —— 不依赖任何 AI 产品，自带三级路由（精确名称 / 关键词打分 / LLM 兜底）与四路执行分流（Steps DSL 确定性执行 / tool_dispatch LLM 循环 / 单次 LLM 调用/ 纯编译（dry-run）），可以高效调试和运行个人开发的小型skill。
 - **Session 模式（长任务）** —— 小型Agent harness，基于 code-harness 的持久 REPL 会话，支持状态持久化与断点恢复，适合多轮调试、代码优化、联网查询等需要持续交互的长任务。
-- **MOA 模式（多模型协作）** —— 主要用于解决当前编码能力强的模型不具备图片识别导致无法根据UI设计稿开发前端的痛点，可以由指挥官统筹，VLM 负责视觉/截图审查、LLM 负责编码，协同攻克复杂逻辑或「VLM + LLM 协作」类任务。
+- **MOA 模式（多模型协作）** —— 主要用于解决当前编码能力强的模型不具备图片识别导致无法根据UI设计稿开发前端的痛点，可以由指挥官统筹，VLM 负责视觉/截图审查、LLM 负责编码，协同攻克复杂逻辑或「VLM + LLM 协作」类任务。指挥官默认采用 ReAct 式调度；也可启用 **Plan-and-Execute 范式**（先产出全局阶段 plan、再按步派 worker 执行，终端实时展示计划进度），详见下方「MOA 多模型协作模式 → Plan-and-Execute 范式」。
 
 > 档位 A（单次 LLM 调用）与档位 B（tool_dispatch 工具循环）是上述三种模式的底层执行档位，按需自动选择，无需单独记忆。
 
@@ -55,6 +55,17 @@ skill-engine 是一个用于个人开发和日常工作的**Agent harness**，�
 
 - 📂 [查看完整 demo 文件夹](demo/session%20解决AC为零的问题。-第四轮优化/)
 - 📄 [执行记录（txt）](demo/session%20解决AC为零的问题/执行记录.txt)
+
+### 案例三：MOA + Plan-and-Execute 范式（先规划再执行）
+
+指挥官先用 `<moa_plan>` 围栏产出全局阶段计划并打印到终端，再按阶段逐轮派 worker 执行；终端每轮刷新计划进度（⬜ 未完成 / ✅ 已完成），直到所有阶段完成才 STOP。相比默认 ReAct 式调度，全局阶段视图始终可见、不易漂移。
+
+| 制定计划 | 根据计划执行 | 任务完成 |
+| --- | --- | --- |
+| ![制定计划](demo/plan-execute/制定计划.png) | ![根据计划执行](demo/plan-execute/根据计划执行.png) | ![任务完成](demo/plan-execute/任务完成.png) |
+
+- 📂 [查看完整 demo 文件夹](demo/plan-execute/)
+- 范式说明与启用方式见上方「MOA 多模型协作模式 → Plan-and-Execute 范式」。
 
 ## 安装
 
@@ -447,6 +458,68 @@ skill-engine index --rebuild-meta
 典型场景：根据设计稿完成 UI 开发——VLM 对生成截图做视觉审查并给出审判意见，LLM 据此修复，多轮收敛（见上方「实战案例 · 案例一」）。
 
 多模型 profile 配置见 [config.yml.example](config.yml.example)（MOA 协作）。
+
+### Plan-and-Execute 范式（先规划再执行）
+
+默认的 MOA 指挥官是 **ReAct 式**调度：每轮实时看黑板、决定下一轮派谁。这对短任务足够，但在「长任务 / 多阶段 / 需稳定不漂移」场景下，指挥官容易陷入「想到哪派到哪」、丢失全局阶段视图。
+
+**Plan-and-Execute 范式**为 MOA 增加一层显式规划：
+
+- **PLAN 阶段（仅第 1 轮）**：指挥官先用 `<moa_plan>` 围栏产出一份**阶段级**全局计划（如「UI 分析 → 开发 → 审查 → 修复迭代 → 汇报」），引擎识别后将其登记为结构化 `plan_steps`，并打印到终端。
+- **EXECUTE 阶段（第 2 轮起）**：指挥官每轮从 plan 中选取**第一个未完成**的阶段派给最匹配的 worker；worker 内部仍是 ReAct 循环（思考→调用工具→观察），即 **plan-and-execute 是 ReAct 之上的外层编排**，二者不冲突。
+- **进度可见**：终端每轮都刷新 `# 全局 Plan（plan-and-execute）` 清单，用 `⬜`（未完成）/ `✅`（已完成）标记各阶段状态，指挥官在 `<moa_decision>` 里用 `"mark_done": <阶段id>` 推进阶段。
+
+#### 启用方式
+
+**方式一：非交互（`--plan` JSON）**——在 commander 里指定 `skill_name: plan-execute-commander`：
+
+```json
+{
+  "agents": [
+    {"alias": "A1", "model_profile": "agnes", "skill_name": "code-builder",
+     "instruction": "你作为代码开发者，根据 commander 命令写代码；纯文本模型，不要视觉分析"},
+    {"alias": "A2", "model_profile": "secondary", "skill_name": "code-analyzer",
+     "instruction": "你作为 UI 检查者，查看设计稿并审查实现是否符合需求"}
+  ],
+  "commander": {
+    "alias": "C", "model_profile": "agnes",
+    "skill_name": "plan-execute-commander",
+    "instruction": "用 plan-and-execute 范式：第 1 轮必须用 <moa_plan> 和 </moa_plan> 围栏输出阶段计划，再按步派 A1/A2 执行"
+  },
+  "query": "根据设计稿开发一个番茄钟网站……",
+  "options": {"max_rounds": 40, "max_agent_iterations": 60, "max_llm_calls": 500}
+}
+```
+
+```bash
+skill-engine moa -w D:/你的项目 --plan "D:/你的项目/moa_plan.json"
+```
+
+**方式二：交互向导**——运行 `skill-engine moa -w <项目>` 进入配置向导，在「选择指挥官 skill」一步会列出 `moa-commander`（默认 ReAct）与 `plan-execute-commander`（Plan-and-Execute）供选择。
+
+#### 指挥官会输出什么（关键约定）
+
+引擎**只识别 `<moa_plan>` 围栏**来建立计划；指挥官必须在第 1 轮输出如下格式，否则计划不会生效（退化成无计划的随机派活）：
+
+```
+<moa_plan>
+1. [UI分析] UI 检查者查看设计稿并描述页面（要求：视觉✓ worker）
+2. [开发] 开发者依据描述实现功能（要求：编码 worker）
+3. [审查] 检查者对照设计稿审查（要求：视觉✓ worker）
+4. [修复迭代] 开发者按意见修复直至通过（要求：协作）
+5. [汇报] 汇总交付（要求：文本）
+</moa_plan>
+
+<moa_decision>
+{"next": "A2", "task": "执行 plan 第 1 阶段「UI分析」：查看设计稿并描述页面结构", "rationale": "UI分析是开发的前置依赖，且只有 A2 具视觉能力", "mark_done": 1}
+</moa_decision>
+```
+
+每完成一个阶段，指挥官在后续决策的 `<moa_decision>` 中补 `"mark_done": <阶段id>`，终端清单对应项即从 `⬜` 变为 `✅`。计划随会话状态持久化，崩溃续跑不丢。
+
+> 该范式通过独立的 `skills/plan-execute-commander/SKILL.md` 实现，**不改动默认 `moa-commander` 与底层 ReAct 调度**，对不使用它的任务零影响。阶段粒度建议在 ≤ 6 个（指挥官无仓库级视角，只做阶段级分解）。
+
+完整运行截图见下方「实战案例 · 案例三」。
 
 ## 多轮 REPL 会话
 
