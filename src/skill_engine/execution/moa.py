@@ -45,7 +45,6 @@ from dataclasses import dataclass, field
 
 from skill_engine.models import MoaAgent, MatchResult
 
-logger = logging.getLogger(__name__)
 from skill_engine.execution.tool_dispatch import ToolDispatchRunner
 from skill_engine.execution.tool_defs import parse_named_params
 from skill_engine.execution.snapshot import FileSnapshot
@@ -53,17 +52,18 @@ from skill_engine.execution.file_tracker import FileStateTracker
 from skill_engine.execution.paths import to_native_path, runtime_dir
 from skill_engine.routing.router import Router
 from skill_engine import ensure_utf8_io
-
-
 # ── 全局 LLM 调用计数包装（成本闸门 #3） ────────────────────────────────────
 # 抽成共享模块，供 moa 与 run 命令（baseline run -td 埋 token）共用同一套机制。
 from .counting_llm import CountingLLM, _accumulate_tokens
 from .context_manager import ContextManager, default_context_budget, _is_rate_limited
 
+logger = logging.getLogger(__name__)
+
+
 
 # ── 指挥官专用 skill 白名单（问题 3：只能从这里选，未来可扩展） ────────────
 # worker 自动匹配 skill 时也会排除这些（指挥官 skill 不派给 worker）。
-MOA_COMMANDER_SKILLS: tuple[str, ...] = ("moa-commander",)
+MOA_COMMANDER_SKILLS: tuple[str, ...] = ("moa-commander", "plan-execute-commander")
 
 # ── key_facts：黑板结构化要点（抗压缩） ─────────────────────────────────────
 # worker 产出末尾约定写一段【关键事实】清单，_extract_key_facts 解析为结构化
@@ -126,6 +126,9 @@ class MoaSession:
         self.agent_contexts: dict[str, "MoaAgentRuntime"] = {}
         # 指挥官决策轨迹（供跨轮决策参考 + 最终综合）
         self.commander_decisions: list[dict] = []
+        # 档 B：结构化全局 plan（plan-and-execute）。默认空列表 → 默认指挥官流完全无视。
+        # 仅当指挥官输出 <moa_plan> 围栏时被填充；每条 {"id":int,"desc":str,"status":"pending"/"done"}。
+        self.plan_steps: list[dict] = []
         self.round = 0
         self.llm_calls = 0                  # 经 CountingLLM 累计
         # 防震荡
@@ -391,6 +394,52 @@ def _extract_key_facts(output: str) -> list[str]:
     return facts
 
 
+def _extract_plan_steps(text: str) -> list[dict]:
+    """从指挥官产出中提取 <moa_plan> 围栏内的阶段清单，转为结构化 plan_steps。
+
+    仅作结构化兜底：解析失败 / 无标记 / 无有效条目 → 返回 []，绝不影响主流程。
+    每条: {"id": int, "desc": str, "status": "pending"}。id 取序号（无序号则按出现顺序
+    自增），desc 保留原文（含 [探索] 这类阶段标签）。与 _extract_key_facts 同理——
+    解析异常一律降级为空列表，主流程不感知。
+    """
+    if not text:
+        return []
+    m = re.search(r"<moa_plan>(.*?)</moa_plan>", text, re.DOTALL)
+    if not m:
+        return []
+    body = m.group(1)
+    steps: list[dict] = []
+    auto = 0
+    for line in body.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        mm = re.match(r"^(\d+)[.、)]\s*(.*)$", s)
+        if mm:
+            sid = int(mm.group(1))
+            desc = mm.group(2).strip()
+        elif re.match(r"^[-*•·]\s*", s):
+            # 仅剥离 bullet 符号（- * • · + 空白），保留 [探索] 这类阶段标签，
+            # 与编号分支行为一致（编号分支也保留标签）。
+            auto += 1
+            sid = auto
+            desc = re.sub(r"^[-*•·]\s*", "", s).strip()
+        else:
+            continue
+        if desc:
+            steps.append({"id": sid, "desc": desc, "status": "pending"})
+    return steps
+
+
+def _plan_status_icon(status: str) -> str:
+    """plan 阶段状态图标：done=✅ 完成 · running=⏸ 执行中 · 其余=⬜ 待办。
+
+    供 _emit_plan 终端渲染与 _commander_prompt 的 plan_block 注入共用，避免两处
+    重复维护同一份状态→图标映射（档 B 三态）。
+    """
+    return {"done": "✅", "running": "⏸"}.get(status or "", "⬜")
+
+
 def _classify_stop(stopped_by: str, iterations: int) -> tuple[str, int, str]:
     """把 tool_dispatch 的停止原因映射为黑板状态。
 
@@ -493,6 +542,21 @@ class MoaOrchestrator:
         else:
             print(f"\n# {title}")
 
+    # 档 B：把结构化全局 plan 渲染到终端，让用户实时看到 plan-and-execute 进度。
+    # 仅在 session.plan_steps 非空时输出（默认 moa-commander 流无 plan → 不打印，零影响）。
+    # session 必须显式传入：run() 里的 session 是局部变量，挂到 self 上会有状态泄漏风险
+    # （orchestrator 实例可被复用），且曾因此导致 getattr(self, "session", None) 恒 None、
+    # 本方法静默 return、plan 永不打印的 bug。
+    def _emit_plan(self, session: MoaSession, title: str = "全局 Plan（plan-and-execute）") -> None:
+        if not session or not session.plan_steps:
+            return
+        lines = [f"# {title}"]
+        for _s in session.plan_steps:
+            lines.append(
+                f"  {_plan_status_icon(_s.get('status'))} [{_s.get('id')}] {_s.get('desc')}"
+            )
+        self._emit("\n".join(lines))
+
     # ---- commander 决策 ----
     def _commander_prompt(self, commander: MoaAgent, session: MoaSession,
                           agents: list[MoaAgent], query: str,
@@ -545,7 +609,42 @@ class MoaOrchestrator:
                 for d in recent
             )
             decision_history = f"\n# 你之前的决策轨迹（避免重复派活 / 乒乓）\n{lines}\n"
-        return f"""\
+        # 档 B：把全局 plan 渲染为 checklist 注入（无 plan 时为空串，不影响默认流）
+        plan_block = ""
+        if session.plan_steps:
+            _plines = [
+                f"{_plan_status_icon(_s.get('status'))} [{_s.get('id')}] {_s.get('desc')}"
+                for _s in session.plan_steps
+            ]
+            plan_block = (
+                "\n# 当前全局 Plan（阶段进度，档 B）\n"
+                + "\n".join(_plines)
+                + "\n- 阶段未完成（⬜）→ 派对应 worker 执行（next 选代号，task 写清阶段）。\n"
+                + "- 某阶段已由 worker 实际完成 → 在 <moa_decision> 中加 \"mark_done\": <阶段id> 标记完成（一轮多阶段完成用数组，如 [2,3]）。\n"
+                + "- 本轮要执行的阶段 → 在 <moa_decision> 中加 \"working_on\": <阶段id> 标记执行中（⏸ 中的阶段不要再重复派）。\n"
+            )
+        # 档 B：疑似漏标检测——存在「未完成（pending）」阶段排在「执行中（running）」阶段
+        # 之前时，指挥官很可能已完成前置阶段但漏写 mark_done（模型常把"mark_done"写进
+        # rationale 叙述而非 JSON 字段，2026-08-27 两次实跑实证）。此处不篡改状态，
+        # 只在下一轮 prompt 注入强制核对提醒，由指挥官补标或说明跳过——语义安全。
+        hint_block = ""
+        if session.plan_steps:
+            running_ids = [s["id"] for s in session.plan_steps if s.get("status") == "running"]
+            if running_ids:
+                max_running = max(running_ids)
+                stale = [s for s in session.plan_steps
+                         if s.get("status") == "pending" and s["id"] < max_running]
+                if stale:
+                    hint_block = (
+                        "\n# ⚠ 引擎检测到疑似漏标（请核对后补标）\n"
+                        + "\n".join(
+                            f"- 阶段 [{s['id']}] {s['desc'][:40]} 仍为未完成，但你已推进到阶段 [{max_running}]"
+                            for s in stale
+                        )
+                        + f"\n- 若这些阶段确实已完成 → 本轮 <moa_decision> 必须写 \"mark_done\": {json.dumps([s['id'] for s in stale])} 补标。\n"
+                        + "- 若某阶段确实未完成（被跳过）→ 保持不标，并在 rationale 里说明原因。\n"
+                    )
+        return f"""
 你是一个多智能体协作任务的**指挥官（commander）**。你不直接写代码或改文件，
 你的唯一职责是：根据当前进展，决定**下一轮由哪个 worker agent 行动、干什么**。
 
@@ -560,8 +659,10 @@ class MoaOrchestrator:
 
 # 当前协作进度（未完成/异常 worker 全量 + 正常产出概览）
 {session.progress_summary()}
+{plan_block}
+{hint_block}
 {decision_history}
-# 决策要求
+# 决策要求（引擎框架约束，任何 skill 都必须遵守；若与你收到的「指挥官 Skill 指令」冲突，以 skill 指令为准）
 - 你正处在第 {round_no}/{max_rounds} 轮。
 - 只能在以下代号中选一个作为 next：{aliases}，或输出 STOP 表示任务已完成。
 - 若选某个 worker，必须在 task 中写清**本轮具体要它做什么**（结合黑板现状，
@@ -612,14 +713,99 @@ class MoaOrchestrator:
                 return {"next": "STOP", "task": "", "rationale": "（关键词 STOP）"}
             return {"next": "STOP", "task": "", "rationale": "（决策块解析失败，安全停止）", "unparseable": True}
         nxt = str(data.get("next", "")).strip().upper()
+        mark_done = data.get("mark_done")    # 档 B：标记完成阶段（int 或 [int,...]，一轮可标多个）
+        working_on = data.get("working_on")  # 档 B：指挥官声明本轮执行的阶段（可选字段，三态）
         valid = {a.alias.upper(): a.alias for a in agents}
+        # 档 B：仅当指挥官显式给出 mark_done / working_on 时才带对应键，否则返回字典
+        # 与改造前完全一致（默认 moa-commander 流零副作用）。
+        _extra = {}
+        if mark_done is not None:
+            _extra["mark_done"] = mark_done
+        if working_on is not None:
+            _extra["working_on"] = working_on
         if nxt in ("STOP", "结束", "完成", "DONE"):
             return {"next": "STOP", "task": str(data.get("task", "")),
-                    "rationale": str(data.get("rationale", ""))}
+                    "rationale": str(data.get("rationale", "")), **_extra}
         if nxt in valid:
             return {"next": valid[nxt], "task": str(data.get("task", "")),
-                    "rationale": str(data.get("rationale", ""))}
+                    "rationale": str(data.get("rationale", "")), **_extra}
         return {"next": "STOP", "task": "", "rationale": f"（未知 agent 代号 {nxt}，安全停止）", "unparseable": True}
+
+    # ---- 指挥官决策格式故障的处置（档 B：落盘留痕 + 自纠重试） ----
+    def _dump_unparseable_commander(self, round_no: int, raw: str) -> None:
+        """把解析失败的指挥官原文旁路落盘到 .skill-engine/commander_unparseable.jsonl。
+
+        设计约束（2026-08-27 实跑事故后补）：
+        - 不写进 moa_session_state.json：那是续跑重放的数据源，混入原文会污染
+          重放逻辑，且续跑时会被带进上下文；
+        - 不打印全文：终端只保留前 800 字（即时诊断），完整原文进文件（事后定位
+          JSON 语法错误的原始形态，如截断 / 未转义引号 / 尾逗号）；
+        - 与 LLM 上下文完全无关：原文本就 append 在指挥官私有上下文里，这里只是
+          旁路复制到磁盘，不增加 token、不触发压缩。
+        每行一条 {round, ts, raw}（append，同轮多次失败会留多条便于对比）。
+        落盘失败静默（诊断能力不拖垮主流程）。
+        """
+        try:
+            p = Path(runtime_dir(self.working_root)) / "commander_unparseable.jsonl"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            rec = {"round": round_no,
+                   "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                   "raw": raw}
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:  # noqa: BLE001 — 诊断落盘失败不影响主流程
+            logger.debug("commander 原文旁路落盘失败", exc_info=True)
+
+    def _retry_commander_decision(self, c_ctx: "MoaAgentRuntime", c_cm,
+                                  commander: MoaAgent, decision: dict) -> Optional[str]:
+        """指挥官决策解析失败后的一次自纠重试：把错误信息回灌，要求重发合法 JSON。
+
+        背景：指挥官是长文本 LLM，JSON 语法错误（输出截断 / rationale 未转义引号 /
+        尾逗号 / 幻觉代号）是高频事故；一次"带错误信息"的重试通常即可修复，
+        避免一次格式错误就让整轮协作中断（保留检查点等人工续跑）。
+
+        - 只重试一次（严格上限，配合防死循环闸，不会无限循环）；
+        - 回灌消息明确"基于刚才的决策意图原样重发，只修格式不改内容"；
+        - 重试调用本身沿用 _COMMANDER_MAX_RETRIES 的瞬时故障重试策略。
+        Returns: 重试后的指挥官原始输出；调用失败返回 None（调用方保持原失败）。
+        """
+        reason = decision.get("rationale", "格式故障")
+        self._emit(f"[WARN] 指挥官决策解析失败（{reason}），回灌错误信息自纠重试 1 次…")
+        fix_prompt = (
+            "\n# 系统提示：你上一轮的决策 JSON 解析失败，请修正后重新输出。\n"
+            f"错误：{reason}\n"
+            "- 必须把决策放在 <moa_decision>...</moa_decision> 围栏内，围栏内只能是一个合法 JSON 对象。\n"
+            '- JSON 字段：{"next": "A1 或 A2 或 … 或 STOP", "task": "本轮任务", "rationale": "理由"}，'
+            '可选 "mark_done": <阶段id 或 [id,...]>、"working_on": <阶段id>。\n'
+            "- 检查：无尾逗号、引号成对、JSON 完整未截断；其余分析一律写在围栏外。\n"
+            "- 基于你刚才的决策意图原样重发，不要改变 next/task 内容，只修复 JSON 格式。"
+        )
+        c_ctx.messages.append({"role": "user", "content": fix_prompt})
+        c_cm.messages = c_ctx.messages
+        c_cm.maybe_compress(commander.llm)   # 复用 L1/L2/L3（指挥官无工具，仅压缩）
+        c_resp, last_err = None, None
+        for attempt in range(_COMMANDER_MAX_RETRIES):
+            try:
+                c_resp = commander.llm.invoke(c_cm.messages)
+                break
+            except Exception as e:
+                last_err = e
+                if attempt == _COMMANDER_MAX_RETRIES - 1 or _is_auth_error(e):
+                    break
+                delay = _COMMANDER_RETRY_429_DELAY if _is_rate_limited(e) else 1
+                self._emit(f"[WARN] 指挥官自纠重试调用失败（第{attempt+1}次），{delay}s 后重试: {e}")
+                time.sleep(delay)
+        if c_resp is None:
+            self._emit(f"[ERROR] 指挥官自纠重试调用连续 {_COMMANDER_MAX_RETRIES} 次失败: {last_err}")
+            return None
+        c_text2 = (c_resp.get("content") if isinstance(c_resp, dict)
+                   else getattr(c_resp, "content", str(c_resp)))
+        if isinstance(c_text2, (list, dict)):
+            c_text2 = str(c_text2)
+        c_ctx.messages.append({"role": "assistant", "content": c_text2})
+        c_ctx.messages_version += 1
+        c_ctx.last_output = c_text2
+        return c_text2
 
     # ---- worker 执行 ----
     def _run_agent(self, agent: MoaAgent, session: MoaSession, task: str,
@@ -948,7 +1134,52 @@ class MoaOrchestrator:
             c_ctx.messages_version += 1
             c_ctx.last_output = c_text
             decision = self._parse_decision(c_text, agents)
+            # 档 B①：首次解析失败立即旁路落盘原始坏 JSON（自纠前留痕，便于对比两版差异）
+            if decision.get("unparseable"):
+                self._dump_unparseable_commander(round_no, c_text)
+            # 档 B②：解析失败给一次"错误信息回灌"的自纠重试；成功则用重试后的决策
+            # 继续本轮（plan 提取 / mark_done / 派活都吃最终版），失败则走下方
+            # unparseable 中断（保留检查点可续跑）。
+            if decision.get("unparseable"):
+                _retried = self._retry_commander_decision(c_ctx, c_cm, commander, decision)
+                if _retried is not None:
+                    c_text = _retried
+                    decision = self._parse_decision(c_text, agents)
+                    if decision.get("unparseable"):
+                        # 重试后仍失败 → 再落盘一条，便于定位"自纠也修不好"的形态
+                        self._dump_unparseable_commander(round_no, c_text)
             last_rationale = decision.get("rationale", "")
+            # 档 B：首次出现 <moa_plan> 时写入 session.plan_steps（结构化，抗漂移）
+            # 仅在尚未有 plan 时填充，避免覆盖已标记 done 的状态。首次打印不在此处
+            # 单独进行，交由下方统一的 _emit_plan(session)（仍在 worker 执行之前），
+            # 避免第一轮重复打印两份 plan。
+            if not session.plan_steps:
+                _extracted = _extract_plan_steps(c_text)
+                if _extracted:
+                    session.plan_steps = _extracted
+            # 档 B：每轮决策前，把上一轮标记的「执行中」阶段复位为待办——worker 一轮
+            # 结束后，除非指挥官本轮继续派发（working_on）或确认完成（mark_done），
+            # 否则阶段回到待办，避免 ⏸ 状态跨轮卡死。
+            for _s in session.plan_steps:
+                if _s.get("status") == "running":
+                    _s["status"] = "pending"
+            # 档 B：指挥官声明本轮执行的阶段（working_on 对齐 plan_steps id，支持 int/str）
+            _wo = decision.get("working_on")
+            if _wo is not None:
+                for _s in session.plan_steps:
+                    if _s.get("id") == _wo or str(_s.get("id")) == str(_wo):
+                        _s["status"] = "running"
+            # 档 B：指挥官标记某阶段完成。mark_done 支持单值（int/str）或数组（[2,3]）——
+            # 事故背景（2026-08-27 实跑）：指挥官常把多个阶段合并到一轮执行
+            # （如「开发收尾 + 自检」），若字段是单值，一轮只能标一个阶段，其余
+            # 阶段会被永久漏标（⬜ 卡死）。故兼容 `"mark_done": 3` 与 `"mark_done": [2,3]`。
+            _md = decision.get("mark_done")
+            if _md is not None:
+                _md_list = _md if isinstance(_md, (list, tuple)) else [_md]
+                _md_strs = {str(x) for x in _md_list}
+                for _s in session.plan_steps:
+                    if _s.get("id") in _md_list or str(_s.get("id")) in _md_strs:
+                        _s["status"] = "done"
             # 决策理由回写（供跨轮决策参考 + 最终综合）
             session.commander_decisions.append({
                 "round": round_no, "next": decision["next"],
@@ -959,6 +1190,8 @@ class MoaOrchestrator:
                 f"> 第 {round_no}/{max_rounds} 轮 · 指挥官决策: "
                 f"next={decision['next']} · {decision.get('rationale','')}"
             )
+            # 档 B：每轮决策后刷新 plan 进度（含本轮 working_on ⏸ / mark_done ✅ 后的状态）
+            self._emit_plan(session)
 
             # 格式故障（解析失败 / 未知代号 / 无围栏非 STOP）≠ 语义决策 STOP：
             # 标记 unparseable 时不应伪装成"任务达成"，且必须保留检查点以便续跑。
@@ -1175,6 +1408,7 @@ class MoaOrchestrator:
             "action_counts": session.action_counts,
             "blackboard": session.blackboard,
             "commander_decisions": session.commander_decisions,
+            "plan_steps": session.plan_steps,
             "agent_contexts": {
                 alias: self._moa_runtime_dict(rt)
                 for alias, rt in session.agent_contexts.items()
@@ -1211,6 +1445,7 @@ class MoaOrchestrator:
             "no_progress_streak": session.no_progress_streak,
             "prev_blackboard_hash": session.prev_blackboard_hash,
             "action_counts": session.action_counts,
+            "plan_steps": session.plan_steps,
             "agent_contexts": changed,
             "counter": {
                 "calls": counter.get("calls", 0),
@@ -1287,6 +1522,7 @@ class MoaOrchestrator:
         session.action_counts = state.get("action_counts", {}) or {}
         session.blackboard = state.get("blackboard", []) or []
         session.commander_decisions = state.get("commander_decisions", []) or []
+        session.plan_steps = state.get("plan_steps", []) or []
         agent_contexts = {}
         for alias, rt in (state.get("agent_contexts", {}) or {}).items():
             # last_blackboard_len 缺失（旧版状态文件）→ 保守回退「已见除最后一笔

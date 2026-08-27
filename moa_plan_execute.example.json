@@ -1,0 +1,28 @@
+{
+  "agents": [
+    {
+      "alias": "A1",
+      "model_profile": "default",
+      "skill_name": "code-builder",
+      "instruction": "按指挥官每轮派发的阶段任务，用 ReAct 循环读写代码并验证"
+    },
+    {
+      "alias": "A2",
+      "model_profile": "default",
+      "skill_name": "code-builder",
+      "instruction": "作为第二编码/复核 worker，按指挥官派发的阶段任务执行"
+    }
+  ],
+  "commander": {
+    "alias": "C",
+    "model_profile": "default",
+    "skill_name": "plan-execute-commander",
+    "instruction": "用 plan-and-execute 范式：先出全局阶段 plan 落黑板，再按步派 A1/A2 执行"
+  },
+  "query": "给 utils.py 加一个 greet() 函数并补测试",
+  "options": {
+    "max_rounds": 20,
+    "max_agent_iterations": 60,
+    "max_llm_calls": 500
+  }
+}

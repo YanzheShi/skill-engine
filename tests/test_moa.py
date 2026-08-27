@@ -1426,5 +1426,312 @@ def test_strict_mode_bash_fast_fail(tmp_path, monkeypatch):
     assert result["stopped_by"] == "commander_stop"
 
 
+# ── 档 B：plan-and-execute（plan_steps / _emit_plan / mark_done / working_on）──
+def test_extract_plan_steps_numbered_and_bullet():
+    from skill_engine.execution.moa import _extract_plan_steps
+    text = (
+        "<moa_plan>\n"
+        "1. [UI分析] 查看设计稿\n"
+        "2、[开发] 实现功能\n"
+        "3) [审查] 对照审查\n"
+        "- [汇报] 汇总交付\n"
+        "</moa_plan>"
+    )
+    steps = _extract_plan_steps(text)
+    assert [s["id"] for s in steps] == [1, 2, 3, 1]
+    assert [s["status"] for s in steps] == ["pending"] * 4
+    assert steps[0]["desc"].startswith("[UI分析]")
+    # 无围栏 / 空文本 → 空列表（主流程零感知）
+    assert _extract_plan_steps("no plan here") == []
+    assert _extract_plan_steps("") == []
+
+
+def test_plan_status_icon_three_states():
+    from skill_engine.execution.moa import _plan_status_icon
+    assert _plan_status_icon("done") == "✅"
+    assert _plan_status_icon("running") == "⏸"
+    assert _plan_status_icon("pending") == "⬜"
+    assert _plan_status_icon(None) == "⬜"
+    assert _plan_status_icon("") == "⬜"
+
+
+def test_emit_plan_renders_three_states(tmp_path):
+    """_emit_plan 输出完整清单：✅ 完成 / ⏸ 执行中 / ⬜ 待办；空 plan 不输出。"""
+    from skill_engine.execution.moa import MoaSession
+    orch = _make_orchestrator(tmp_path)
+
+    class CapIO:
+        def __init__(self):
+            self.out = []
+
+        def emit(self, text, label=None):
+            self.out.append(text)
+
+    orch.human_io = CapIO()
+    session = MoaSession(str(tmp_path))
+    session.plan_steps = [
+        {"id": 1, "desc": "任务1", "status": "done"},
+        {"id": 2, "desc": "任务2", "status": "running"},
+        {"id": 3, "desc": "任务3", "status": "pending"},
+    ]
+    orch._emit_plan(session)
+    blob = "\n".join(orch.human_io.out)
+    assert "全局 Plan" in blob
+    assert "✅ [1] 任务1" in blob
+    assert "⏸ [2] 任务2" in blob
+    assert "⬜ [3] 任务3" in blob
+    # 空 plan → 静默不输出（默认 moa-commander 流零影响）
+    orch.human_io.out.clear()
+    session.plan_steps = []
+    orch._emit_plan(session)
+    assert orch.human_io.out == []
+
+
+def test_parse_decision_working_on_and_mark_done_passthrough():
+    from skill_engine.execution.moa import MoaOrchestrator
+    agents = [type("A", (), {"alias": "A1"})(), type("A", (), {"alias": "A2"})()]
+    o = MoaOrchestrator(None, None)
+    d = o._parse_decision(
+        '<moa_decision>{"next":"A1","task":"t","rationale":"r","mark_done":2,"working_on":3}</moa_decision>',
+        agents)
+    assert d["mark_done"] == 2
+    assert d["working_on"] == 3
+    # 不带字段 → 键不出现（默认流零副作用）
+    d2 = o._parse_decision(
+        '<moa_decision>{"next":"A1","task":"t","rationale":"r"}</moa_decision>', agents)
+    assert "mark_done" not in d2 and "working_on" not in d2
+
+
+def test_run_plan_execute_marks_running_then_done(tmp_path):
+    """端到端：plan 建立 → working_on 标 ⏸ → mark_done 标 ✅ → 全部完成 STOP。
+
+    同时回归验证打印 bug：修复前 _emit_plan 访问不存在的 self.session，终端
+    永远看不到 plan 清单；修复后每轮决策后输出含 ✅/⏸/⬜ 的完整清单。
+    """
+    from skill_engine.models import MoaAgent
+    orch = _make_orchestrator(tmp_path)
+
+    class CapIO:
+        def __init__(self):
+            self.out = []
+
+        def emit(self, text, label=None):
+            self.out.append(text)
+
+        def emit_header(self, title):
+            self.out.append(title)
+
+    orch.human_io = CapIO()
+    agent_llm = ScriptedLLM(["worker out 1", "worker out 2"])
+    commander_llm = ScriptedLLM([
+        '<moa_plan>\n1. [探索] 探索仓库\n2. [开发] 实现 greet\n</moa_plan>\n'
+        '<moa_decision>{"next":"A1","task":"执行 plan 第 1 阶段：探索","rationale":"先探索","working_on":1}</moa_decision>',
+        '<moa_decision>{"next":"A1","task":"执行 plan 第 2 阶段：开发","rationale":"探索完成","mark_done":1,"working_on":2}</moa_decision>',
+        '<moa_decision>{"next":"STOP","task":"","rationale":"全部完成","mark_done":2}</moa_decision>',
+    ])
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev worker"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "plan-execute"},
+        agent_llm, commander_llm,
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="task", max_rounds=8,
+                      max_agent_iterations=5, max_llm_calls=100, final_synthesis=False)
+    blob = "\n".join(orch.human_io.out)
+    assert result["stopped_by"] == "commander_stop"
+    assert "全局 Plan" in blob                      # 打印 bug 已修复：plan 清单出现在终端
+    assert "⏸ [1] [探索]" in blob                   # 第 1 轮 working_on=1 → 执行中
+    assert "✅ [1] [探索]" in blob                   # 第 2 轮 mark_done=1 → 完成
+    assert "✅ [2] [开发]" in blob                   # 第 3 轮 mark_done=2 → 完成
+
+
+def test_parse_decision_mark_done_array_passthrough():
+    """mark_done 支持数组 [2,3]（一轮标多个阶段），也兼容单值 int。"""
+    from skill_engine.execution.moa import MoaOrchestrator
+    agents = [type("A", (), {"alias": "A1"})(), type("A", (), {"alias": "A2"})()]
+    o = MoaOrchestrator(None, None)
+    d = o._parse_decision(
+        '<moa_decision>{"next":"A1","task":"t","rationale":"r","mark_done":[2,3]}</moa_decision>',
+        agents)
+    assert d["mark_done"] == [2, 3]
+    # 单值兼容
+    d2 = o._parse_decision(
+        '<moa_decision>{"next":"A1","task":"t","rationale":"r","mark_done":2}</moa_decision>',
+        agents)
+    assert d2["mark_done"] == 2
+
+
+def test_run_plan_execute_marks_multiple_done_in_one_round(tmp_path):
+    """一轮完成多个阶段（合并执行）→ mark_done 用数组一次标 ✅。
+
+    回归 2026-08-27 实跑事故：指挥官单值 mark_done 一轮只能标一个阶段，
+    合并执行的阶段会被永久漏标（⬜ 卡死）。
+    """
+    orch = _make_orchestrator(tmp_path)
+
+    class CapIO:
+        def __init__(self):
+            self.out = []
+
+        def emit(self, text, label=None):
+            self.out.append(text)
+
+        def emit_header(self, title):
+            self.out.append(title)
+
+    orch.human_io = CapIO()
+    agent_llm = ScriptedLLM(["worker out 1", "worker out 2"])
+    commander_llm = ScriptedLLM([
+        '<moa_plan>\n1. [探索] 探索仓库\n2. [开发] 实现\n3. [自检] 验证\n</moa_plan>\n'
+        '<moa_decision>{"next":"A1","task":"执行第 1 阶段","rationale":"r","working_on":1}</moa_decision>',
+        # 第 2 轮：合并完成阶段 2+3，一次用数组标记
+        '<moa_decision>{"next":"A1","task":"执行第 2+3 阶段","rationale":"合并执行","mark_done":[2,3]}</moa_decision>',
+        '<moa_decision>{"next":"STOP","task":"","rationale":"done","mark_done":1}</moa_decision>',
+    ])
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "plan-execute"},
+        agent_llm, commander_llm,
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="task", max_rounds=8,
+                      max_agent_iterations=5, max_llm_calls=100, final_synthesis=False)
+    blob = "\n".join(orch.human_io.out)
+    assert result["stopped_by"] == "commander_stop"
+    # 第 2 轮数组 mark_done=[2,3] → 阶段 2、3 同时 ✅（不再漏标）
+    assert "✅ [2] [开发]" in blob
+    assert "✅ [3] [自检]" in blob
+    assert "✅ [1] [探索]" in blob                     # 第 3 轮单值 mark_done=1 兼容
+
+
+# ── 档 B：解析失败处置（旁路落盘 + 自纠重试） ─────────────────────────────────
+def test_unparseable_commander_raw_dumped_to_sidecar(tmp_path):
+    """①解析失败 → 原文旁路落盘 .skill-engine/commander_unparseable.jsonl（诊断留痕）。
+
+    断言：首次失败 + 自纠仍失败 → 2 条记录，含 round 与原始坏 JSON。
+    """
+    orch = _make_orchestrator(tmp_path)
+    agent_llm = ScriptedLLM(["worker out"])
+    commander_llm = ScriptedLLM([
+        '<moa_decision>{"next":"A1","task":"t","rationale":"r",}</moa_decision>',  # 尾逗号坏 JSON
+    ])
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "plan-execute"},
+        agent_llm, commander_llm,
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="q", max_rounds=3,
+                      max_agent_iterations=5, max_llm_calls=100, final_synthesis=False)
+    assert result["stopped_by"] == "commander_unparseable"
+    p = tmp_path / ".skill-engine" / "commander_unparseable.jsonl"
+    assert p.exists()
+    recs = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines()]
+    assert len(recs) == 2                        # 首次失败 + 自纠仍失败
+    assert recs[0]["round"] == 1
+    assert "<moa_decision>" in recs[0]["raw"]    # 原始坏 JSON 完整留痕
+    assert "尾逗号" in recs[0]["raw"] or "," in recs[0]["raw"]
+
+
+def test_unparseable_commander_self_correct_once(tmp_path):
+    """②JSON 解析失败 → 错误信息回灌自纠 1 次；修正后任务正常继续（不中断）。"""
+    orch = _make_orchestrator(tmp_path)
+    agent_llm = ScriptedLLM(["worker out"])
+    commander_llm = ScriptedLLM([
+        '<moa_decision>{"next":"A1","task":"t","rationale":"r",}</moa_decision>',  # 坏（尾逗号）
+        '<moa_decision>{"next":"A1","task":"t","rationale":"修正"}</moa_decision>',  # 自纠后合法
+        '<moa_decision>{"next":"STOP","task":"","rationale":"done"}</moa_decision>',
+    ])
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "plan-execute"},
+        agent_llm, commander_llm,
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="q", max_rounds=5,
+                      max_agent_iterations=5, max_llm_calls=100, final_synthesis=False)
+    assert result["stopped_by"] == "commander_stop"      # 自纠成功，任务走完
+    assert commander_llm.call_count == 3                 # round1 坏(1) + 自纠(2) + round2 STOP(3)
+    assert agent_llm.call_count == 1                     # A1 只执行了一次
+    # 自纠后决策进了 commander 私有上下文（重试消息 + 修正输出）
+    assert any(m.get("content", "").startswith("\n# 系统提示")
+               for m in commander_llm.last_messages)
+
+
+def test_unparseable_commander_self_correct_gives_up_after_once(tmp_path):
+    """②自纠仅 1 次；重试后仍失败 → commander_unparseable 中断 + 落盘 2 条原文。"""
+    orch = _make_orchestrator(tmp_path)
+    agent_llm = ScriptedLLM(["worker out"])
+    commander_llm = ScriptedLLM([
+        '<moa_decision>{"next":"A1","task":"t","rationale":"r",}</moa_decision>',  # 坏1
+        '<moa_decision>{"next":"A1","task":"t","rationale":"r",}</moa_decision>',  # 坏2（自纠后仍坏）
+    ])
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "plan-execute"},
+        agent_llm, commander_llm,
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="q", max_rounds=5,
+                      max_agent_iterations=5, max_llm_calls=100, final_synthesis=False)
+    assert result["stopped_by"] == "commander_unparseable"
+    assert commander_llm.call_count == 2                 # 只自纠 1 次，不无限循环
+    p = tmp_path / ".skill-engine" / "commander_unparseable.jsonl"
+    assert len(p.read_text(encoding="utf-8").splitlines()) == 2
+
+
+# ── 档 B：疑似漏标检测（引擎兜底，下轮 prompt 强制核对补标） ─────────────────
+def test_stale_mark_hint_injected_when_commander_skips_mark(tmp_path):
+    """指挥官跳级推进（working_on=6 但 2-5 未标）→ 下一轮 prompt 注入疑似漏标提醒。
+
+    回归 2026-08-27 实跑：模型常把"mark_done"写进 rationale 叙述而非 JSON 字段，
+    静态自检清单无效，需引擎动态核对并强制补标提示。
+    """
+    orch = _make_orchestrator(tmp_path)
+    agent_llm = ScriptedLLM(["worker out"])
+    commander_llm = ScriptedLLM([
+        '<moa_plan>\n1. [探索]\n2. [后端]\n3. [前端]\n4. [图表]\n5. [美化]\n6. [验收]\n</moa_plan>\n'
+        '<moa_decision>{"next":"A1","task":"阶段1","rationale":"r","working_on":1}</moa_decision>',
+        # 跳级：直接推进到阶段 6，漏标 2-5（也漏标 1）
+        '<moa_decision>{"next":"A2","task":"阶段6","rationale":"直接验收","working_on":6}</moa_decision>',
+        '<moa_decision>{"next":"STOP","task":"","rationale":"done"}</moa_decision>',
+    ])
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"},
+         {"alias": "A2", "model_profile": "default", "skill_name": "", "instruction": "review"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "plan-execute"},
+        agent_llm, commander_llm,
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="q", max_rounds=5,
+                      max_agent_iterations=5, max_llm_calls=100, final_synthesis=False)
+    assert result["stopped_by"] == "commander_stop"
+    # 指挥官收到的 prompt（含疑似漏标提醒）——last_messages 是列表引用，invoke 后
+    # 追加的 assistant 会污染末位，故遍历全部 user 消息断言
+    prompts = [m["content"] for m in commander_llm.last_messages
+               if m.get("role") == "user"]
+    assert any("疑似漏标" in p for p in prompts)
+    assert any('"mark_done": [1, 2, 3, 4, 5]' in p for p in prompts)
+
+
+def test_no_stale_hint_when_mark_done_tracked_normally(tmp_path):
+    """正常逐轮推进（每轮 mark_done+working_on）→ 不注入疑似漏标提醒（零干扰）。"""
+    orch = _make_orchestrator(tmp_path)
+    agent_llm = ScriptedLLM(["worker out"])
+    commander_llm = ScriptedLLM([
+        '<moa_plan>\n1. [探索]\n2. [开发]\n3. [验收]\n</moa_plan>\n'
+        '<moa_decision>{"next":"A1","task":"阶段1","rationale":"r","working_on":1}</moa_decision>',
+        '<moa_decision>{"next":"A1","task":"阶段2","rationale":"r","mark_done":1,"working_on":2}</moa_decision>',
+        '<moa_decision>{"next":"A2","task":"阶段3","rationale":"r","mark_done":2,"working_on":3}</moa_decision>',
+        '<moa_decision>{"next":"STOP","task":"","rationale":"done","mark_done":3}</moa_decision>',
+    ])
+    workers, commander = _agents_with_injected_llm(
+        [{"alias": "A1", "model_profile": "default", "skill_name": "", "instruction": "dev"},
+         {"alias": "A2", "model_profile": "default", "skill_name": "", "instruction": "review"}],
+        {"alias": "C", "model_profile": "default", "skill_name": "", "instruction": "plan-execute"},
+        agent_llm, commander_llm,
+    )
+    result = orch.run(workers, commander, FakeRegistry(), query="q", max_rounds=5,
+                      max_agent_iterations=5, max_llm_calls=100, final_synthesis=False)
+    assert result["stopped_by"] == "commander_stop"
+    for msgs in commander_llm.last_messages:
+        if msgs.get("role") == "user":
+            assert "疑似漏标" not in msgs.get("content", "")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
