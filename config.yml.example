@@ -35,7 +35,8 @@ settings:
   allowlist: ""                  # 逗号分隔的 skill 白名单，空为全部允许
   context_budget: 12000          # 上下文压缩预算（token）
   mcp_config: ./mcp.json         # MCP 服务器配置文件路径（mcp.json 保持独立）
-  tavily_api_key: ${TAVILY_API_KEY}
+  mcp_hub_token: ${MCP_HUB_TOKEN}  # 共享 mcp-hub 网关的本应用 bearer token（web_search 等经它走）
+  tavily_api_key: ${TAVILY_API_KEY}  # 仅当有 skill 直连 Tavily 时需要；web_search 已改经 mcp-hub
   vault_path: ""
   ollama_host: ""
   # R2 图片托管：view_image 注入图片时上传到 R2 换公网 URL。

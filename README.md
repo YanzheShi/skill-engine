@@ -182,7 +182,8 @@ settings:
   security_mode: permissive
   auto_approve: all
   mcp_config: ./mcp.json
-  tavily_api_key: ${TAVILY_API_KEY}
+  mcp_hub_token: ${MCP_HUB_TOKEN}     # 共享 mcp-hub 网关的本应用 token（web_search 经它走）
+  tavily_api_key: ${TAVILY_API_KEY}   # 仅直连兜底时需要；配了 mcp-hub 就可留空
 ```
 
 支持任何 OpenAI 兼容的 API 提供商，包括：
@@ -387,7 +388,7 @@ moa.start()
 | `edit_file` | 定点编辑（精确优先 + 模糊匹配 + diff 预览） |
 | `search_files` | 搜索文件内容（ripgrep，并行批） |
 | `view_image` | 查看图片（多模态注入 / R2 公网上传） |
-| `web_search` | 网络搜索（需配置 Tavily） |
+| `web_search` | 网络搜索（可被同名 MCP 工具覆盖走网关；否则直连 Tavily 兜底） |
 | `run_python` | 运行 Python 脚本 |
 | `query_db` | 查询数据库 |
 | `shot_web` | 网页截图 |
@@ -435,21 +436,45 @@ skill-engine index --rebuild-meta
 
 ## MCP 服务器集成
 
-通过 `mcp.json` 配置文件连接外部 MCP 服务器：
+引擎通过 `mcp.json` 连接外部 MCP 服务器，把它们暴露的工具并入工具集。模板见 [mcp.json.example](mcp.json.example)，下面是一个可直接复制的示例——共享网关 `mcp-hub`（提供 `web_search`）+ 官方 `tavily-mcp` 直连备选：
 
 ```json
 {
-  "mcp_servers": {
-    "my-server": {
-      "command": "node",
-      "args": ["server.js"],
-      "env": {"KEY": "value"}
+  "mcpServers": {
+    "mcp-hub": {
+      "transport": "streamable_http",
+      "url": "http://127.0.0.1:8080/mcp",
+      "headers": { "Authorization": "Bearer ${MCP_HUB_TOKEN}" },
+      "global": true,
+      "disabled": false
+    },
+    "tavily-direct": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "tavily-mcp"],
+      "env": { "TAVILY_API_KEY": "${TAVILY_API_KEY}" },
+      "global": true,
+      "disabled": true
     }
   }
 }
 ```
 
-支持 stdio、HTTP、SSE 三种传输方式。
+支持 `stdio` / `streamable_http`（别名 `http`）/ `sse` 三种传输。字段说明：
+
+- `headers` / `url` / `env` 值支持 `${ENV}` 展开，密钥不写明文（如上例的 `${MCP_HUB_TOKEN}`）。
+- `global: true`：该 server 的工具对**所有 skill 全局可用**，无需在每个 skill 的 `mcp_servers` 里逐个声明。
+- `disabled: true`：跳过、不连接。上例把 `tavily-direct` 置为禁用，是给不走网关的用户留的备选——改成 `false`（并可禁用 `mcp-hub`）即用官方 `tavily-mcp` 直连。
+- 单个 server 连接失败只告警，不中断其他 server 与 skill 执行。
+
+### 内建工具与 MCP 同名覆盖
+
+`web_search` 既是内建工具（直连 Tavily），也可由 MCP 提供（如 `mcp-hub`）。同名时的取舍规则：
+
+- 核心文件/执行类内建工具（`bash` / `read_file` / `edit_file` / `write_file` / …）**受保护**，远程同名工具一律不会覆盖，防止文件操作被劫持；
+- `web_search` 这类无文件副作用的叶子工具**允许被同名 MCP 工具覆盖**：有同名 MCP 工具在线就走 MCP，MCP 不可用则自动回落内建直连。
+
+因此搜索开箱即用：配了 `mcp-hub` 就走共享网关（统一额度与记账），没配或网关离线就退回直连 `TAVILY_API_KEY`，两种情况模型都不会失去 `web_search`。
 
 ## MOA 多模型协作模式
 

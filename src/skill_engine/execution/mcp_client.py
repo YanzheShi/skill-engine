@@ -60,6 +60,23 @@ def load_mcp_config(path: Path) -> dict:
     return data.get("mcpServers", {})
 
 
+def discover_global_servers(config: Optional[dict] = None) -> list[str]:
+    """返回 mcp.json 中标记 ``global: true`` 且未 ``disabled`` 的 server 名。
+
+    这些 server 的工具对所有 skill 全局可用（无需在 frontmatter 逐个声明），
+    用于把 mcp-hub 这类共享网关的工具（如 web_search）变成引擎级常驻能力。
+    """
+    if config is None:
+        path = find_mcp_config()
+        if path is None:
+            return []
+        config = load_mcp_config(path)
+    return [
+        name for name, entry in config.items()
+        if isinstance(entry, dict) and entry.get("global") and not entry.get("disabled")
+    ]
+
+
 def _to_connection(entry: dict) -> Optional[dict]:
     """把 mcp.json 里的一个 server 定义归一化为 langchain-mcp-adapters 的 connection 字典。
 
@@ -89,18 +106,18 @@ def _to_connection(entry: dict) -> Optional[dict]:
         if not url:
             logger.warning("_to_connection: http server 缺少 url，跳过")
             return None
-        conn = {"transport": "streamable_http", "url": url}
+        conn = {"transport": "streamable_http", "url": os.path.expandvars(url)}
         if entry.get("headers"):
-            conn["headers"] = entry["headers"]
+            conn["headers"] = {k: os.path.expandvars(v) for k, v in entry["headers"].items()}
         return conn
     if transport == "sse":
         url = entry.get("url")
         if not url:
             logger.warning("_to_connection: sse server 缺少 url，跳过")
             return None
-        conn = {"transport": "sse", "url": url}
+        conn = {"transport": "sse", "url": os.path.expandvars(url)}
         if entry.get("headers"):
-            conn["headers"] = entry["headers"]
+            conn["headers"] = {k: os.path.expandvars(v) for k, v in entry["headers"].items()}
         return conn
     logger.warning("_to_connection: 未知 transport=%r，跳过", transport)
     return None

@@ -63,6 +63,11 @@ from skill_engine.execution.tool_exec.handlers.skill_tool import SkillToolHandle
 
 logger = logging.getLogger(__name__)
 
+# 允许被同名 MCP 工具覆盖的内建「叶子工具」（无文件副作用）。其余内建工具
+# （核心文件/执行操作）一律受保护，禁止远程同名覆盖。列在此处的工具，当有
+# 同名 MCP 工具在线时改用 MCP 版；MCP 不可用则自动回落内建实现。
+MCP_OVERRIDABLE_BUILTINS = {"web_search"}
+
 
 class ToolDispatchRunner:
     """档位 B：tool_dispatch 循环（CC 原生 skill 兼容）
@@ -364,18 +369,28 @@ class ToolDispatchRunner:
             skill_mcp = load_mcp_tools(skill)  # 接入 mcp.json 声明的远程 MCP 工具
             restore_schema = handlers["restore_file"].schema()
             session_schemas = [handlers["ask_user"].schema()] if session_mode else []
-            # MCP 远程工具并入。同名时优先保留内建工具与 restore_file，
-            # 避免远程工具意外覆盖核心文件操作（bash/read_file/edit_file/...）。
+            # MCP 远程工具并入。核心文件/执行类内建工具受保护，禁止远程同名覆盖
+            # （避免 bash/read_file/edit_file 被劫持）；而 MCP_OVERRIDABLE_BUILTINS
+            # 里的叶子工具（如 web_search）允许被同名 MCP 工具覆盖——此时从绑定
+            # 列表剔除内建版、并从 handlers 弹出，使分发走 MCP 的 SkillToolHandler；
+            # MCP 不可用时该工具自动回落内建实现。
             builtin_names = set(TOOL_REGISTRY.keys()) | {"restore_file"}
-            skill_mcp_safe = [t for t in skill_mcp if t.name not in builtin_names]
-            if len(skill_mcp_safe) != len(skill_mcp):
+            protected = builtin_names - MCP_OVERRIDABLE_BUILTINS
+            skill_mcp_safe = [t for t in skill_mcp if t.name not in protected]
+            dropped = sorted({t.name for t in skill_mcp if t.name in protected})
+            if dropped:
                 logger.warning(
-                    "MCP 工具存在与内建同名的项，已跳过被覆盖的 %d 个",
-                    len(skill_mcp) - len(skill_mcp_safe),
+                    "MCP 工具与受保护的核心内建同名，已丢弃 %d 个: %s",
+                    len(dropped), ", ".join(dropped),
                 )
+            overridden = {t.name for t in skill_mcp_safe} & builtin_names
+            for name in overridden:
+                handlers.pop(name, None)
+                logger.info("内建工具 %s 被同名 MCP 工具覆盖", name)
+            builtin_tools = [t for t in TOOL_REGISTRY.values() if t.name not in overridden]
             skill_handlers = {t.name: SkillToolHandler(t)
                               for t in skill_extra + skill_mcp_safe}
-            tools = (list(TOOL_REGISTRY.values()) + skill_extra + [restore_schema]
+            tools = (builtin_tools + skill_extra + [restore_schema]
                      + session_schemas + skill_mcp_safe)
             disallowed = getattr(skill.metadata, "disallowed_tools", None) or []
             allowed = getattr(skill.metadata, "allowed_tools", None) or []

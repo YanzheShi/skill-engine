@@ -1,4 +1,9 @@
-"""web_search：Tavily AI 搜索。"""
+"""web_search：Tavily AI 搜索（内建直连，默认/兜底实现）。
+
+当有同名 MCP 工具（如 mcp-hub 网关）在线时会被其覆盖；本 handler 在无任何
+MCP 提供 web_search、或 MCP 连接失败时作为兜底，直接用 TAVILY_API_KEY 调
+Tavily，保证开源用户在未部署网关时仍有搜索能力。
+"""
 
 import json
 

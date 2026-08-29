@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "mcp-hub": {
+      "transport": "streamable_http",
+      "url": "http://127.0.0.1:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_HUB_TOKEN}"
+      },
+      "global": true,
+      "disabled": false
+    },
+    "tavily-direct": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "tavily-mcp"],
+      "env": {
+        "TAVILY_API_KEY": "${TAVILY_API_KEY}"
+      },
+      "global": true,
+      "disabled": true
+    }
+  }
+}

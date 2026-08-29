@@ -211,6 +211,10 @@ def web_search(query: str, max_results: int = 5) -> str:
     Tavily is designed for AI/LLM use — results include cleaned page content,
     relevance scores, and source URLs. Free tier: 1,000 searches/month.
 
+    This is the built-in direct implementation. When an MCP server provides a
+    tool with the same name (e.g. a shared mcp-hub gateway), that MCP tool
+    takes precedence and this one is used only as a fallback.
+
     Set the TAVILY_API_KEY environment variable to use this tool.
     Get a free key at: https://app.tavily.com
 
@@ -478,11 +482,16 @@ def load_skill_tools(skill) -> list[BaseTool]:
 
 
 def load_mcp_tools(skill) -> list[BaseTool]:
-    """加载 skill 经 mcp_servers 字段声明的 MCP 远程工具。
+    """加载 skill 可用的 MCP 远程工具。
+
+    来源两部分（去重合并）：
+    - skill 经 frontmatter 的 mcp_servers 字段声明的 server；
+    - mcp.json 中标记 ``global: true`` 的 server（如 mcp-hub），对所有 skill
+      常驻，使网关工具（如 web_search）成为引擎级能力而无需逐个声明。
 
     复用 mcp_client.load_mcp_tools：从全局 mcp.json 解析 server 定义、连接，
     把远程工具拉成本地 BaseTool，与 extra_tools 一样合并进 bind_tools。
-    无 mcp_servers 或连接失败都返回空列表（不中断执行）。
+    无可用 server 或连接失败都返回空列表（不中断执行）。
 
     Args:
         skill: Skill 对象（需有 .metadata.mcp_servers）
@@ -490,8 +499,14 @@ def load_mcp_tools(skill) -> list[BaseTool]:
     Returns:
         合并后的工具列表（空列表表示无 MCP 工具）。
     """
-    from skill_engine.execution.mcp_client import load_mcp_tools as _load_mcp
-    server_names = getattr(skill.metadata, "mcp_servers", None) or []
+    from skill_engine.execution.mcp_client import (
+        load_mcp_tools as _load_mcp,
+        discover_global_servers,
+    )
+    server_names = list(getattr(skill.metadata, "mcp_servers", None) or [])
+    for name in discover_global_servers():
+        if name not in server_names:
+            server_names.append(name)
     if not server_names:
         return []
     return _load_mcp(server_names)
