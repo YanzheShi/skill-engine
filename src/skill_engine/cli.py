@@ -619,12 +619,23 @@ def uninstall(
 def index(
     build_meta: bool = typer.Option(False, "--build-meta", help="强制全量构建 meta 缓存（首次使用）"),
     rebuild_meta: bool = typer.Option(False, "--rebuild-meta", help="强制全量重抽 meta 缓存（SKILL.md 大改后）"),
+    root: Optional[str] = typer.Option(
+        None, "--root", "-r",
+        help="额外扫描根目录（须为 skills 容器目录：其下每个含 SKILL.md 的子目录算一个 skill）",
+    ),
+    only_root: bool = typer.Option(
+        False, "--only-root",
+        help="只处理 --root 指定的目录，忽略用户级/项目级/内置 skills（须配合 --root）",
+    ),
 ):
     """扫描 skills 并预处理元数据
 
     默认增量模式：只有 SKILL.md 内容变更时才重新抽取 intention/synonyms。
     meta 缓存落在用户级 ~/.skill-engine/cache/meta（不在 skill 源树），
     首次使用建议加 --build-meta 强制全量构建。
+
+    默认扫描范围含用户级（~/.claude/skills 等）与引擎内置 skills；
+    加 --only-root 可把范围限定为 --root 指定的目录。
 
     使用示例：
     \b
@@ -636,17 +647,35 @@ def index(
 
       # 强制重抽
       skill-engine index --rebuild-meta
+
+      # 只处理指定目录
+      skill-engine index --root ./skills --only-root
     """
     from pathlib import Path
     from .routing.registry import Registry
     from .creator.preprocessor import meta_cache_path, Preprocessor as P
     from .config import get_llm
     from .creator.preprocessor import Preprocessor
-    from .routing.discovery import discover_skills
+    from .routing.discovery import discover, discover_skills
+
+    # 0. 校验 --root（底层对不存在的目录是静默跳过，这里提前报清楚）
+    root_path = Path(root) if root else None
+    if root_path is not None and not root_path.is_dir():
+        print(f"[ERROR] 目录不存在或不是目录: {root_path}")
+        raise typer.Exit(code=1)
+    if only_root and root_path is None:
+        print("[ERROR] --only-root 需要配合 --root 使用")
+        raise typer.Exit(code=1)
 
     # 1. 扫描
     print("[INFO] 正在扫描 skills...")
-    index = discover_skills()
+    if only_root:
+        # 走底层 discover()：绕开 discover_skills() 无条件加入的 cwd/skills，
+        # 否则在项目根下执行时无论如何都会混入项目自带的 skills。
+        index = discover(roots=[root_path], extend_skills=False, include_builtin=False)
+        print(f"[INFO] 仅限目录: {root_path}")
+    else:
+        index = discover_skills(extra_roots=[root_path] if root_path else None)
     registry = Registry(index)
     active = registry.list_active()
 

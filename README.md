@@ -419,6 +419,29 @@ skill-engine index --rebuild-meta
 
 抽取的元数据字段：`intention`、`synonyms`、`purpose`、`keywords`，这些信息会参与路由匹配的第二阶段关键词打分。
 
+### 指定扫描目录（--root / --only-root）
+
+`index` 默认扫描**用户级目录（~/.claude/skills 等）+ 当前项目 `skills/` + 引擎内置 skills** 的全部 skill。如果你只想针对某个目录做元数据预处理（例如只想抽某一项目的 skills，不想混入机上其它 40+ 个 skill），用 `--root` / `--only-root`：
+
+```bash
+# 额外并入某个目录一起处理（与默认范围并集）
+skill-engine index --root ./skills
+
+# 只处理指定目录，忽略用户级 / 项目级 / 内置 skills（须配合 --root）
+skill-engine index --root ./skills --only-root
+
+# 也支持绝对 / 网络盘路径
+skill-engine index -r D:/Code/PycharmProjects/code-tutor-agent/skills --only-root
+```
+
+行为要点：
+
+- `--root` / `-r` 指向的目录须是 **skills 容器目录**——其下每个含 `SKILL.md` 的子目录算一个 skill（与 `scan` / `run -w` 的约定一致）。
+- 目录不存在时直接报错退出（`[ERROR] 目录不存在或不是目录`，exit code 1），不会静默跳过。
+- `--only-root` 不配 `--root` 会报错：`[ERROR] --only-root 需要配合 --root 使用`。
+- `--only-root` 走底层 `discover()`，**绕开 `discover_skills()` 无条件加入的 `cwd/skills`**——因此在某个带 `skills/` 的项目根下执行时，它能保证只抽到你指定的目录，而不会把项目自带的 skills 也一并带进来。
+- 增量 / 全量语义不变：`--only-root` 下仍按 SKILL.md 内容 hash 决定是否重抽，可叠加 `--build-meta` / `--rebuild-meta`。
+
 ### Meta 缓存落点与生命周期
 
 抽取结果（LLM 派生）**不写入 skill 源树**，而是按内容寻址落到用户级缓存目录：
@@ -629,6 +652,7 @@ skill-engine scan [--root DIR]
 
 # 索引（元数据预处理）
 skill-engine index [--build-meta] [--rebuild-meta]
+                   [--root DIR] [--only-root]
 
 # 创建 skill（LLM 驱动）
 skill-engine create "生成 vue 组件" [--name <NAME>] [--dry-run]
@@ -790,19 +814,6 @@ pyinstaller --name skill-engine --onefile \
 产物在 `dist/skill-engine[.exe]`，可直接拷贝到其他同系统机器运行（无需 Python）。
 
 > 注意：`gradio`（Web UI）和 `jieba`（分词）在单文件打包时需额外 `--collect-data`；若只发 CLI，可省去 `--extra ui` 以减小体积。
-
-## 开源发布清单
-
-- [ ] `LICENSE` 已添加（MIT）
-- [ ] `README.md` 含安装、快速开始、配置说明
-- [ ] `.env.example` 已提交，真实 `.env` 已被 gitignore 忽略（本项目已满足）
-- [ ] `.gitignore` 覆盖 venv / 构建产物 / 运行时产物 / 密钥（本项目已满足）
-- [ ] `pyproject.toml` 的 `dependencies` 无私有 / 内部依赖
-- [ ] 代码无硬编码密钥、内网地址
-- [ ] 测试可跑：`uv run pytest tests/ -q`
-- [ ] GitHub 仓库设为 **Public**，并填好 About / Topics
-- [ ] 打 release tag 并写 GitHub Release Note（如 `git tag v0.1.0 && git push --tags`）
-- [ ] （可选）`CONTRIBUTING.md`、`CHANGELOG.md`、CI（GitHub Actions）
 
 ## License
 

@@ -36,16 +36,22 @@ class TurnPolicy:
 
     max_turns: 最大轮数（防无限循环）
     user_exit: 用户输入这些关键词时结束
-    stop_when: LLM 输出包含这些字符串时自动结束（不追问用户）
+    stop_when: LLM 输出包含这些字符串时自动结束（不追问用户）。
+               可写 YAML 列表，或 `|` 分隔的字符串（如 "已完成|已汇报|再见"）。
     """
     max_turns: int = 20
     user_exit: list[str] = field(default_factory=lambda: ["/done", "/exit", "结束", "再见", "拜拜", "退出"])
     stop_when: Optional[list[str]] = None  # 接受 str 或 list[str]，__post_init__ 统一
 
     def __post_init__(self):
-        """统一 stop_when 为 list[str]"""
+        """统一 stop_when 为 list[str]，字符串按 `|` 分隔。
+
+        历史 skill 多写成 "已完成|已汇报|再见" 这种竖线分隔的字符串，
+        而 should_stop 是子串匹配、不认正则，整串会被当成单个关键词从而
+        永不命中。这里拆开，使既有 SKILL.md 无需改写即可生效。
+        """
         if self.stop_when is not None and isinstance(self.stop_when, str):
-            self.stop_when = [self.stop_when]
+            self.stop_when = [kw.strip() for kw in self.stop_when.split("|") if kw.strip()]
 
     def should_stop(self, text: str) -> bool:
         """LLM 输出是否包含结束信号？
