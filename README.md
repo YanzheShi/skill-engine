@@ -36,7 +36,7 @@ skill-engine 是一个用于个人开发和日常工作的**Agent harness**，�
 
 ### 案例一：MOA + VLM 指导 LLM 根据设计稿完成 UI 开发
 
-多模型协作实战：指挥官拆解任务，VLM 对生成的 UI 截图做视觉审查并给出审判意见，LLM 据此修复，多轮迭代直至交付。
+多模型协作实战：指挥官拆解任务，VLM 对生成的 UI 截图做视觉审查并给出视觉审查结论，LLM 据此修复，多轮迭代直至交付。
 
 | 开始执行 | 初版 UI | VLM 截图审查 | 最终交付 |
 | --- | --- | --- | --- |
@@ -243,7 +243,7 @@ src/skill_engine/
 │   ├── assembler.py      # Prompt 编译 + !cmd 预处理
 │   ├── steps.py          # Steps DSL 执行器
 │   ├── orchestrator.py   # 多 skill 编排
-│   ├── moa.py            # MOA 多模型协作（指挥官 + worker 调度 + 防死循环闸）
+│   ├── moa.py            # MOA 多模型协作（指挥官 + worker 调度 + 防死循环四道闸）
 │   ├── tool_dispatch.py  # 档位 B LLM 工具循环（handler 分发表 + IO 并行调度）
 │   ├── tool_defs.py      # 内建工具 schema 定义（@tool 桩）
 │   ├── tool_exec/        # 档位 B 工具执行引擎（每工具一个 handler）
@@ -370,7 +370,7 @@ moa.start()
    ├─ 指挥官（Commander）拆解任务、制定子计划
    ├─ 循环（直到交付）：
    │   ├─ LLM 编码实现（产出代码 / 文件）
-   │   ├─ VLM 对运行截图 / 产物做视觉审查、给出审判意见
+   │   ├─ VLM 对运行截图 / 产物做视觉审查、给出视觉审查结论
    │   ├─ 指挥官汇总意见，指挥 LLM 修复
    │   └─ 收敛判定（达标则交付，否则进入下一轮）
    └─ 输出最终交付物
@@ -503,7 +503,7 @@ skill-engine index -r D:/Code/PycharmProjects/code-tutor-agent/skills --only-roo
 
 针对「复杂逻辑」或「VLM + LLM 协作」类任务：由指挥官（Commander）拆解任务并统筹，VLM 负责视觉/截图审查，LLM 负责编码实现，多模型协同迭代直至交付。
 
-典型场景：根据设计稿完成 UI 开发——VLM 对生成截图做视觉审查并给出审判意见，LLM 据此修复，多轮收敛（见上方「实战案例 · 案例一」）。
+典型场景：根据设计稿完成 UI 开发——VLM 对生成截图做视觉审查并给出视觉审查结论，LLM 据此修复，多轮收敛（见上方「实战案例 · 案例一」）。
 
 多模型 profile 配置见 [config.yml.example](config.yml.example)（MOA 协作）。
 
