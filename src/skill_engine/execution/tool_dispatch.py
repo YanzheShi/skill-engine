@@ -130,16 +130,24 @@ class ToolDispatchRunner:
             self._dbg_stopped_by = stopped_by
         return res
 
-    def _is_trusted_path(self, full_path: Path) -> bool:
-        """路径是否位于受信任工作目录（trusted_root）内。规范化后前缀匹配，防 .. 逃逸。"""
-        if not self.trusted_root:
+    def _is_within_root(self, full_path: Path, root) -> bool:
+        """路径是否位于 root 内。规范化后前缀匹配，防 .. 逃逸。
+
+        抽出来供 trusted_root 与其它的「工作目录」边界判定共用
+        （原 _is_trusted_path 的内联实现）。
+        """
+        if not root:
             return False
         try:
-            root = os.path.normcase(str(Path(self.trusted_root).resolve()))
-            target = os.path.normcase(str(Path(full_path).resolve()))
+            r = os.path.normcase(str(Path(root).resolve()))
+            t = os.path.normcase(str(Path(full_path).resolve()))
         except OSError:
             return False
-        return target == root or target.startswith(root + os.sep)
+        return t == r or t.startswith(r + os.sep)
+
+    def _is_trusted_path(self, full_path: Path) -> bool:
+        """路径是否位于受信任工作目录（trusted_root）内。规范化后前缀匹配，防 .. 逃逸。"""
+        return self._is_within_root(full_path, self.trusted_root)
 
     def _truncate_msg(self, content: str, max_chars: int = 30000) -> str:
         """Truncate tool result message content to prevent context overflow.
@@ -191,18 +199,29 @@ class ToolDispatchRunner:
 
         Returns:
             (approved, error_message)
+
+        判定顺序（硬 → 软）：
+        1. 目标是已存在目录 → 直接拒绝
+        2. 敏感文件名（config.yml / .env / mcp.json / id_rsa …）→ 必须审批，
+           不受 trusted_root 豁免
+        3. trusted_root 内 → 直接放行
+        4. 落在工作目录（working_root）之外 → 必须审批
+        5. 其余交给 scanner.should_approve（命令级风险 + 路径出界）
         """
         # 防御：目标路径若为已存在目录，不能当文件做 read/write/edit。
         # 空 path 会被解析成 base_dir 本身（目录）；Windows 上对目录
         # read_text/write_text 抛 PermissionError，会让整个 worker 崩溃。
         # 这里在信任目录判断之前就拦下，优先级最高。
         base_dir = self.working_root or Path(skill.directory)
-        if _resolve_path(filepath, base_dir).is_dir():
+        target = _resolve_path(filepath, base_dir)
+
+        if target.is_dir():
             return False, f"[拒绝] 目标路径是目录，不能进行{op_type}操作：{filepath}"
 
         from skill_engine.security.scanner import RISKY_FILENAMES
-        # 直接检查文件名（不依赖 _path_escapes 的正则提取）
-        if Path(filepath).name in RISKY_FILENAMES:
+        # 敏感文件名底线：按「解析后的真实文件名」判定，不受相对/绝对形态影响，
+        # 也不被 trusted_root 豁免（config.yml / mcp.json 里就是明文密钥）。
+        if target.name in RISKY_FILENAMES:
             if self.approval_fn:
                 approved = self.approval_fn(skill.metadata.name, op_type, filepath)
             else:
@@ -211,13 +230,30 @@ class ToolDispatchRunner:
                 return False, "[用户跳过] 敏感文件操作已取消"
 
         # 受信任工作目录内的文件操作自动放行（用户显式指定 trusted_root 时）
-        if self.trusted_root:
-            base_dir = self.working_root or Path(skill.directory)
-            if self._is_trusted_path(_resolve_path(filepath, base_dir)):
-                return True, ""
+        if self.trusted_root and self._is_trusted_path(target):
+            return True, ""
+
+        # 工作目录出界门：LLM 用绝对路径 / .. 逃逸去读写宿主其它位置。
+        # 修复前这条分支不存在 —— _path_escapes 的 Windows 路径判定失效，
+        # 出界写在 auto_approve=None 下也会静默放行。
+        if not self._is_within_root(target, base_dir):
+            if self.approval_fn:
+                approved = self.approval_fn(
+                    skill.metadata.name, f"{op_type}_outside_root", filepath
+                )
+            else:
+                approved = False
+            if not approved:
+                return False, (
+                    f"[拒绝] 目标路径在工作目录之外：{filepath}"
+                    f"（工作目录：{base_dir}）。如需操作其它位置，"
+                    f"请在命令里显式说明用途后由用户放行。"
+                )
+            return True, ""
 
         decision, reason = should_approve(
-            f"{op_type}:{filepath}", skill.directory, risk_hint="tool_file"
+            f"{op_type}:{filepath}", str(base_dir),
+            risk_hint="tool_file", cwd=str(base_dir),
         )
         if decision == "BLOCK":
             return False, f"[安全拦截] {reason}"

@@ -98,21 +98,21 @@ def test_is_trusted_path_inside(tmp_path):
     assert _runner(trusted_root=None)._is_trusted_path(Path(tmp_path) / "a.txt") is False
 
 
-def test_check_file_safety_outside_trusted_keeps_scanner_path(tmp_path):
-    """目录外路径不被 trusted 提前放行：结果完全交给原审批链决定。
+def test_check_file_safety_outside_trusted_still_gated(tmp_path):
+    """目录外路径不被 trusted 放行，并触发「工作目录出界」审批门。
 
-    注意：scanner._path_escapes 的正则只认 / 开头 token，Windows 反斜杠路径
-    在既有实现里不判定为逃逸（SAFE）——这里只验证 trusted 分支没有短路。
+    P0 修复前：scanner._path_escapes 的正则只认 / 开头 token，且出界分支
+    误写成 `except: pass`，于是 Windows 绝对路径被判 SAFE、静默放行。
+    修复后目录外读写必须经 approval_fn。
     """
     calls = []
     r = _runner(trusted_root=str(tmp_path),
                 approval_fn=lambda *a, **k: calls.append(a) or True)
     outside = str(tmp_path.parent / "o.txt")
     ok, _ = r._check_file_safety("write", outside, _skill(str(tmp_path)))
-    # 不在 trusted 内 → 未走信任短路（approval_fn 只有在 scanner 判 ATTENTION 时才被调，
-    # Windows 绝对路径不触发 ATTENTION，故 calls 保持为空且结果由 scanner 决定）
-    assert ok is True
-    assert calls == []
+    assert ok is True  # approval_fn 放行
+    assert calls, "目录外写入必须触发审批"
+    assert calls[0][1] == "write_outside_root"
 
 
 def test_check_file_safety_risky_filename_keeps_gate(tmp_path):

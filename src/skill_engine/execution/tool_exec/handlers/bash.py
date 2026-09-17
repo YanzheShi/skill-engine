@@ -24,7 +24,12 @@ class BashHandler(BaseHandler):
         # debug 轨迹：实际执行的 shell 命令
         if ctx.tracer and ctx.tracer.enabled():
             ctx.tracer.event("command", cmd=cmd, tool_id=tc["id"])
-        decision, reason = should_approve(cmd, ctx.skill.directory, risk_hint="tool_dispatch")
+        # 根目录用 ctx.base_dir（命令实际的 cwd），不用 skill.directory：
+        # bash 跑在 base_dir 下，用 skill 目录做越界基准会把「工作区内但不在
+        # skill 目录内」的合法路径全部误判为 ATTENTION。
+        decision, reason = should_approve(
+            cmd, str(ctx.base_dir), risk_hint="tool_dispatch", cwd=str(ctx.base_dir)
+        )
         if decision == "BLOCK":
             # strict 快速失败：BLOCK 只会出现在 strict 模式下（LLM 侧 bash 一律不
             # 自动执行）。继续循环只会让模型一遍遍撞墙、空转耗尽迭代上限——
