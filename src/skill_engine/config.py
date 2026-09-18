@@ -606,6 +606,29 @@ _SANDBOX_DEFAULTS = {
 }
 
 
+def _as_bool(value, default: bool) -> bool:
+    """把配置里的「布尔」值归一化成真正的 bool。
+
+    存在的理由（2026-09-18）：这个配置段的非列表值统一走
+    ``os.path.expandvars(str(val))`` 通路，而 ``str(False) == "False"`` ——
+    一个非空字符串，被 ``bool()`` 之后恒为 True。于是
+    ``settings.sandbox.enabled: false`` 静默失效（实测见
+    ``docs/sandbox-integration-design.md`` §6.1.2）。同时接纳真 bool、
+    数字与常见字符串写法；无法识别时回落到 ``default``（＝保持沙箱开启，
+    失败方向偏安全）。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on", "enable", "enabled"):
+        return True
+    if text in ("0", "false", "no", "off", "disable", "disabled"):
+        return False
+    return default
+
+
 def get_sandbox_config() -> dict:
     """读取 ``settings.sandbox`` 配置段（每次读，不缓存）。
 
@@ -614,7 +637,12 @@ def get_sandbox_config() -> dict:
     环境变量只做两个整体开关：``SKILLS_ENGINE_SANDBOX=on|off`` 覆盖 enabled，
     ``SKILL_ENGINE_SRT_WIN`` 覆盖 srt_bin。
     """
-    out = dict(_SANDBOX_DEFAULTS)
+    # 逐键复制：默认值里的 deny_read/grant_read/env_passthrough 是**列表**，
+    # 浅拷贝会让调用方拿到与模块常量共享的同一个 list 对象（改了会污染默认值）。
+    out = {
+        k: (list(v) if isinstance(v, list) else v)
+        for k, v in _SANDBOX_DEFAULTS.items()
+    }
     section = _load_config_yml().get("settings", {})
     section = section.get("sandbox") if isinstance(section, dict) else None
     if isinstance(section, dict):
@@ -625,6 +653,10 @@ def get_sandbox_config() -> dict:
                 if isinstance(val, str):
                     val = [v.strip() for v in val.split(",") if v.strip()]
                 out[key] = list(val) if isinstance(val, (list, tuple)) else []
+            elif key == "enabled":
+                # 布尔必须单独归一化 —— 走下面的 str() 通路会把 YAML 的 false
+                # 变成非空字符串 "False"，bool() 之后仍是 True，配置项形同虚设。
+                out[key] = _as_bool(val, bool(_SANDBOX_DEFAULTS["enabled"]))
             else:
                 out[key] = os.path.expandvars(str(val))
 

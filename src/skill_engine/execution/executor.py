@@ -28,7 +28,6 @@ V0.2 改为 allow_all=False，DEFAULT_ALLOWLIST 生效。
 """
 
 import subprocess
-import sys
 import os
 import re
 import locale
@@ -358,9 +357,19 @@ class Executor:
             # 沙箱分支：把 proc_args 换成 `srt-win exec … <shell> -c <command>`。
             # 子进程不继承宿主 env → env 由 SandboxManager 全量经 --env 透传；
             # cwd 不接受参数 → 靠下面 Popen(cwd=…) 继承（实测子进程继承 broker cwd）。
-            use_sandbox = self.sandbox_enabled if sandbox is None else bool(sandbox)
-            if use_sandbox and self._sandbox_forced_off:
+            #
+            # 两层语义必须分开（2026-09-18 修）：
+            #   策略层 sandbox_enabled / _sandbox_forced_off —— 「允不允许用沙箱」，
+            #       是**上限**，压掉一切请求（全局关闭 / pytest+CI）；
+            #   请求层 sandbox 参数 —— 「这条命令想不想用沙箱」，由路由层按命令性质给。
+            # 旧实现写成 `sandbox_enabled if sandbox is None else bool(sandbox)`，
+            # 传参一旦非 None 就架空策略层 → `settings.sandbox.enabled: false` 关不掉
+            # bash / run_python（这两个 handler 永远传显式布尔，从不为 None），
+            # 配置项形同虚设（实测见 docs/sandbox-integration-design.md §6.1.2）。
+            if not self.sandbox_enabled or self._sandbox_forced_off:
                 use_sandbox = False
+            else:
+                use_sandbox = True if sandbox is None else bool(sandbox)
             ran_sandbox = False
             if use_sandbox:
                 wrapped, sbox_err = self._wrap_sandbox(command, cwd, env)
@@ -376,8 +385,11 @@ class Executor:
                     }
                 # sbox_err 为空 = 后端整体不可用且策略为 warn：已告警，按裸跑继续；
                 # 此时 ran_sandbox 保持 False，observation 会如实标 sandbox: off。
-            elif self.sandbox_enabled and sandbox is False:
-                pass  # 路由层显式要求裸跑（只读白名单 / 已审批的删除/联网命令）
+            # use_sandbox=False 的两种裸跑情形（ran_sandbox 保持 False）：
+            #   ① 策略层关闭：settings.sandbox.enabled=false，或 pytest/CI 的强制上限；
+            #   ② 路由层豁免：只读白名单，或已审批的删除/联网/宿主工具命令。
+            # （shell 形态不支持（WSL）不在此列——它走上面的 _wrap_sandbox 分支，
+            #   由 on_unavailable 决定告警裸跑还是 fail-closed。）
 
             proc = subprocess.Popen(
                 proc_args,

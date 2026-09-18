@@ -56,7 +56,10 @@ settings:
   # 环境变量整体开关：SKILLS_ENGINE_SANDBOX=on|off（优先于本段）；
   # SKILL_ENGINE_SRT_WIN 可直接指定 srt-win.exe 路径（默认搜 npx 缓存）。
   sandbox:
-    enabled: true            # 关掉则所有命令裸跑（沙箱能力见下方实测矩阵）
+    enabled: true            # false = 全部命令裸跑，退回沙箱引入前的行为；
+                             #   注意：关掉的只是「进不进隔离」，ASK 审批链路
+                             #   不受影响——删除类/联网/宿主工具命令照样拦。
+                             #   等价的运行时开关：SKILLS_ENGINE_SANDBOX=off
     on_unavailable: warn     # warn（默认，告警后裸跑）/ block（拒绝执行）
     # 额外要 stamp denyRead 的机密文件（相对工作目录或绝对路径）。
     # config.yml / config.yaml / mcp.json / .env 已默认保护，无需重复列。

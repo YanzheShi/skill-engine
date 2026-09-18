@@ -9,6 +9,7 @@ skill-engine 是一个用于个人开发和日常工作的**Agent harness**，�
 - **Skill 检索与执行引擎** —— 不依赖任何 AI 产品，自带三级路由（精确名称 / 关键词打分 / LLM 兜底）与四路执行分流（Steps DSL 确定性执行 / tool_dispatch LLM 循环 / 单次 LLM 调用/ 纯编译（dry-run）），可以高效调试和运行个人开发的小型skill。
 - **Session 模式（长任务）** —— 小型Agent harness，基于 code-harness 的持久 REPL 会话，支持状态持久化与断点恢复，适合多轮调试、代码优化、联网查询等需要持续交互的长任务。
 - **MOA 模式（多模型协作）** —— 主要用于解决当前编码能力强的模型不具备图片识别导致无法根据UI设计稿开发前端的痛点，可以由指挥官统筹，VLM 负责视觉/截图审查、LLM 负责编码，协同攻克复杂逻辑或「VLM + LLM 协作」类任务。指挥官默认采用 ReAct 式调度；也可启用 **Plan-and-Execute 范式**（先产出全局阶段 plan、再按步派 worker 执行，终端实时展示计划进度），详见下方「MOA 多模型协作模式 → Plan-and-Execute 范式」。
+- **命令执行沙箱（Windows）** —— LLM 发起的命令默认进 Windows 原生 **srt** 隔离环境（独立本地账户 + 受限令牌）执行，而不是直接跑在你自己的账户里。路由层按命令性质分流：只读命令、以及已审批的删除/联网命令走裸跑，**其余一切默认进沙箱**。支持配置开关、能力自检与 fail-closed 降级，详见「安全审批 → 命令执行沙箱（Windows srt）」。
 
 > 档位 A（单次 LLM 调用）与档位 B（tool_dispatch 工具循环）是上述三种模式的底层执行档位，按需自动选择，无需单独记忆。
 
@@ -184,6 +185,9 @@ settings:
   mcp_config: ./mcp.json
   mcp_hub_token: ${MCP_HUB_TOKEN}     # 共享 mcp-hub 网关的本应用 token（web_search 经它走）
   tavily_api_key: ${TAVILY_API_KEY}   # 仅直连兜底时需要；配了 mcp-hub 就可留空
+  sandbox:
+    enabled: true                     # Windows srt 命令执行沙箱总开关（默认 true）
+    on_unavailable: warn              # srt 不可用时：warn 告警后裸跑 / block 拒绝执行
 ```
 
 支持任何 OpenAI 兼容的 API 提供商，包括：
@@ -239,7 +243,7 @@ src/skill_engine/
 │   └── domain_words.py   # jieba 领域词自动注册
 ├── execution/
 │   ├── runner.py         # 核心执行器（四路分流 + 审批）
-│   ├── executor.py       # 命令执行（subprocess 沙箱）
+│   ├── executor.py       # 命令执行（唯一 spawn 门神；可选经 srt 沙箱包装）
 │   ├── assembler.py      # Prompt 编译 + !cmd 预处理
 │   ├── steps.py          # Steps DSL 执行器
 │   ├── orchestrator.py   # 多 skill 编排
@@ -269,7 +273,8 @@ src/skill_engine/
 │   ├── paste_buffer.py   # 大段内容外置化保存
 │   └── paths.py          # 跨平台路径归一化
 ├── security/
-│   └── scanner.py        # 离线扫描 + 运行时审批
+│   ├── scanner.py        # 离线扫描 + 运行时审批
+│   └── sandbox.py        # Windows srt 沙箱（路由判定 + 会话级 ACL + 逐命令包装）
 └── creator/
     ├── creator.py        # Skill 创建
     ├── designer.py       # Skill 设计（LLM prompt）
@@ -382,14 +387,14 @@ moa.start()
 
 | 工具 | 功能 |
 |------|------|
-| `bash` | 执行 shell 命令（超时钳制 + 文件登记选择性失效） |
+| `bash` | 执行 shell 命令（超时钳制 + 文件登记选择性失效；按 `decide_route()` 路由，其余一切进沙箱） |
 | `read_file` | 读取文件内容（分页 / 缓存命中 / 重复读检测） |
 | `write_file` | 写入文件（安全门 + diff 预览 + 快照） |
 | `edit_file` | 定点编辑（精确优先 + 模糊匹配 + diff 预览） |
-| `search_files` | 搜索文件内容（ripgrep，并行批） |
+| `search_files` | 搜索文件内容（ripgrep，并行批；**刻意不经沙箱**） |
 | `view_image` | 查看图片（多模态注入 / R2 公网上传） |
 | `web_search` | 网络搜索（可被同名 MCP 工具覆盖走网关；否则直连 Tavily 兜底） |
-| `run_python` | 运行 Python 脚本 |
+| `run_python` | 运行 Python 脚本（默认进沙箱；审批通过后裸跑） |
 | `query_db` | 查询数据库 |
 | `shot_web` | 网页截图 |
 | `update_plan` | 更新任务计划 |
@@ -581,10 +586,15 @@ skill-engine session "帮我写代码" --skill leetcode-solution-writer --max-it
 
 ## 安全审批
 
-### 两层架构
+### 三层架构
 
-- **离线扫描**：正则 + LLM 分析 skill 安全性，只提醒不阻止
-- **运行时审批**：`should_approve()` → `_check_approval()` 弹窗交互
+| 层 | 机制 | 作用 |
+|----|------|------|
+| ① 离线扫描 | 正则 + LLM 分析 skill 安全性 | 只提醒不阻止 |
+| ② 运行时审批 | `should_approve()` → `_check_approval()` 弹窗交互 | 决定「要不要执行」 |
+| ③ 命令执行沙箱 | Windows srt，独立账户 + 受限令牌 | 决定「在什么环境下执行」 |
+
+前两层是**审批**（拦不拦），第三层是**隔离**（在哪跑）——三者互相独立：关掉沙箱**不会**关掉审批判定，反之亦然。沙箱详见下方「命令执行沙箱（Windows srt）」。
 
 ### 安全模式
 
@@ -610,7 +620,7 @@ skill-engine session "帮我写代码" --skill leetcode-solution-writer --max-it
 
 ### 自动审批
 
-通过环境变量 `SKILLS_ENGINE_AUTO_APPROVE` 配置：
+通过环境变量 `SKILLS_ENGINE_AUTO_APPROVE` 配置（也可写在 `config.yml` 的 `settings.auto_approve`，会回填成同名环境变量）：
 
 ```ini
 # 全部放行
@@ -620,11 +630,194 @@ SKILLS_ENGINE_AUTO_APPROVE=all
 SKILLS_ENGINE_AUTO_APPROVE=cleanup-temp:rm
 ```
 
+> ⚠️ **与沙箱叠加时的注意事项**：`_check_approval()` 的第一件事就是读这个变量，命中即直接放行、**不弹窗**。所以 `auto_approve: all` 意味着审批层的「弹窗」这道人工关闸其实是关着的。它单独用没什么问题（因为命令仍进沙箱），但**一旦同时关掉沙箱**，删除类 / 联网 / 宿主工具命令就会变成「无沙箱 + 无人工确认」直接裸跑。要关沙箱时，建议把 `auto_approve` 一起收成 `none` 或按 skill 白名单。
+
 ### 危险命令名单
 
 ```python
 RISKY_BINARIES = {"rm", "cp", "mv", "chmod", "chown", "dd", "mkfs", "python"}
 ```
+
+### 命令执行沙箱（Windows srt）
+
+LLM 发起的命令默认**不再直接跑在你自己的账户下**，而是启动到 srt（Anthropic Sandbox Runtime 的 Windows 原生实现）隔离环境里执行。
+
+#### 隔离原语：进程权限级，不是虚拟机
+
+这点决定了它能挡住什么，先说清楚：
+
+| 项 | 值 |
+|---|---|
+| 用的机制 | 独立本地账户（如 `srt-sandbox`，SID `S-1-5-21-…`）+ 受限令牌 + `CreateProcessWithLogonW` 两跳启动 |
+| **不是** | Windows Sandbox（Hyper-V 轻量 VM）；也**不是** AppContainer / LowBox |
+| 令牌实测 | 无 Administrators 组；完整性级别 Medium（**未降级**）；特权只剩 `SeChangeNotifyPrivilege` |
+| 推论 | 它**共享内核与文件系统**、只是换了身份 → 边界完全由 **ACL / WFP 防火墙规则**决定，而不是内核画死的 |
+
+#### 前置条件
+
+**仅 Windows**。`srt-win` 是 Windows 专用实现，其他平台自动降级（见下方「降级语义」）。
+
+需要 srt 运行时。引擎按以下顺序查找 `srt-win.exe`：
+
+1. 环境变量 `SKILL_ENGINE_SRT_WIN` 显式指定；
+2. `config.yml` 的 `settings.sandbox.srt_bin`；
+3. npx 缓存通配搜索：
+
+   ```
+   %LOCALAPPDATA%\npm-cache\_npx\*\node_modules\@anthropic-ai\sandbox-runtime\vendor\srt-win\{x64,arm64}\srt-win.exe
+   ```
+
+都没找到时报错：`未找到 srt-win.exe。请先 npx @anthropic-ai/sandbox-runtime 安装运行时，或设置环境变量 SKILL_ENGINE_SRT_WIN 指向 srt-win.exe。`
+
+所以装一次运行时即可（落进 npx 缓存后会被自动发现）：
+
+```bash
+npx @anthropic-ai/sandbox-runtime
+```
+
+引擎调的是原生 `vendor/srt-win/x64/srt-win.exe`，**刻意不用 node CLI**（`dist/cli.js`）——实测后者每命令 8–20s，原生每命令稳定 **0.29–0.71s**。
+
+#### 路由：哪些命令进沙箱
+
+`security/sandbox.py:decide_route()` 决定每条 shell 命令的去向，原则是**白名单豁免 + 默认进沙箱**：
+
+| 命令性质 | 路由 | 为什么 |
+|---|---|---|
+| 只读动词（`ls` `cat` `grep` `find` `git status`…），且无控制符 | **裸跑** | 无副作用，省掉 ~0.3s/命令的启动开销 |
+| 删除类（`rm` `del` `rmdir`…） | **审批后裸跑** | 沙箱内 `rm` 会**绕过宿主回收站守卫直接硬删**，必须拿回宿主侧 |
+| 联网（`curl` `wget` `ssh` `ping` `iwr`…） | **审批后裸跑** | 沙箱内网络（含回环）被 WFP 全封 |
+| 宿主工具（`uv` `pip` `npm` `gh` `docker` `code`…） | **审批后裸跑** | 它们要读 `%APPDATA%` 缓存，沙箱用户不可读 |
+| `git` 子命令 | 按子命令分 | 只读子命令 → 裸跑；`push`/`fetch`/`pull`/`clone` → 审批后裸跑 |
+| **其余一切**（`sed -i`、`mkdir`、未知命令、组合命令…） | **进沙箱** | 默认档 |
+
+已经处理掉的几个易错点：动词比对会剥掉 `.exe`/`.cmd`/`.bat`/`.com`/`.ps1` 后缀（否则 `rm.exe` 永远匹配不上删除清单、会被当未知命令送进沙箱硬删）；`sed -i` / `sort -o` / `awk -i inplace` 这类「只读动词 + 就地写开关」会降级进沙箱；含 `|` `&&` `>` `$()` 等控制符的组合命令一律不豁免（无法廉价证明组合后仍只读）。
+
+#### 执行覆盖面
+
+沙箱不只挂在 `bash` 上 —— `Executor` 是唯一 spawn 门神，凡是走它的入口都受策略层约束：
+
+| 入口 | 默认行为 |
+|---|---|
+| `bash` 工具 | 由 `decide_route()` 决定（上表） |
+| `run_python` 工具 | 默认进沙箱；**审批通过后裸跑**（让需要真实环境的脚本能跑通） |
+| Steps DSL 的 `type: exec` 步骤 | 默认进沙箱 |
+| `verify_command` 校验钩子 | 默认进沙箱 |
+| SKILL.md 的 `!cmd` 预处理（Assembler） | 默认进沙箱 |
+| `search_files` 的 ripgrep | **刻意不进沙箱**（rg 装在 `%LOCALAPPDATA%\…\WinGet\Packages` 下，沙箱用户读不到；且它是只读检索、无副作用） |
+
+> ⚠️ 注意 **`!cmd` 预处理也在沙箱内** —— 所以预处理里写联网命令（如 `!curl …`）会失败。需要联网的预处理请改用宿主侧步骤，或先关掉沙箱。
+
+#### 配置
+
+四处开关，优先级从高到低：
+
+1. **pytest / CI 环境** —— 只要存在 `PYTEST_CURRENT_TEST` 或 `CI`、且未设下面的环境变量，就**无条件关闭**（省掉每会话 ~10s 的 ACL 准备成本）。这是**上限**，连代码里显式传 `sandbox=True` 也压掉。
+2. **环境变量 `SKILLS_ENGINE_SANDBOX=on|off`** —— 压过配置文件，适合「这次先关掉试试」。
+3. **`config.yml` → `settings.sandbox.enabled`** —— 持久化配置，通常改这里。
+4. 都没设 → 默认 `true`（开启）。
+
+```yaml
+settings:
+  sandbox:
+    enabled: true            # false = 全部命令裸跑，退回沙箱引入前的行为
+    on_unavailable: warn     # warn（默认，告警后裸跑）/ block（拒绝执行）
+    deny_read: []            # 额外 stamp 成「沙箱内不可读」的机密文件
+    grant_read: []           # 要给沙箱只读授权的宿主目录（如依赖缓存）
+    srt_bin: ""              # 显式指定 srt-win.exe；空 = 自动搜索
+    env_passthrough: []      # 允许透传进沙箱的疑似密钥变量名（默认全部拦下）
+```
+
+要点：
+
+- **改完立即生效、不用重装** —— `get_sandbox_config()` 每次调用都重新读文件、不缓存。（需要 `uv tool install` 重装的只有改 `config.py` 这类**代码**时。）
+- `enabled` 写**裸的 YAML 布尔**（`true` / `false`）。带引号的 `"false"` 现在也能正确解析，但裸布尔才是本意。
+- `config.yml` / `config.yaml` / `mcp.json` / `.env` 已**默认** stamp 成沙箱内不可读，无需在 `deny_read` 里重复列。
+- **关掉沙箱不影响审批判定**：`decide_route()` 与 `sandbox_enabled` 无关，删除 / 联网 / 宿主工具命令照样会走到审批流程。但「走到审批」不等于「一定弹窗」——`auto_approve: all` 会直接放行，见上方「自动审批」的注意事项。
+
+#### 能力边界（本机实测）
+
+| 能力 | 结果 | 说明 |
+|---|---|---|
+| 网络（含回环） | **全拦** | WFP 按沙箱用户 SID 过滤：外联 `curl` 返回 000；连 `127.0.0.1` 也报 `WinError 10013` |
+| 进程与桌面 | **隔离** | 受限令牌 + kill-on-close job + 非交互桌面 |
+| C 盘写入 | **默认拒绝** | home / Program Files / Windows 实测 DENIED |
+| 机密文件读取 | **拦住**（需会话内 stamp） | `config.yml` / `mcp.json` 实测 DENIED |
+| D 盘写入 | ⚠️ **挡不住**（已知缺口） | `D:\` 对 `Authenticated Users` 授了 `(M)`；DENY 的 `(OI)(CI)` 传播成本不可接受 |
+| 删除保护 | ⚠️ **沙箱内失效** | 沙箱 `rm` 绕过宿主回收站守卫 → 删除类命令改走审批后裸跑 |
+
+两条重要推论：
+
+- **「网络全拦」** → 任何「起本地服务再连它」的命令在沙箱内**必然失败**，所以网页截图的 CDP 全页模式不可能进沙箱（它走宿主侧）。
+- **「D 盘挡不住」** → 沙箱挡不住**兄弟项目目录**。写边界由路由层（越界路径走审批）与文件快照回滚承担，不由沙箱承担。
+
+#### 降级语义（fail-closed）
+
+四种情况分别处理，**不要混淆**：
+
+| 情况 | 行为 |
+|---|---|
+| srt **装了**，但这条命令包装失败（stamp 失败 / exec 报错） | **拒绝执行**（fail-closed），绝不静默退化裸跑 |
+| 后端整体不可用（未装 srt / 非 Windows）+ `on_unavailable: warn` | 告警一次，之后按裸跑继续 |
+| 同上 + `on_unavailable: block` | 拒绝执行 |
+| shell 形态是 WSL | 不支持沙箱（`srt-win` 只能启动 cmd/bash），按 `on_unavailable` 处理 |
+
+也就是说「想用但用不了」是可配置的（缺可选依赖不该让整个工具不可用），但「想用、也装了、却起不来」一律 fail-closed。
+
+#### 观测：怎么知道某条命令进没进沙箱
+
+每条命令的 observation 里就带着结论，终端和模型上下文都能看到：
+
+```
+sandbox: on       ← 确实在沙箱内执行
+sandbox: off      ← 裸跑
+```
+
+这个值是**实际是否进沙箱**，不是路由意图 —— 所以降级裸跑不会谎报成 `on`。沙箱内失败时 observation 还会附带「不要在沙箱内反复重试」的提示。
+
+调试轨迹（`--debug` / `--debug-log`）里另有 `sandbox_route` 事件记录路由判定与理由。注意结果集的 `steps` 里**没有** `sandbox` 字段（见下方已知缺口），事后审计只能从 observation 文本判断。
+
+#### 开销
+
+| 阶段 | 实测 |
+|---|---|
+| 会话准备 `ensure_ready()`（含 stamp 机密文件） | 1.0–1.5s，**惰性触发** —— 只跑只读命令的会话完全不付这笔钱 |
+| 逐命令热路径 | **230–317ms**（固定的 logon + token 启动费，**与 env 透传规模无关**：79 变量 / 13.8KB argv 与 0 变量 / 762B argv 同为 ~250ms） |
+| 会话收尾（`acl restore`） | ~370ms |
+
+> stamp 成本随目标**父目录子树大小**线性上升（ACE 带 `(OI)(CI)` 会同步向下传播）：小目录里单文件 0.52s；父目录有 17320 个文件时 3.8s；项目根目录本身 158s —— 所以引擎**只 stamp 单个机密文件，绝不 stamp 目录**，同一父目录的多个文件会合并成一次调用。
+
+#### 已知缺口
+
+| 缺口 | 现状 | 影响 |
+|---|---|---|
+| **脚本级删除不受管控** | `python -c "shutil.rmtree(...)"` / `python cleanup.py` / `bash cleanup.sh` 被路由到**沙箱**，而沙箱内删除绕过宿主回收站守卫 | **比不开沙箱更危险**（不开时反而会被宿主守卫拦下）。补丁方案已写在 `sandbox.py` 的 `_DELETE_VERBS` 上方 |
+| `find . -delete` | 未识别 `-delete`，走只读白名单裸跑 | 不算变差（裸跑时宿主守卫仍生效），但无审批 |
+| **D 盘写边界** | 见上「能力边界」 | 挡不住兄弟项目 |
+| **`search_files` 未接文件安全门** | 其余文件类 handler 都调了 `ctx.check_file_safety`，它没调 | 可越界检索并回显机密内容 |
+| 观测字段不全 | `step` dict 无 route / sandbox 字段；`sandbox_report()` 生产代码零调用、无 CLI 子命令 | 事后审计只能从 `sandbox: on/off` 文本判断 |
+
+#### 自检
+
+改完配置想知道到底解析成什么，别猜 —— 直接读解析结果：
+
+```bash
+# 若 skill_engine 未装进当前环境，前面加 PYTHONPATH=src
+python -c "import skill_engine.config as c; print(c.get_sandbox_config())"
+```
+
+相关测试：
+
+```bash
+# 纯逻辑（不依赖 srt，秒级）—— 路由矩阵 + 开关语义 + 配置解析
+pytest tests/test_sandbox_route.py -v
+
+# 真机（需 Windows + 已装 srt）—— 默认整文件跳过，须显式 opt-in
+SKILLS_ENGINE_SANDBOX=on pytest tests/test_sandbox_integration.py -v
+```
+
+> 跑集成测试时工作目录必须是仓库内的 `.skill-engine/sandbox-it/`，**不能用 `tmp_path`**（`mkdtemp` 建的目录只授权 SYSTEM/Administrators，沙箱用户进不去）。
+
+设计依据、实测数据与决策过程见 [docs/sandbox-integration-design.md](docs/sandbox-integration-design.md)。
 
 ## CLI 命令
 
@@ -666,6 +859,7 @@ skill-engine uninstall <name>
 
 # 安全
 skill-engine scan-security [name] [--deep] [--json]
+```
 
 ## 缓存
 
@@ -748,7 +942,7 @@ uv run pytest tests/ -q
 
 ## 环境变量
 
-完整的环境变量列表见 [.env.example](.env.example)。核心配置项：
+大部分配置项都可以写在统一配置源 `config.yml` 里（模板见 [config.yml.example](config.yml.example)），**真实环境变量始终优先于 `config.yml`**。核心配置项：
 
 ```ini
 # LLM 配置（至少配一个）
@@ -760,8 +954,12 @@ SKILL_ENGINE_LLM_API_KEY=sk-xxx
 # SKILLS_ENGINE_SECURITY_MODE=permissive
 # SKILLS_ENGINE_SECURITY_MODE=off
 
-# 自动审批（可选，跳过弹窗）
+# 自动审批（可选，跳过弹窗；也可写 config.yml 的 settings.auto_approve）
 # SKILLS_ENGINE_AUTO_APPROVE=all
+
+# 命令执行沙箱（可选，仅 Windows）
+# SKILLS_ENGINE_SANDBOX=off                     # on/off，压过 config.yml 的 settings.sandbox.enabled
+# SKILL_ENGINE_SRT_WIN=D:\path\to\srt-win.exe   # 显式指定 srt 运行时；不设则自动搜 npx 缓存
 
 # MCP 配置（可选）
 # SKILL_ENGINE_MCP_CONFIG=./mcp.json
