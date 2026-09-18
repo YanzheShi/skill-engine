@@ -277,6 +277,21 @@ def shot_web(url: str, width: int = 1280, height: int = 800,
     """
 
 
+# ---------------------------------------------------------------- shot_web 刻意「不收口」
+# 本文件有 3 处进程启动（视口截图 / full_page 无 websocket 降级 / full_page CDP 有头调试），
+# 它们**有意**不走 Executor（唯一 spawn 门神），三条实测理由：
+#
+#   1. Edge 是 GUI 程序：沙箱用的是受限令牌 + 非交互桌面 + 完整 UI lockdown
+#      （见 `srt-win exec --help`），浏览器进程在其中起不来。
+#   2. full_page 依赖 `--remote-debugging-port` + `127.0.0.1` 回环 CDP 连接，
+#      而沙箱内网络被 WFP 按沙箱用户 SID 全拦 —— **回环也不例外**：实测在宿主
+#      监听 127.0.0.1:8899，沙箱内 `socket.create_connection` 报 WinError 10013。
+#   3. 产物落在 `<base_dir>/.skill-engine/screenshots/`（runtime_dir 收口），
+#      由调用方决定路径，不存在写边界问题；`--user-data-dir` 用 %TEMP% 也是一次性目录。
+#
+# 以后若真要收口，正确做法是给 shot_web 单独做「宿主侧特权通道」（截图动作在宿主
+# 侧完成、只把图片路径回给模型），而不是把它塞进 run_step 的沙箱分支。
+
 def _find_edge() -> "str | None":
     """探测本机 Edge 可执行文件（Windows 优先），找不到返回 None。"""
     import shutil

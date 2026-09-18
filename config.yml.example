@@ -50,3 +50,21 @@ settings:
   # debug: true 仅开开关、用默认路径 <working_root>/.<时间戳>.skill-engine-debug.log。
   debug_log: ""
   debug: false
+
+  # Windows srt 沙箱（docs/sandbox-integration-design.md §4.7）。
+  # 路由：只读白名单裸跑；删除类/联网/宿主工具审批后裸跑；其余一切进沙箱。
+  # 环境变量整体开关：SKILLS_ENGINE_SANDBOX=on|off（优先于本段）；
+  # SKILL_ENGINE_SRT_WIN 可直接指定 srt-win.exe 路径（默认搜 npx 缓存）。
+  sandbox:
+    enabled: true            # 关掉则所有命令裸跑（沙箱能力见下方实测矩阵）
+    on_unavailable: warn     # warn（默认，告警后裸跑）/ block（拒绝执行）
+    # 额外要 stamp denyRead 的机密文件（相对工作目录或绝对路径）。
+    # config.yml / config.yaml / mcp.json / .env 已默认保护，无需重复列。
+    # 注意：stamp 成本随该文件父目录子树大小上升（项目根 17320 文件约 4s/文件），
+    # 同一父目录的多个文件会在一次调用里合并，所以默认只在首次进沙箱时触发。
+    deny_read: []
+    # 需要沙箱只读授权的宿主目录（如依赖缓存 C:\Users\<user>\AppData\Local\uv）。
+    # 默认空：本机工作目录对沙箱用户已可写，无需 grant。
+    grant_read: []
+    srt_bin: ""              # 显式指定 srt-win.exe；空 = 自动搜索
+    env_passthrough: []      # 允透传进沙箱的疑似密钥变量名（默认全部拦下）

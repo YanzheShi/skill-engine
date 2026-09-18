@@ -63,6 +63,9 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = ["-p", "no:capture"]
+markers = [
+    "sandbox: 需要真实 srt-win 后端的集成测试（默认跳过，见 tests/test_sandbox_integration.py）",
+]
 
 [tool.ruff]
 target-version = "py312"

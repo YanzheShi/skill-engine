@@ -1,4 +1,10 @@
-"""search_files 双实现：ripgrep 优先（gitignore-aware、毫秒级），无 rg 二进制时回退纯 Python。"""
+"""search_files 双实现：ripgrep 优先（gitignore-aware、毫秒级），无 rg 二进制时回退纯 Python。
+
+rg 的进程启动收口到 ``Executor.run_argv``（唯一 spawn 门神，见 executor.py）：
+以 **argv 列表**提交，不经 shell 解析 —— 用户提供的 pattern 里带引号、空格、``&``
+时不会发生二次转义。``executor=None`` 的那条分支只服务于直接调用本模块的单元测试，
+生产路径（SearchFilesHandler.run_io）一律传 ``ctx.executor``。
+"""
 
 import re
 import shutil
@@ -20,12 +26,15 @@ def _format_match(rel: str, lineno, text: str, is_match: bool = False) -> str:
 
 
 def _run_ripgrep(pattern: str, search_dir: Path, file_glob: str, max_results: int,
-                context_lines: int = 3):
+                context_lines: int = 3, executor=None):
     """ripgrep 实现。返回 None 表示 rg 不可用/执行失败（调用方回退纯 Python）。
 
     rg 原生尊重 .gitignore；以 search_dir 为 cwd、相对路径 '.' 执行，
     避免 Windows 绝对路径的盘符冒号破坏 'path:line:text' 解析。
     -C context_lines 输出命中行前后上下文，匹配行标注 ← MATCH。
+
+    ``executor``：Executor 实例（生产路径必传）。传入则 spawn 收口到唯一门神；
+    为 None 时退化为本模块直连 subprocess，仅供单测直接调用。
     """
     rg = shutil.which("rg")
     if not rg:
@@ -35,20 +44,32 @@ def _run_ripgrep(pattern: str, search_dir: Path, file_glob: str, max_results: in
     if file_glob:
         cmd += ["--glob", file_glob]
     target = "." if search_dir.is_dir() else search_dir.name
-    try:
-        proc = subprocess.run(
-            cmd + ["--", pattern, target],
-            cwd=str(search_dir if search_dir.is_dir() else search_dir.parent),
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=_RG_TIMEOUT,
-        )
-    except Exception:
-        return None
-    if proc.returncode not in (0, 1):  # 0=有匹配，1=无匹配；其他视为失败 → 回退
-        return None
+    run_cwd = search_dir if search_dir.is_dir() else search_dir.parent
+    argv = cmd + ["--", pattern, target]
+
+    if executor is not None:
+        try:
+            res = executor.run_argv(argv, cwd=run_cwd, timeout=_RG_TIMEOUT)
+        except Exception:
+            return None
+        if res.get("exit_code") not in (0, 1):
+            return None
+        stdout = res.get("stdout", "") or ""
+    else:
+        try:
+            proc = subprocess.run(
+                argv, cwd=str(run_cwd), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=_RG_TIMEOUT,
+            )
+        except Exception:
+            return None
+        if proc.returncode not in (0, 1):  # 0=有匹配，1=无匹配；其他视为失败 → 回退
+            return None
+        stdout = proc.stdout
+
     matches, total = [], 0
     match_count = 0
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         if not line.strip():
             continue
         if line.startswith("--"):  # rg 文件分组分隔符，跳过
@@ -134,14 +155,15 @@ def _python_search(pattern: str, search_dir: Path, file_glob: str, max_results: 
 
 
 def _search_files(pattern: str, search_dir: Path, file_glob: str = "", max_results: int = 0,
-                  context_lines: int = 3) -> str:
+                  context_lines: int = 3, executor=None) -> str:
     """search_files 统一入口：ripgrep 优先，失败回退纯 Python。
 
     context_lines 默认 3，命中行带前后上下文、标注 ← MATCH。
+    ``executor`` 透传给 rg 的 spawn 门神（见 _run_ripgrep）。
     """
     mr = max_results if max_results and max_results > 0 else _SEARCH_DEFAULT_MAX
     mr = min(mr, _SEARCH_MAX_CAP)
-    result = _run_ripgrep(pattern, search_dir, file_glob, mr, context_lines)
+    result = _run_ripgrep(pattern, search_dir, file_glob, mr, context_lines, executor)
     if result is None:
         result = _python_search(pattern, search_dir, file_glob, mr, context_lines)
     return result

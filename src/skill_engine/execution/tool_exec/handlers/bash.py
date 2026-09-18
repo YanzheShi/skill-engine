@@ -1,4 +1,11 @@
-"""bash：shell 命令执行（安全审批 + 超时钳制 + 文件登记选择性失效）。"""
+"""bash：shell 命令执行（路由 + 安全审批 + 超时钳制 + 文件登记选择性失效）。
+
+路由（见 security/sandbox.py:decide_route）：
+- 只读白名单（ls/cat/grep/git status…，无重定向串联）→ 裸跑，省 ~0.35s/步
+- 删除类命令（rm/del/rmdir…）→ 审批后**裸跑**：沙箱内 rm 会绕过宿主回收站守卫
+- 联网 / 宿主工具（curl/uv/npm/ssh…）→ 审批后**裸跑**：沙箱内无网络、AppData 不可读
+- 其余一切 → 进 srt 沙箱
+"""
 
 import logging
 
@@ -9,6 +16,11 @@ from skill_engine.execution.tool_exec.bash_util import (
 from skill_engine.execution.tool_exec.context import ToolContext
 from skill_engine.execution.tool_exec.handler import BaseHandler
 from skill_engine.execution.tool_exec.result import ToolResult
+from skill_engine.security.sandbox import (
+    ROUTE_ASK,
+    ROUTE_SANDBOX,
+    decide_route,
+)
 from skill_engine.security.scanner import should_approve
 
 # bash 工具超时参数硬上限：测试/构建等长命令由 LLM 按需传 timeout，
@@ -30,6 +42,13 @@ class BashHandler(BaseHandler):
         decision, reason = should_approve(
             cmd, str(ctx.base_dir), risk_hint="tool_dispatch", cwd=str(ctx.base_dir)
         )
+        # 路由判定：删除类 / 联网类 / 宿主工具类命令必须审批后裸跑（详见模块 docstring）
+        route, route_reason = decide_route(cmd)
+        if ctx.tracer and ctx.tracer.enabled():
+            ctx.tracer.event("sandbox_route", route=route, reason=route_reason)
+        if route == ROUTE_ASK and decision == "SAFE":
+            decision = "ATTENTION"
+            reason = f"{reason}；{route_reason}" if reason else route_reason
         if decision == "BLOCK":
             # strict 快速失败：BLOCK 只会出现在 strict 模式下（LLM 侧 bash 一律不
             # 自动执行）。继续循环只会让模型一遍遍撞墙、空转耗尽迭代上限——
@@ -86,8 +105,12 @@ class BashHandler(BaseHandler):
         except (TypeError, ValueError):
             req_timeout = 0
         exec_timeout = min(req_timeout, BASH_MAX_TIMEOUT) if req_timeout > 0 else None
+        # 只有「其余一切」进沙箱；删除/联网/宿主工具（已审批）与只读白名单裸跑。
+        use_sandbox = route == ROUTE_SANDBOX
         try:
-            exec_result = ctx.executor.run_step(cmd, cwd=ctx.base_dir, timeout=exec_timeout)
+            exec_result = ctx.executor.run_step(
+                cmd, cwd=ctx.base_dir, timeout=exec_timeout, sandbox=use_sandbox
+            )
             # bash 可能改过文件 → 按命令中实际出现的路径选择性失效（文件级/目录级），
             # 未涉及的登记保留，消除「每次 bash 后全部文件回到未读」的迭代放大；
             # 无法提取路径 token 时保守全失效（与旧行为一致，如 echo hi）。
@@ -96,7 +119,7 @@ class BashHandler(BaseHandler):
                 ctx.file_tracker.invalidate_all()
             else:
                 ctx.file_tracker.invalidate_paths(touched)
-            obs = format_observation(cmd, exec_result)
+            obs = format_observation(cmd, exec_result, sandbox=exec_result.get("sandbox"))
             # bash 真实输出走语义通道（行截断），替代裸 print 全打
             if ctx.emit_result:
                 ctx.emit_result(obs)

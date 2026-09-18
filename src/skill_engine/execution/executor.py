@@ -3,9 +3,18 @@ Executor — 命令执行器（沙箱），唯一 spawn 门神
 
 所有命令执行都经过这里，V0.2 加 seccomp/landlock 只改一处。
 
-对外暴露两个入口：
+对外暴露三个入口：
 - run_preprocess(cmd, cwd) — 给 Assembler 用，宽松模式
-- run_step(cmd, cwd, allowlist_override) — 给 Runner 用，可绑 skill 的 allowed-tools
+- run_step(cmd, cwd, allowlist_override, timeout, sandbox) — 给 Runner / 工具用，
+  可绑 skill 的 allowed-tools，沙箱形态走这里
+- run_argv(argv, cwd, timeout) — 给库式只读工具用（argv 列表、不经 shell、不进沙箱），
+  search_files 的 ripgrep 调用收口于此
+
+**「唯一 spawn 门神」的适用范围**：凡是「跑一条 shell 命令」的路径必须走本类。
+当前**有意排除**在外的只剩 shot_web 的 3 处 Edge 启动（GUI + 回环 CDP + %TEMP%
+用户目录，理由与正解见 tool_defs.py 中 `_find_edge()` 上方的注释块）；
+wsl_read_file / wsl_write_file 是历史遗留的裸 spawn，已无调用方
+（见下方「WSL 遗留接口」段）。
 
 安全措施：
 1. 超时控制
@@ -25,6 +34,7 @@ import re
 import locale
 import shlex
 import signal
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -84,6 +94,7 @@ class Executor:
         max_output: int = MAX_OUTPUT_SIZE,
         allow_all: bool = True,  # MVP 默认全允许
         shell: Optional[str] = None,  # None = 自动检测
+        sandbox: Optional[bool] = None,  # None = 读 config.yml settings.sandbox.enabled
     ):
         self.timeout = timeout
         self.allowlist = allowlist or self.DEFAULT_ALLOWLIST
@@ -96,6 +107,23 @@ class Executor:
             self.shell = self._detect_wsl_shell()
         else:
             self.shell = "bash"
+
+        # Windows srt 沙箱（见 security/sandbox.py）。构造时只读配置，
+        # 真正的会话级 ACL 成本在第一次需要进沙箱时由 SandboxManager 惰性付出——
+        # 只跑只读白名单命令的会话完全不付这个成本。
+        from skill_engine.config import get_sandbox_config
+        self._sandbox_cfg = get_sandbox_config()
+        self.sandbox_enabled = (
+            bool(self._sandbox_cfg.get("enabled", True)) if sandbox is None else bool(sandbox)
+        )
+        self.sandbox_on_unavailable = str(
+            self._sandbox_cfg.get("on_unavailable", "warn")
+        ).strip().lower()
+        # 测试环境强制关闭时作为「上限」：调用方显式传的 sandbox=True 也压掉
+        # （bash 工具按路由传 True 会绕过默认值，导致单测付 10s 会话准备成本）。
+        self._sandbox_forced_off = bool(self._sandbox_cfg.get("forced_off_by_test_env"))
+        self._sandbox_mgr = None
+        self._sandbox_warned = False
 
     @staticmethod
     def _detect_wsl_shell() -> str:
@@ -138,13 +166,111 @@ class Executor:
         """
         return self._run(command, cwd=cwd, check_allowlist=False, multiline=multiline)
 
-    def run_step(self, command: str, cwd: Path, allowlist_override: Optional[set[str]] = None, timeout: Optional[int] = None) -> dict:
+    def run_step(
+        self,
+        command: str,
+        cwd: Path,
+        allowlist_override: Optional[set[str]] = None,
+        timeout: Optional[int] = None,
+        sandbox: Optional[bool] = None,
+    ) -> dict:
         """编排型执行 — 给 Runner 用
 
         严格模式：检查 allowlist（step exec 是 LLM 决定的，需要沙箱）
+
+        Args:
+            sandbox: True 强制进沙箱 / False 强制裸跑 / None 用 Executor 默认策略
+                （config.yml ``settings.sandbox.enabled``，默认 True）。
+                路由层（bash 工具 / run_python）按 decide_route() 显式传入。
         """
         allowlist = allowlist_override or self.allowlist
-        return self._run(command, cwd=cwd, check_allowlist=True, allowlist=allowlist, timeout=timeout)
+        return self._run(
+            command, cwd=cwd, check_allowlist=True, allowlist=allowlist,
+            timeout=timeout, sandbox=sandbox,
+        )
+
+    def run_argv(
+        self,
+        argv: list,
+        cwd: Path,
+        timeout: Optional[int] = None,
+    ) -> dict:
+        """以 argv 列表直接执行单个程序 —— 库式只读工具的 spawn 入口。
+
+        与 ``run_step`` 的区别：不做字符串拼接、不经 shell 解析，所以 pattern /
+        路径里的引号、空格、``&``、``$`` 不会被二次解释（这对「用户提供正则」的
+        search_files 是硬要求：指令串化的那一刻就开始引入转义 bug）。
+        ``search_files`` 的 ripgrep 调用走这里，使「唯一 spawn 门神」不被绕过。
+
+        **刻意不提供沙箱形态**（无 ``sandbox`` 参数），两条实测依据：
+
+        1. `srt-win exec` 确实支持 ``-- <TARGET>...`` 直接 argv 启动，但本机 ripgrep
+           装在 ``C:\\Users\\<user>\\AppData\\Local\\Microsoft\\WinGet\\Packages\\…``
+           下，沙箱用户读不到 —— 实测报
+           ``CreateProcessAsUserW(rg.exe): 拒绝访问 (0x80070005)``；
+           要放行只能把 WinGet 包目录加进 ``settings.sandbox.grant_read``，
+           而那个目录的 ``(OI)(CI)`` 传播成本与收益完全不成比例。
+        2. rg 是只读检索、无副作用，前面已用 ``--`` 终止了自身选项解析，
+           沙箱并不能额外挡住什么（沙箱用户在 D 盘本来就能读全盘，见 sandbox.py 第 1 条）。
+
+        需要隔离的命令请走 ``run_step(sandbox=True)``。
+        """
+        effective_timeout = timeout if timeout is not None else self.timeout
+        native_cwd = to_native_path(cwd)
+        if native_cwd is None or not native_cwd.is_dir():
+            return {
+                "stdout": "",
+                "stderr": f"[工作目录无效: {cwd}] {native_path_hint(cwd)}",
+                "exit_code": 1, "timed_out": False, "sandbox": False,
+            }
+        argv = [str(a) for a in (argv or [])]
+        if not argv:
+            return {
+                "stdout": "", "stderr": "[空 argv]",
+                "exit_code": 1, "timed_out": False, "sandbox": False,
+            }
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                cwd=str(native_cwd),
+                env=self._build_env(native_cwd),
+                start_new_session=(os.name != "nt"),
+            )
+            try:
+                raw_out, raw_err = proc.communicate(timeout=effective_timeout)
+                timed_out = False
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                _kill_process_tree(proc.pid)
+                try:
+                    raw_out, raw_err = proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    raw_out, raw_err = b"", b""
+        except Exception as e:  # noqa: BLE001
+            return {
+                "stdout": "", "stderr": f"[异常: {str(e)}]",
+                "exit_code": -1, "timed_out": False, "sandbox": False,
+            }
+        return {
+            "stdout": self._decode(raw_out[:self.max_output]),
+            "stderr": self._decode(raw_err[:self.max_output]),
+            "exit_code": (-1 if timed_out else proc.returncode),
+            "timed_out": timed_out,
+            "sandbox": False,
+        }
+
+    @staticmethod
+    def _decode(raw: bytes) -> str:
+        """统一解码：先试 UTF-8，失败回退系统编码（Windows 中文输出走这条）。"""
+        if not raw:
+            return ""
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw.decode(locale.getpreferredencoding(), errors="replace")
 
     def _run(
         self,
@@ -154,6 +280,7 @@ class Executor:
         allowlist: Optional[set[str]] = None,
         multiline: bool = False,
         timeout: Optional[int] = None,
+        sandbox: Optional[bool] = None,
     ) -> dict:
         """内部执行逻辑
 
@@ -181,6 +308,7 @@ class Executor:
                 ),
                 "exit_code": 1,
                 "timed_out": False,
+                "sandbox": False,
             }
         cwd = native_cwd
 
@@ -192,6 +320,7 @@ class Executor:
                     "stderr": f"[安全拦截: 命令不在白名单中: {command}]",
                     "exit_code": 1,
                     "timed_out": False,
+                    "sandbox": False,
                 }
 
         # 防自杀护栏：阻止工具命令杀死 skill-engine 自身进程（MOA 进程内运行时的
@@ -206,6 +335,7 @@ class Executor:
                 ),
                 "exit_code": 1,
                 "timed_out": False,
+                "sandbox": False,
             }
         command = guarded
 
@@ -224,6 +354,31 @@ class Executor:
                 proc_args = ["cmd.exe", "/c", command]
             else:
                 proc_args = [self.shell, "-c", command]
+
+            # 沙箱分支：把 proc_args 换成 `srt-win exec … <shell> -c <command>`。
+            # 子进程不继承宿主 env → env 由 SandboxManager 全量经 --env 透传；
+            # cwd 不接受参数 → 靠下面 Popen(cwd=…) 继承（实测子进程继承 broker cwd）。
+            use_sandbox = self.sandbox_enabled if sandbox is None else bool(sandbox)
+            if use_sandbox and self._sandbox_forced_off:
+                use_sandbox = False
+            ran_sandbox = False
+            if use_sandbox:
+                wrapped, sbox_err = self._wrap_sandbox(command, cwd, env)
+                if wrapped is not None:
+                    proc_args = wrapped
+                    ran_sandbox = True
+                elif sbox_err:
+                    # fail-closed：srt 装了但这条命令起不来（stamp 失败/exec 报错），
+                    # 绝不静默退化裸跑——设计文档 §4.7.9 的边界纪律。
+                    return {
+                        "stdout": "", "stderr": sbox_err, "exit_code": 1,
+                        "timed_out": False, "sandbox": False,
+                    }
+                # sbox_err 为空 = 后端整体不可用且策略为 warn：已告警，按裸跑继续；
+                # 此时 ran_sandbox 保持 False，observation 会如实标 sandbox: off。
+            elif self.sandbox_enabled and sandbox is False:
+                pass  # 路由层显式要求裸跑（只读白名单 / 已审批的删除/联网命令）
+
             proc = subprocess.Popen(
                 proc_args,
                 stdout=subprocess.PIPE,
@@ -248,23 +403,16 @@ class Executor:
                 # 超时语义：exit_code=-1，stderr 前置超时提示（tool_dispatch 依赖）
                 raw_err = f"[超时: {effective_timeout}s]".encode("utf-8", errors="replace") + raw_err
 
-            # 手动解码：先试 UTF-8，失败回退到系统编码
-            raw_stdout = raw_out[:self.max_output] if raw_out else b""
-            raw_stderr = raw_err[:self.max_output] if raw_err else b""
-            try:
-                stdout = raw_stdout.decode("utf-8")
-            except UnicodeDecodeError:
-                stdout = raw_stdout.decode(locale.getpreferredencoding(), errors="replace")
-            try:
-                stderr = raw_stderr.decode("utf-8")
-            except UnicodeDecodeError:
-                stderr = raw_stderr.decode(locale.getpreferredencoding(), errors="replace")
+            # 手动解码：先试 UTF-8，失败回退到系统编码（与 run_argv 共用 _decode）
+            stdout = self._decode(raw_out[:self.max_output] if raw_out else b"")
+            stderr = self._decode(raw_err[:self.max_output] if raw_err else b"")
 
             return {
                 "stdout": stdout,
                 "stderr": stderr,
                 "exit_code": (-1 if timed_out else proc.returncode),
                 "timed_out": timed_out,
+                "sandbox": ran_sandbox,
             }
         except Exception as e:
             return {
@@ -272,7 +420,15 @@ class Executor:
                 "stderr": f"[异常: {str(e)}]",
                 "exit_code": -1,
                 "timed_out": False,
+                "sandbox": False,
             }
+
+    # ---------------------------------------------------------- WSL 遗留接口（无调用方）
+    # wsl_read_file / wsl_write_file / _wsl_quote_path 已无任何调用方（全仓 grep 仅本文件
+    # 命中；文件读写统一走 read_file / write_file handler，shell=wsl 的通路只在 _run 里）。
+    # 保留而不删的原因：属于 Executor 的历史公开接口，外部（skill 脚本）可能直接引用；
+    # **新代码不要再使用** —— 它们是绕过唯一 spawn 门神的裸 subprocess.run，
+    # 既不进沙箱也不受超时/进程树清理/自排除护栏管辖。确认无外部依赖后建议整体删除。
 
     def wsl_read_file(self, path: str) -> str:
         """通过 WSL bash 读取文件（处理 WSL 绝对路径和 ~ 路径）
@@ -318,6 +474,77 @@ class Executor:
         )
         if result.returncode != 0:
             raise IOError(f"WSL write failed: {result.stderr.decode('utf-8', errors='replace')}")
+
+    # ---------------------------------------------------------------- 沙箱
+
+    def _wrap_sandbox(self, command: str, cwd: Path, env: dict):
+        """把命令包装成 srt 沙箱 argv。
+
+        Returns:
+            (argv, "")      —— 包装成功，用 argv 启动（必须 Popen(cwd=cwd)）
+            (None, err)     —— fail-closed：srt 可用但本次包装/准备失败，调用方拒绝执行
+            (None, "")      —— 后端整体不可用且 ``on_unavailable=warn``，已告警，按裸跑继续
+        """
+        from skill_engine.security.sandbox import SandboxManager
+
+        if self.shell not in ("cmd", "bash"):
+            # WSL 形态没有对应的 srt 启动路径；属「后端不支持」而非「命令失败」
+            reason = f"shell={self.shell!r} 不支持沙箱（srt-win 只能启动 cmd/bash）"
+            if self.sandbox_on_unavailable == "block":
+                return None, f"[沙箱不可用，已拒绝执行] {reason}"
+            self._warn_unavailable(reason)
+            return None, ""
+
+        try:
+            if self._sandbox_mgr is None:
+                self._sandbox_mgr = SandboxManager.get(
+                    cwd,
+                    deny_read=self._sandbox_cfg.get("deny_read") or [],
+                    grant_read=self._sandbox_cfg.get("grant_read") or [],
+                    srt_bin=self._sandbox_cfg.get("srt_bin") or None,
+                    env_passthrough=self._sandbox_cfg.get("env_passthrough") or [],
+                )
+            mgr = self._sandbox_mgr
+            if not mgr.ensure_ready():
+                reason = mgr.last_error or "沙箱后端不可用"
+                if self.sandbox_on_unavailable == "block":
+                    return None, f"[沙箱不可用，已拒绝执行] {reason}"
+                self._warn_unavailable(reason)
+                return None, ""
+            argv = mgr.wrap(command, cwd=cwd, env=env, shell=self.shell)
+            if argv is None:
+                # 已 ready 却包装失败 = 运行期错误 → 一律 fail-closed
+                return None, (
+                    f"[沙箱不可用，已拒绝执行] {mgr.last_error or '包装命令失败'}\n"
+                    "该命令若确实需要真实执行环境，请单独一步由用户显式批准后裸跑，"
+                    "不要期待这里自动降级。"
+                )
+            return argv, ""
+        except Exception as e:  # noqa: BLE001
+            # 沙箱接入自身的异常同样 fail-closed：宁可拒绝，不可静默裸跑
+            return None, f"[沙箱不可用，已拒绝执行] 沙箱接入异常：{type(e).__name__}: {e}"
+
+    def _warn_unavailable(self, reason: str) -> None:
+        """后端不可用且策略为 warn：只告警一次，避免每步刷屏。"""
+        if self._sandbox_warned:
+            return
+        self._sandbox_warned = True
+        logging.getLogger("skill_engine.sandbox").warning(
+            "沙箱后端不可用，本次运行按裸跑继续（settings.sandbox.on_unavailable=warn）：%s",
+            reason,
+        )
+        print(f"     [sandbox] 未启用，按裸跑继续：{reason[:120]}")
+
+    def sandbox_report(self) -> str:
+        """沙箱能力/使用情况报告（供 doctor 与 debug 轨迹）。"""
+        if self._sandbox_mgr is None:
+            return "沙箱：本次运行未使用（无需要进沙箱的命令）"
+        return self._sandbox_mgr.capability_report()
+
+    def close_sandbox(self) -> None:
+        """release 沙箱 ACE（幂等；进程退出时 SandboxManager 还会 atexit 兜底）。"""
+        if self._sandbox_mgr is not None:
+            self._sandbox_mgr.close()
 
     def _guard_self_kill(self, command: str) -> str:
         """防止工具命令杀死 skill-engine 自身进程（MOA 进程内运行时的自杀护栏）。

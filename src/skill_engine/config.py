@@ -584,6 +584,73 @@ def get_security_mode() -> str:
     return os.getenv("SKILLS_ENGINE_SECURITY_MODE", "strict").strip().lower()
 
 
+# ================================================================
+# 沙箱（Windows srt）配置
+# ================================================================
+
+_SANDBOX_DEFAULTS = {
+    "enabled": True,
+    # 沙箱不可用（未装 srt / 非 Windows）时的策略：
+    #   warn（默认）= 记录警告后裸跑，不因缺少可选依赖而整体不可用；
+    #   block       = 直接拒绝执行，绝不退化。
+    # 注意：srt 已安装但单条命令运行期失败，一律 fail-closed，与本策略无关。
+    "on_unavailable": "warn",
+    # 额外要 stamp denyRead 的机密文件（相对工作目录或绝对路径）
+    "deny_read": [],
+    # 需要沙箱只读授权的宿主目录（如依赖缓存），会话内一次性 grant
+    "grant_read": [],
+    # 显式指定 srt-win.exe 路径
+    "srt_bin": "",
+    # 允许透传进沙箱的疑似密钥变量名（默认全部拦下，沙箱内也用不到密钥）
+    "env_passthrough": [],
+}
+
+
+def get_sandbox_config() -> dict:
+    """读取 ``settings.sandbox`` 配置段（每次读，不缓存）。
+
+    ``settings.sandbox`` 是嵌套 dict，不适合走 ``_SETTINGS_ENV_MAP`` 的
+    扁平回填（那条路会把 dict 字符串化），因此单独解析。
+    环境变量只做两个整体开关：``SKILLS_ENGINE_SANDBOX=on|off`` 覆盖 enabled，
+    ``SKILL_ENGINE_SRT_WIN`` 覆盖 srt_bin。
+    """
+    out = dict(_SANDBOX_DEFAULTS)
+    section = _load_config_yml().get("settings", {})
+    section = section.get("sandbox") if isinstance(section, dict) else None
+    if isinstance(section, dict):
+        for key, val in section.items():
+            if val is None or val == "":
+                continue
+            if key in ("deny_read", "grant_read", "env_passthrough"):
+                if isinstance(val, str):
+                    val = [v.strip() for v in val.split(",") if v.strip()]
+                out[key] = list(val) if isinstance(val, (list, tuple)) else []
+            else:
+                out[key] = os.path.expandvars(str(val))
+
+    env_toggle = os.getenv("SKILLS_ENGINE_SANDBOX", "").strip().lower()
+    if env_toggle in ("off", "0", "false", "no", "disable"):
+        out["enabled"] = False
+    elif env_toggle in ("on", "1", "true", "yes", "enable"):
+        out["enabled"] = True
+
+    env_bin = os.getenv("SKILL_ENGINE_SRT_WIN", "").strip()
+    if env_bin:
+        out["srt_bin"] = env_bin
+
+    # 测试/CI 环境默认关闭沙箱：单测里的命令是开发者写的 fixture（非 LLM 产物），
+    # 而每会话 ~10s 的 ACL 准备 + 沙箱无网络会让既有用例大面积变慢/变红。
+    # 要覆盖沙箱本身，显式设 SKILLS_ENGINE_SANDBOX=on 即可（doctor/报告路径不受影响）。
+    if not env_toggle and (
+        os.getenv("PYTEST_CURRENT_TEST") or os.getenv("CI")
+    ):
+        out["enabled"] = False
+        # 标记为「测试环境强制关闭」：Executor 会把它当上限，连调用方显式传的
+        # sandbox=True 也压掉，否则 bash 工具按路由传 True 会绕过上面的默认值。
+        out["forced_off_by_test_env"] = True
+    return out
+
+
 def llm_call_interval() -> float:
     """每次 LLM 调用之间的人为节流间隔（秒），默认 0 = 关闭。
 

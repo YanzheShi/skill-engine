@@ -52,7 +52,7 @@ class TestBashTimeoutParam:
         runner, match, ex = _make(tmp_path)
         captured = {}
 
-        def spy(command, cwd=None, allowlist_override=None, timeout=None):
+        def spy(command, cwd=None, allowlist_override=None, timeout=None, sandbox=None):
             captured["timeout"] = timeout
             return {"exit_code": 0, "stdout": "ok", "stderr": "", "timed_out": False}
 
@@ -66,7 +66,7 @@ class TestBashTimeoutParam:
         runner, match, ex = _make(tmp_path)
         captured = {}
 
-        def spy(command, cwd=None, allowlist_override=None, timeout=None):
+        def spy(command, cwd=None, allowlist_override=None, timeout=None, sandbox=None):
             captured["timeout"] = timeout
             return {"exit_code": 0, "stdout": "ok", "stderr": "", "timed_out": False}
 
@@ -80,7 +80,7 @@ class TestBashTimeoutParam:
         runner, match, ex = _make(tmp_path)
         captured = {}
 
-        def spy(command, cwd=None, allowlist_override=None, timeout=None):
+        def spy(command, cwd=None, allowlist_override=None, timeout=None, sandbox=None):
             captured["timeout"] = timeout
             return {"exit_code": 0, "stdout": "ok", "stderr": "", "timed_out": False}
 
@@ -94,7 +94,7 @@ class TestBashTimeoutParam:
         runner, match, ex = _make(tmp_path)
         captured = {}
 
-        def spy(command, cwd=None, allowlist_override=None, timeout=None):
+        def spy(command, cwd=None, allowlist_override=None, timeout=None, sandbox=None):
             captured["timeout"] = timeout
             return {"exit_code": 0, "stdout": "ok", "stderr": "", "timed_out": False}
 

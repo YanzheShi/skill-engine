@@ -62,7 +62,7 @@ def _extract_cmd_paths(cmd: str, base_dir):
     return tokens
 
 
-def format_observation(cmd: str, exec_result: dict) -> str:
+def format_observation(cmd: str, exec_result: dict, sandbox=None) -> str:
     """格式化 bash 执行结果为结构化 observation，包含 exit_code 等关键字段
 
     让 LLM 能区分"成功"（exit_code: 0）和"失败"（exit_code: 非零），
@@ -71,6 +71,9 @@ def format_observation(cmd: str, exec_result: dict) -> str:
     Args:
         cmd: 原始命令
         exec_result: executor.run_step() 返回的结果 dict
+        sandbox: True/False 表示该命令是否跑在 srt 沙箱内（None = 不标注）。
+            标注的价值：沙箱内无网络、写不了 C 盘、读不了 AppData 缓存，
+            失败时模型能立刻知道是边界所致而非命令写错。
 
     Returns:
         格式化后的 observation 字符串（≤20000 chars）
@@ -81,6 +84,14 @@ def format_observation(cmd: str, exec_result: dict) -> str:
     timed_out = exec_result.get("timed_out", False)
 
     lines = [f"exit_code: {exit_code}"]
+    if sandbox is not None:
+        lines.append(f"sandbox: {'on' if sandbox else 'off'}")
+    if sandbox and exit_code != 0:
+        lines.append(
+            "hint: 该命令跑在 srt 沙箱内（无网络、不可写 C 盘、不可读 AppData 缓存）。"
+            "若失败原因是联网/依赖缓存/凭据，请说明后用一条独立命令请求裸跑审批，"
+            "不要在沙箱内反复重试。"
+        )
     if timed_out:
         lines.append("(timed_out)")
         # 测试超时（非失败）专属提示：日志实证 pytest 全量超时后模型反复无分析重跑。

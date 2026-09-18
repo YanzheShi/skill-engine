@@ -28,7 +28,10 @@ class SearchFilesHandler(BatchableHandler):
 
     def run_io(self, tc: dict, ctx: ToolContext):
         pattern, search_dir, file_glob, max_results_req = tc["_sf"]
-        return ("ok", _search_files(pattern, search_dir, file_glob, max_results_req))
+        # executor 传入 → rg 的 spawn 收口到 Executor.run_argv（唯一 spawn 门神），
+        # 以 argv 列表提交、不经 shell，pattern 里的引号/空格/& 不会被二次解析。
+        return ("ok", _search_files(pattern, search_dir, file_glob, max_results_req,
+                                    executor=ctx.executor))
 
     def finish(self, tc: dict, ctx: ToolContext, io_result: tuple) -> ToolResult:
         pattern, search_dir, file_glob, max_results_req = tc["_sf"]
