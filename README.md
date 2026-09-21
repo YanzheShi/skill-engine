@@ -684,13 +684,15 @@ npx @anthropic-ai/sandbox-runtime
 | 命令性质 | 路由 | 为什么 |
 |---|---|---|
 | 只读动词（`ls` `cat` `grep` `find` `git status`…），且无控制符 | **裸跑** | 无副作用，省掉 ~0.3s/命令的启动开销 |
-| 删除类（`rm` `del` `rmdir`…） | **审批后裸跑** | 沙箱内 `rm` 会**绕过宿主回收站守卫直接硬删**，必须拿回宿主侧 |
+| 删除类（`rm` `del` `rmdir`…，**以及解释器内联代码里的 `shutil.rmtree`/`os.remove`/`.unlink()`**） | **审批后裸跑** | 沙箱内 `rm` 会**绕过宿主回收站守卫直接硬删**，必须拿回宿主侧 |
 | 联网（`curl` `wget` `ssh` `ping` `iwr`…） | **审批后裸跑** | 沙箱内网络（含回环）被 WFP 全封 |
 | 宿主工具（`uv` `pip` `npm` `gh` `docker` `code`…） | **审批后裸跑** | 它们要读 `%APPDATA%` 缓存，沙箱用户不可读 |
 | `git` 子命令 | 按子命令分 | 只读子命令 → 裸跑；`push`/`fetch`/`pull`/`clone` → 审批后裸跑 |
 | **其余一切**（`sed -i`、`mkdir`、未知命令、组合命令…） | **进沙箱** | 默认档 |
 
 已经处理掉的几个易错点：动词比对会剥掉 `.exe`/`.cmd`/`.bat`/`.com`/`.ps1` 后缀（否则 `rm.exe` 永远匹配不上删除清单、会被当未知命令送进沙箱硬删）；`sed -i` / `sort -o` / `awk -i inplace` 这类「只读动词 + 就地写开关」会降级进沙箱；含 `|` `&&` `>` `$()` 等控制符的组合命令一律不豁免（无法廉价证明组合后仍只读）。
+
+删除判定还额外覆盖**脚本内容**，但要按「首词门控」防止误伤：`python -c "shutil.rmtree('build')"` 算删除（ASK），而 `grep "os.remove" src/` 只是**提到**这个词、必须继续走只读裸跑。`run_python` 工具因为入参是裸代码（首词常是 `import`），走的是不做门控的专用入口。
 
 #### 执行覆盖面
 
@@ -743,7 +745,7 @@ settings:
 | C 盘写入 | **默认拒绝** | home / Program Files / Windows 实测 DENIED |
 | 机密文件读取 | **拦住**（需会话内 stamp） | `config.yml` / `mcp.json` 实测 DENIED |
 | D 盘写入 | ⚠️ **挡不住**（已知缺口） | `D:\` 对 `Authenticated Users` 授了 `(M)`；DENY 的 `(OI)(CI)` 传播成本不可接受 |
-| 删除保护 | ⚠️ **沙箱内失效** | 沙箱 `rm` 绕过宿主回收站守卫 → 删除类命令改走审批后裸跑 |
+| 删除保护 | ⚠️ **沙箱内失效** | 沙箱 `rm` 绕过宿主回收站守卫 → 删除类命令改走审批后裸跑（含解释器内联代码里的 `rmtree`/`remove`/`unlink`；脚本**文件**里的删除是残留缺口） |
 
 两条重要推论：
 
@@ -790,11 +792,17 @@ sandbox: off      ← 裸跑
 
 | 缺口 | 现状 | 影响 |
 |---|---|---|
-| **脚本级删除不受管控** | `python -c "shutil.rmtree(...)"` / `python cleanup.py` / `bash cleanup.sh` 被路由到**沙箱**，而沙箱内删除绕过宿主回收站守卫 | **比不开沙箱更危险**（不开时反而会被宿主守卫拦下）。补丁方案已写在 `sandbox.py` 的 `_DELETE_VERBS` 上方 |
-| `find . -delete` | 未识别 `-delete`，走只读白名单裸跑 | 不算变差（裸跑时宿主守卫仍生效），但无审批 |
+| ~~脚本级删除不受管控~~ **已修（2026-09-21）** | `python -c "shutil.rmtree(...)"` 这类**内联代码**现在识别为 ASK；`find . -delete` 同样 ASK | 修复前它被路由到沙箱 → 沙箱内硬删、**绕过宿主回收站守卫**，比不开沙箱更危险 |
+| **脚本文件里的删除仍不受管控** | `python cleanup.py` / `bash cleanup.sh` 仍路由到沙箱 | 同上的危险仍在，只是范围缩小到「删在脚本文件里」。`decide_route()` 是纯函数（无 cwd、不做 I/O），读不到脚本体；修它需产品决策（加 cwd 读文件 vs 执行任意脚本一律 ASK） |
 | **D 盘写边界** | 见上「能力边界」 | 挡不住兄弟项目 |
 | **`search_files` 未接文件安全门** | 其余文件类 handler 都调了 `ctx.check_file_safety`，它没调 | 可越界检索并回显机密内容 |
 | 观测字段不全 | `step` dict 无 route / sandbox 字段；`sandbox_report()` 生产代码零调用、无 CLI 子命令 | 事后审计只能从 `sandbox: on/off` 文本判断 |
+
+**删除类命令为什么一律 ASK、不进沙箱**：沙箱内 `rm` 会绕过宿主 safe-delete（回收站 / FAIL_CLOSED）守卫直接硬删，所以**删除类命令宁可裸跑 + 审批**，让宿主守卫继续生效。判定覆盖三层：
+
+1. 命令词（`rm`/`del`/`remove-item`…）；
+2. 解释器内联代码里的删除 API —— `shutil.rmtree` / `os.remove` / `.unlink()` / `.rmdir()`，以及 `os.system('rm …')` / `subprocess.run(['rm', …])` 这类外包给子进程的写法（按首词门控到 `python`/`py`，否则 `grep "os.remove" src/` 会被误判）；
+3. 只读白名单动词上的破坏性开关 —— `find . -delete`。
 
 #### 自检
 

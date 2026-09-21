@@ -99,26 +99,33 @@ _GIT_READONLY_SUB = frozenset({
 
 # 删除类动词：沙箱内 rm 会绕过宿主 safe-delete（实测硬删），
 # 所以删除命令**不进沙箱**，一律走审批后裸跑，保留回收站/FAIL_CLOSED 守卫。
-#
-# 已知缺口（当前**未**处理，写在这里是有意的）：本清单只认「命令词」，认不出
-# **脚本内**的删除等价物。实测各条当前路由（见 tests/test_sandbox_route.py::
-# test_script_level_delete_is_known_gap）：
-#     python -c "import shutil; shutil.rmtree('...')"  → SANDBOX（沙箱内硬删）
-#     python cleanup.py / bash cleanup.sh              → SANDBOX（沙箱内硬删）
-#     find . -delete                                   → DIRECT（裸跑；宿主守卫仍生效，
-#                                                        但没有审批，且只读白名单名不副实）
-# 前两条比 P1 之前更差（原先被宿主守卫拦下，现在进沙箱直接硬删）；第三条不算变差。
-# 修法（约 12 行，需产品决策：会让 python 类命令多一次审批）：
-#   1) `_PY_VERBS = {"python","python3","py","pythonw"}`；
-#      `_SCRIPT_DELETE_RE = re.compile(r"(?i)(shutil\.rmtree|os\.remove|os\.unlink|"
-#      r"os\.rmdir|os\.removedirs|\.unlink\s*\(|\.rmtree\s*\()")`；
-#      命中 → ASK。只对解释器生效，否则 `grep "os.remove" src/` 会被误判成删除。
-#   2) `find` 加 `-delete` 标志检测（`_INPLACE_WRITE_FLAGS["find"]` 同款）→ ASK。
-# 未采纳前：该缺口由「bash 工具的执行前审批 + 用户看得到命令原文」兜底。
 _DELETE_VERBS = frozenset({
     "rm", "rmdir", "rd", "del", "erase", "unlink", "shred",
     "remove-item", "ri",
 })
+
+# 解释器动词：只有首词是它们时，才做「脚本内删除等价物」扫描。
+# **必须按首词门控** —— 否则 `grep "os.remove" src/` 这种「只是提到删除字样」
+# 的只读命令会被误判成删除操作（这是本清单从「只认命令词」扩到「认脚本内容」
+# 时最容易踩的坑）。
+_PY_VERBS = frozenset({"python", "python3", "py", "pythonw"})
+
+# 解释器命令行 / 代码里的删除 API。两个刻意取舍：
+# - 用 `\b(rmtree|rmdir|unlink|removedirs)\s*\(` 而非只认带点前缀的写法，
+#   是为了覆盖 `from shutil import rmtree; rmtree(...)` 这种裸名导入；
+# - **不收**裸 `remove(`：`a.remove(x)`（list.remove）太常见，误伤成本高于收益，
+#   所以 `remove` 只认带命名空间的 `os.remove(`。
+_SCRIPT_DELETE_RE = re.compile(
+    r"(?i)(shutil\.rmtree|os\.remove|\b(rmtree|rmdir|unlink|removedirs)\s*\()"
+)
+
+# 解释器把删除「外包给子进程」的形态：os.system('rm -rf x') /
+# subprocess.run(['rm','-rf','x'])。上面那条正则抓不到（`rm` 被引号/列表语法包住），
+# 所以这里用「有外包调用 + 有删除词」双条件，避免 subprocess.run(['ls']) 也触发审批。
+_SHELLOUT_RE = re.compile(r"(?i)(os\.system|os\.popen|os\.exec\w*|subprocess\.\w+)")
+_DELETE_WORD_RE = re.compile(
+    r"(?i)\b(rm|rmdir|rd|del|erase|unlink|shred|remove-item|ri)\b"
+)
 
 ROUTE_DIRECT = "direct"
 ROUTE_SANDBOX = "sandbox"
@@ -136,6 +143,13 @@ _INPLACE_WRITE_FLAGS = {
     "sed": re.compile(r"(?i)(?:^|\s)-i(?:\s|\.|=|$)"),
     "sort": re.compile(r"(?i)(?:^|\s)-o(?:\s|$)"),
     "awk": re.compile(r"(?i)(?:^|\s)-i\s+inplace\b"),
+}
+
+# 只读白名单动词上「本身就是删除」的开关：`find . -delete` 明明是删除，
+# 却因为 `find` 在只读白名单里而裸跑（宿主守卫仍生效，但**没有审批**，
+# 且白名单名不副实）。命中 → ASK，而不是降级进沙箱：沙箱内删得更彻底。
+_DESTRUCTIVE_FLAGS = {
+    "find": re.compile(r"(?i)(?:^|\s)-delete(?:\s|$)"),
 }
 
 # 取值不落「子命令」位置的 git 选项（`git -C <dir> status` 里的 <dir> 不是子命令）。
@@ -190,6 +204,44 @@ def _has_inplace_write(command: str) -> bool:
     return bool(pat and pat.search(command))
 
 
+def detect_script_level_delete(code: str) -> Optional[str]:
+    """在**已确定是解释器代码**的文本里找删除等价物；命中返回模式串，否则 None。
+
+    与 ``decide_route`` 里的用法不同：本函数**不做首词门控**。调用方已明确知道
+    手里是 Python 代码时用它 —— 典型是 ``run_python`` 的 ``code`` 参数，其首词
+    常是 top-level ``import`` / 赋值 / ``with``，用 ``_PY_VERBS`` 门控会把整类
+    代码漏掉。shell 命令行请走 ``decide_route``。
+
+    覆盖两种形态：
+    1. 直调删除 API：``import shutil; shutil.rmtree('build')``
+    2. 外包给子进程：``import os; os.system('rm -rf build')``
+    """
+    m = _SCRIPT_DELETE_RE.search(code)
+    if m:
+        return m.group(0)
+    if _SHELLOUT_RE.search(code) and _DELETE_WORD_RE.search(code):
+        return "子进程删除"
+    return None
+
+
+def _has_script_level_delete(command: str, first: str) -> bool:
+    """shell 命令行里的「脚本内删除等价物」——按首词门控到解释器。
+
+    门控是为了不误伤：``grep "os.remove" src/`` 只是**提到**删除 API，
+    不是执行删除。``first`` 由调用方传入（``decide_route`` 已算过），避免重复解析。
+    """
+    return first in _PY_VERBS and detect_script_level_delete(command) is not None
+
+
+def _has_destructive_flag(command: str) -> str:
+    """首词带「本身就是删除」的开关时返回开关名（如 ``-delete``），否则空串。"""
+    pat = _DESTRUCTIVE_FLAGS.get(_first_token(command))
+    if not pat:
+        return ""
+    m = pat.search(command)
+    return m.group(0).strip() if m else ""
+
+
 def _git_subcommand(command: str) -> str:
     """取 git 的子命令，跳过取值选项及其值（`git -C <dir> status` → ``status``）。"""
     toks = _tokens(command)[1:]
@@ -211,10 +263,13 @@ def decide_route(command: str) -> tuple[str, str]:
     """决定命令的路由：``(route, reason)``，route ∈ {direct, sandbox, ask}。
 
     顺序即优先级，与设计文档 §4.7.9 的「白名单豁免 + 默认进沙箱」一致，
-    另加两条实测驱动的例外：
+    另加三条实测驱动的例外：
 
     - **删除类命令 → ask**：沙箱内 ``rm`` 绕过宿主 safe-delete 守卫（实测
       工作区内直接硬删，不再进回收站），比现状更危险 → 不进沙箱。
+    - **解释器里的脚本级删除 → ask**：``python -c "shutil.rmtree(...)"`` 这类
+      命令，首个词不是删除动词，但执行的是删除。只消硬删，同样绕过宿主守卫
+      → 按首词门控到 ``_PY_VERBS`` 后扫内容（见 ``_has_script_level_delete``）。
     - **联网/宿主工具 → ask**：沙箱内网络被 WFP 全拦、``C:\\Users\\<user>\\AppData``
       不可读（uv/npm/pip 缓存都在那儿）→ 进沙箱必然失败，走审批后裸跑。
 
@@ -225,10 +280,27 @@ def decide_route(command: str) -> tuple[str, str]:
     if not cmd:
         return ROUTE_DIRECT, "空命令"
 
+    first = _first_token(cmd)
+
+    # 更具体的检查放前面：解释器里的删除（`python -c "...rmtree(...)"`）与
+    # 裸删除动词都路由到 ASK，但前者的 reason 能直接指出「是代码里的删除」。
+    # 顺序在这里只影响 reason 的可读性，不影响 route。
+    # 注：`_has_verb` 是**全 token** 扫描，`os.system('rm -rf x')` 里被引号包住的
+    # `'rm` 它也能命中（strip 引号后等于 `rm`）—— 所以那条子进程形态在本次改动
+    # 之前其实就已是 ASK，只是 reason 说的是「删除类命令」而非「脚本内删除」。
+    if _has_script_level_delete(cmd, first):
+        return ROUTE_ASK, (
+            f"解释器命令含脚本内删除等价物（{first}）："
+            "沙箱内删除绕过宿主守卫，需审批后裸跑"
+        )
+
     if _has_verb(cmd, _DELETE_VERBS):
         return ROUTE_ASK, "删除类命令：保留宿主回收站守卫（沙箱内 rm 会硬删）"
 
-    first = _first_token(cmd)
+    flag = _has_destructive_flag(cmd)
+    if flag:
+        return ROUTE_ASK, f"{first} {flag}：本身就是删除，只读白名单不适用"
+
     if first in _NETWORK_VERBS:
         return ROUTE_ASK, f"联网命令（{first}）：沙箱内网络被 WFP 全拦"
     if first in _HOST_VERBS:
@@ -267,7 +339,8 @@ CAPABILITY_MATRIX = (
     ("C 盘写入", "默认拒绝", "home / Program Files / Windows 实测 DENIED"),
     ("机密文件读取", "拦住（需会话内 stamp）", "config.yml / mcp.json 实测 DENIED"),
     ("D 盘写入", "挡不住（已知缺口）", "Authenticated Users 全盘 M，DENY 传播成本不可接受"),
-    ("删除保护", "沙箱内失效", "沙箱 rm 绕过宿主回收站守卫 → 删除类命令改走 ASK"),
+    ("删除保护", "沙箱内失效",
+     "沙箱 rm 绕过宿主回收站守卫 → 删除类命令（含解释器里的 rmtree/remove/unlink）均改走 ASK"),
 )
 """该机器上沙箱实际挡得住什么（实测结论，随平台/ACL 变化的项目需重新实测）。"""
 

@@ -18,7 +18,12 @@ from skill_engine.execution.tool_exec.bash_util import format_observation
 from skill_engine.execution.tool_exec.context import ToolContext
 from skill_engine.execution.tool_exec.handler import BaseHandler
 from skill_engine.execution.tool_exec.result import ToolResult
-from skill_engine.security.sandbox import ROUTE_ASK, decide_route
+from skill_engine.security.sandbox import (
+    ROUTE_ASK,
+    ROUTE_SANDBOX,
+    decide_route,
+    detect_script_level_delete,
+)
 from skill_engine.security.scanner import should_approve
 
 # 单段代码的审批理由展示长度上限
@@ -39,6 +44,17 @@ class RunPythonHandler(BaseHandler):
         # （decide_route 的 ask 分支覆盖 curl/uv/ssh 等；越界路径由
         # should_approve 的 _path_escapes 负责）时升级为审批。
         route, route_reason = decide_route(code)
+        # 本 handler 的入参是**裸 Python 代码**，首词通常是 top-level
+        # import / 赋值 / with —— decide_route 里「首词 ∈ _PY_VERBS」的门控
+        # 对它一次都不会命中，所以要单独补一次**不做门控**的扫描。
+        # 不补的话 `shutil.rmtree('build')` 会被路由进沙箱，在沙箱内硬删、
+        # 绕过宿主的回收站 / FAIL_CLOSED 守卫（比不开沙箱更危险）。
+        delete_hit = detect_script_level_delete(code)
+        if delete_hit and route == ROUTE_SANDBOX:
+            route = ROUTE_ASK
+            route_reason = (
+                f"代码含删除等价物（{delete_hit}）：沙箱内删除绕过宿主守卫，需审批后裸跑"
+            )
         decision, reason = should_approve(
             code, str(ctx.base_dir), risk_hint="tool_dispatch", cwd=str(ctx.base_dir)
         )

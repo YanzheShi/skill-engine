@@ -12,9 +12,11 @@ Executor — 命令执行器（沙箱），唯一 spawn 门神
 
 **「唯一 spawn 门神」的适用范围**：凡是「跑一条 shell 命令」的路径必须走本类。
 当前**有意排除**在外的只剩 shot_web 的 3 处 Edge 启动（GUI + 回环 CDP + %TEMP%
-用户目录，理由与正解见 tool_defs.py 中 `_find_edge()` 上方的注释块）；
-wsl_read_file / wsl_write_file 是历史遗留的裸 spawn，已无调用方
-（见下方「WSL 遗留接口」段）。
+用户目录，理由与正解见 tool_defs.py 中 `_find_edge()` 上方的注释块）。
+
+（历史：曾有一组无调用方的 WSL 裸 spawn 接口 `wsl_read_file` / `wsl_write_file` /
+`_wsl_quote_path`，2026-09-21 全仓确认零引用后删除 —— 它们绕过本门神，既不进沙箱
+也不受超时/进程树清理管辖。文件读写统一走 read_file / write_file handler。）
 
 安全措施：
 1. 超时控制
@@ -142,20 +144,6 @@ class Executor:
         drive = p.drive.lower().rstrip(":")
         rest = str(p.relative_to(p.anchor)).replace("\\", "/")
         return f"/mnt/{drive}/{rest}"
-
-    @staticmethod
-    def _wsl_quote_path(path: str) -> str:
-        """Quote 路径供 WSL bash 使用，保留 ~ 展开能力
-        
-        shlex.quote 会把 ~ 也包在单引号里导致 bash 不展开。
-        这里把 ~ 部分单独保留不 quote，只 quote 后面的路径部分。
-        """
-        if path.startswith("~/"):
-            rest = shlex.quote(path[2:])  # '.leetcode/docs/...'
-            return f"~/{rest}"             # ~/'.leetcode/docs/...'
-        elif path == "~":
-            return "~"
-        return shlex.quote(path)
 
     def run_preprocess(self, command: str, cwd: Path, multiline: bool = False) -> dict:
         """预处理型执行 — 给 Assembler 用
@@ -434,58 +422,6 @@ class Executor:
                 "timed_out": False,
                 "sandbox": False,
             }
-
-    # ---------------------------------------------------------- WSL 遗留接口（无调用方）
-    # wsl_read_file / wsl_write_file / _wsl_quote_path 已无任何调用方（全仓 grep 仅本文件
-    # 命中；文件读写统一走 read_file / write_file handler，shell=wsl 的通路只在 _run 里）。
-    # 保留而不删的原因：属于 Executor 的历史公开接口，外部（skill 脚本）可能直接引用；
-    # **新代码不要再使用** —— 它们是绕过唯一 spawn 门神的裸 subprocess.run，
-    # 既不进沙箱也不受超时/进程树清理/自排除护栏管辖。确认无外部依赖后建议整体删除。
-
-    def wsl_read_file(self, path: str) -> str:
-        """通过 WSL bash 读取文件（处理 WSL 绝对路径和 ~ 路径）
-        
-        Args:
-            path: WSL 路径（如 /home/andre/.leetcode/docs/题解.md 或 ~/.leetcode/...）
-            
-        Returns:
-            文件内容字符串
-            
-        Raises:
-            FileNotFoundError: 文件不存在
-        """
-        dest = self._wsl_quote_path(path)
-        result = subprocess.run(
-            ["wsl.exe", "bash", "-c", f"cat {dest}"],
-            capture_output=True, timeout=self.timeout,
-        )
-        if result.returncode != 0:
-            raise FileNotFoundError(f"WSL path not found: {path}")
-        return result.stdout.decode("utf-8", errors="replace")
-
-    def wsl_write_file(self, path: str, content: str) -> None:
-        """通过 WSL bash 写入文件（处理 WSL 绝对路径和 ~ 路径）
-        
-        Args:
-            path: WSL 路径（如 /home/andre/.leetcode/docs/题解.md 或 ~/.leetcode/...）
-            content: 文件内容
-            
-        Raises:
-            IOError: 写入失败
-        """
-        import base64, os
-        encoded = base64.b64encode(content.encode("utf-8")).decode()
-        dest = self._wsl_quote_path(path)
-        # 在 Python 端计算目录路径，避免 bash 中 $(dirname) 的单词分割问题
-        dir_path = self._wsl_quote_path(os.path.dirname(path))
-        cmd = f"mkdir -p {dir_path} && echo {encoded} | base64 -d > {dest}"
-        result = subprocess.run(
-            ["wsl.exe", "bash", "-c", cmd],
-            capture_output=True,
-            timeout=self.timeout,
-        )
-        if result.returncode != 0:
-            raise IOError(f"WSL write failed: {result.stderr.decode('utf-8', errors='replace')}")
 
     # ---------------------------------------------------------------- 沙箱
 

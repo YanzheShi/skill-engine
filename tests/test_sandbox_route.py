@@ -7,7 +7,9 @@ fail-closed 纪律：**沙箱该进却起不来时宁可不执行，也不能静
 ``tests/test_sandbox_integration.py`` —— 那个文件需要显式 opt-in。
 
 已知缺口（测试里显式钉住现状，改代码时这几条会红，提醒你同步决策）：
-- 脚本内删除（``python -c "shutil.rmtree(...)"`` / ``find . -delete``）不进 ASK；
+- 脚本**文件**里的删除（``python cleanup.py`` / ``bash cleanup.sh``）仍不进 ASK
+  —— ``decide_route`` 是纯函数（无 cwd、不做 I/O），读不到脚本体；内联代码
+  （``python -c "shutil.rmtree(...)"``）与 ``find . -delete`` 已于 2026-09-21 修复；
 - ``_CONTROL_OPS_RE`` 刻意不含单个 ``|``，只读管道直接裸跑。
 """
 
@@ -22,6 +24,7 @@ from skill_engine.security.sandbox import (
     ROUTE_DIRECT,
     ROUTE_SANDBOX,
     decide_route,
+    detect_script_level_delete,
 )
 
 
@@ -189,21 +192,102 @@ def test_default_is_sandbox(cmd):
     assert "默认进沙箱" in reason
 
 
-@pytest.mark.parametrize("cmd,expected", [
-    # 这两条比 P1 之前更差：原先被宿主守卫拦下，现在进沙箱 → 沙箱内硬删
-    ('python -c "import shutil; shutil.rmtree(\'build\')"', ROUTE_SANDBOX),
-    ("python cleanup.py", ROUTE_SANDBOX),
-    ("bash cleanup.sh", ROUTE_SANDBOX),
-    # 这条不算变差：裸跑时宿主守卫仍生效，只是没有审批、且白名单名不副实
-    ("find . -delete", ROUTE_DIRECT),
+@pytest.mark.parametrize("cmd", [
+    # 直调删除 API（-c 内联代码）
+    'python -c "import shutil; shutil.rmtree(\'build\')"',
+    'python -c "import os; os.remove(\'a.txt\')"',
+    'python -c "import os; os.unlink(\'a.txt\')"',
+    'python -c "import os; os.rmdir(\'d\')"',
+    'python -c "from pathlib import Path; Path(\'a.txt\').unlink()"',
+    # 裸名导入也要认（`from shutil import rmtree; rmtree(...)`）
+    "python -c \"from shutil import rmtree; rmtree('build')\"",
+    # 把删除外包给子进程
+    "python -c \"import os; os.system('rm -rf build')\"",
+    "python -c \"import subprocess; subprocess.run(['rm','-rf','build'])\"",
+    # 别名解释器同样门控
+    "python3 -c \"import shutil; shutil.rmtree('x')\"",
+    "py -3 -c \"import shutil; shutil.rmtree('x')\"",
 ])
-def test_script_level_delete_is_known_gap(cmd, expected):
-    """**已知缺口**：脚本内的删除等价物识别不了（本清单只认命令词）。
+def test_script_level_delete_requires_approval(cmd):
+    """脚本级删除（2026-09-21 修复）：内联代码里的删除等价物 → ASK。
 
-    精确修法见 ``security/sandbox.py`` 中 ``_DELETE_VERBS`` 上方的补丁说明。
-    若哪天采纳，把上表期望统一改成 ROUTE_ASK —— 这几条红就是提醒。
+    修之前这几条都路由到 SANDBOX，在沙箱内硬删、**绕过宿主回收站守卫**，
+    比不开沙箱更危险。
     """
-    assert decide_route(cmd)[0] == expected
+    route, reason = decide_route(cmd)
+    assert route == ROUTE_ASK, cmd
+    assert "删除等价物" in reason
+
+
+@pytest.mark.parametrize("cmd,expected", [
+    # 「只是提到删除字样」不能被误判 —— 这是「按首词门控到解释器」的全部理由
+    ('grep "os.remove" src/', ROUTE_DIRECT),
+    ("rg shutil.rmtree -g *.py", ROUTE_DIRECT),
+    # 解释器命令，但不含删除操作
+    ("python -c \"import os; print(os.path.join('a','b'))\"", ROUTE_SANDBOX),
+    ("python -c \"a=[1,2]; a.remove(1)\"", ROUTE_SANDBOX),   # list.remove ≠ 删文件
+    ("python -c \"import subprocess; subprocess.run(['ls'])\"", ROUTE_SANDBOX),
+    ("python script.py", ROUTE_SANDBOX),
+])
+def test_script_level_delete_does_not_overmatch(cmd, expected):
+    """收窄正则 + 首词门控：不能把「提到删除」当成「执行删除」。
+
+    裸 `remove(` 刻意不收（``a.remove(x)`` 太常见）；`grep "os.remove"` 这类
+    只读命令必须继续走 DIRECT，否则只读白名单会被噪声淹没。
+    """
+    assert decide_route(cmd)[0] == expected, cmd
+
+
+@pytest.mark.parametrize("cmd", [
+    "find . -delete",
+    'find . -name "*.tmp" -delete',
+])
+def test_find_delete_flag_requires_approval(cmd):
+    """`find` 在只读白名单里，但 `-delete` 本身就是删除 → ASK（不再是 DIRECT）。"""
+    route, reason = decide_route(cmd)
+    assert route == ROUTE_ASK, cmd
+    assert "-delete" in reason
+
+
+@pytest.mark.parametrize("cmd", [
+    "python cleanup.py",
+    "bash cleanup.sh",
+    "./cleanup.sh",
+])
+def test_script_file_delete_remains_known_gap(cmd):
+    """**残留缺口**：脚本**文件**里的删除仍识别不出来。
+
+    原因：``decide_route(command)`` 是纯函数，签名里没有 cwd、也不做任何
+    文件 I/O，读不到 ``cleanup.py`` / ``cleanup.sh`` 的内容。修它需要产品决策：
+    要么给 decide_route 加 cwd 并读脚本体（每条命令多一次磁盘 I/O + 触及
+    纯函数契约），要么把「执行任意脚本」整体降级为 ASK（噪声大、误伤重）。
+    当前由「bash 工具的执行前审批 + 用户看得到命令原文」兜底。
+    """
+    assert decide_route(cmd)[0] == ROUTE_SANDBOX, cmd
+
+
+# ------------------------------------------- 脚本级删除：run_python 专用（不做门控）
+
+@pytest.mark.parametrize("code", [
+    "import shutil; shutil.rmtree('build')",
+    "import os\nos.remove('a.txt')",
+    "from pathlib import Path\nPath('d').rmdir()",
+    "import os; os.system('rm -rf build')",
+])
+def test_detect_script_level_delete_on_bare_code(code):
+    """run_python 传进来的是**裸代码**，首词是 import/赋值 → decide_route 的
+    解释器门控一次都不命中，所以它必须调用这个不做门控的专用函数。
+    """
+    assert detect_script_level_delete(code)
+
+
+@pytest.mark.parametrize("code", [
+    "import os; print(os.path.join('a','b'))",
+    "a = [1,2]; a.remove(1)",
+    "import shutil  # 只是导入，没有调用",
+])
+def test_detect_script_level_delete_ignores_harmless_code(code):
+    assert detect_script_level_delete(code) is None
 
 
 # ---------------------------------------------------------------- fail-closed 语义
