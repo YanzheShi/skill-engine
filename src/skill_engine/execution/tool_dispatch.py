@@ -49,6 +49,7 @@ from skill_engine.execution.tool_exec.edit_patch import (  # noqa: F401
     _DIFF_MAX_LINES, _DIFF_MAX_CHARS, _DIFF_NEW_FILE_PREVIEW_LINES,
 )
 from skill_engine.execution.tool_exec.read_util import _read_file_with_lines  # noqa: F401
+from skill_engine.execution.tool_exec.truncate import truncate_middle
 from skill_engine.execution.tool_exec.search import (  # noqa: F401
     _format_match, _run_ripgrep, _python_search, _search_files,
     _RG_TIMEOUT, _SEARCH_DEFAULT_MAX, _SEARCH_MAX_CAP,
@@ -152,11 +153,13 @@ class ToolDispatchRunner:
     def _truncate_msg(self, content: str, max_chars: int = 30000) -> str:
         """Truncate tool result message content to prevent context overflow.
 
+        折叠策略：保头折中保尾（头部约 70% + 尾部约 30%），标注折叠量。
+        尾部信息（pytest summary、traceback 异常行、JSON 闭合结构）对模型
+        判断结果最关键，不能只保头。
+
         Full content is preserved in step_results for logging.
         """
-        if len(content) <= max_chars:
-            return content
-        return content[:max_chars] + f"\n...(truncated, {len(content)} chars total, showing first {max_chars})"
+        return truncate_middle(content, max_chars, label="tool result")
 
     # ---- 用户态执行轨迹：语义化输出 ----
     # 统一经 human_io 的 emit_* 语义通道；human_io 为 None（非交互/Web）或

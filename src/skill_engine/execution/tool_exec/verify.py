@@ -7,6 +7,8 @@
 
 from pathlib import Path
 
+from skill_engine.execution.tool_exec.truncate import truncate_middle
+
 
 def _extract_test_failures(output: str) -> list:
     """从 pytest 风格输出中提取 FAILED/ERROR 清单行（上限 20 条）。"""
@@ -39,12 +41,10 @@ def _run_verification(executor, base_dir: Path, verify_command: str, timeout: in
         lines.extend(f"  {x}" for x in fails)
     err = (r.get("stderr") or "").strip()
     if err:
-        # 验证失败 stderr 不静默截断，超长时标注截断量
-        if len(err) > 8000:
-            lines.append("stderr:\n" + err[:8000] + f"\n... (stderr 已截断，原长 {len(err)} 字符)")
-        else:
-            lines.append("stderr:\n" + err)
+        # 验证失败 stderr 超长时保头折中保尾并标注折叠量（异常行在尾部，不能只保头）
+        lines.append("stderr:\n" + truncate_middle(err, 8000, label="stderr"))
     out = (r.get("stdout") or "").strip()
     if out:
         lines.append("stdout(尾部):\n" + out[-1500:])
-    return "\n".join(lines)[:4000]
+    # 整体兜底：保头折中保尾并标注，不做静默硬切
+    return truncate_middle("\n".join(lines), 4000, label="verification feedback")

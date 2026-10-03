@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from skill_engine.execution.paths import to_native_path
+from skill_engine.execution.tool_exec.truncate import truncate_middle
 
 
 # ---------------------------------------------------------------------------
@@ -110,21 +111,17 @@ def format_observation(cmd: str, exec_result: dict, sandbox=None) -> str:
             )
     if stdout:
         lines.append("stdout:")
-        if len(stdout) > 8000:
-            lines.append(stdout[:8000] + f"\n... (stdout 已截断，原长 {len(stdout)} 字符)")
-        else:
-            lines.append(stdout)
+        lines.append(truncate_middle(stdout, 8000, label="stdout"))
     if stderr:
         lines.append("stderr:")
-        # stderr 不静默截断：完整回灌，仅在超长时截断并明确标注截断量，让模型能看到真实报错。
-        if len(stderr) > 8000:
-            lines.append(stderr[:8000] + f"\n... (stderr 已截断，原长 {len(stderr)} 字符)")
-        else:
-            lines.append(stderr)
+        # stderr 不静默截断：超长时保头折中保尾并标注折叠量，
+        # 让模型既能看到报错开头也能看到最后的异常行。
+        lines.append(truncate_middle(stderr, 8000, label="stderr"))
     hint = _diagnose_shell_error(stderr)
     if hint:
         lines.append(f"hint: {hint}")
-    return "\n".join(lines)[:20000]
+    # 整体兜底：同样保头折中保尾并标注，不做静默硬切
+    return truncate_middle("\n".join(lines), 20000, label="observation")
 
 
 # stderr 特征 -> 可执行的纠正提示。命中即在 observation 里补一行 hint，
