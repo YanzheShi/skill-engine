@@ -167,3 +167,99 @@ def test_run_merges_mcp_tools_into_bind_tools(tmp_path, monkeypatch):
     names = {t.name for t in captured["tools"]}
     assert "echo_tool" in names, f"MCP 工具未并入 bind_tools: {names}"
     assert "bash" in names and "read_file" in names, "内建工具应仍在"
+
+
+# --------------------------- 连接超时（防半死 server 忙等） ---------------------------
+# 背景（2026-10-04）：load_mcp_tools 曾对 get_tools() 裸跑 asyncio.run，无任何超时。
+# server 端口没人听会快速失败（refused），但「端口通、却不响应 MCP 握手」的半死
+# server（假死 hub / 代理黑洞）会把 asyncio.run **永久挂起**，连 warning 都打不出。
+# 修复后统一走 asyncio.wait_for(MCP_CONNECT_TIMEOUT_S)。
+
+import socket as _socket
+import threading as _threading
+import time as _time
+
+
+def _accept_loop(srv, n=5):
+    """accept n 个连接后静默退出；teardown 关 socket 时容错，不炸线程。"""
+    for _ in range(n):
+        try:
+            srv.accept()
+        except OSError:
+            return
+
+
+@pytest.fixture
+def dead_http_server():
+    """起一个只 listen+accept、永不回 MCP 握手的假 server，模拟半死 hub。"""
+    srv = _socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(5)
+    port = srv.getsockname()[1]
+    t = _threading.Thread(target=_accept_loop, args=(srv,), daemon=True)
+    t.start()
+    yield f"http://127.0.0.1:{port}/mcp"
+    srv.close()
+
+
+def test_load_mcp_tools_refused_server_is_fast():
+    """server 端口没人听：快速失败降级，返回 [] 且不抛异常。"""
+    from skill_engine.execution.mcp_client import load_mcp_tools
+
+    t0 = _time.monotonic()
+    tools = load_mcp_tools(
+        ["dead"],
+        config={"dead": {"url": "http://127.0.0.1:1/mcp", "transport": "streamable_http"}},
+    )
+    assert tools == []
+    assert _time.monotonic() - t0 < 10, "connection refused 应秒级降级，不应长时间阻塞"
+
+
+def test_load_mcp_tools_dead_server_times_out(monkeypatch, dead_http_server):
+    """半死 server：30s 兜底超时生效，不永久挂起（改前此用例会挂死整个测试）。"""
+    from skill_engine.execution import mcp_client
+    from skill_engine.execution.mcp_client import load_mcp_tools
+
+    monkeypatch.setattr(mcp_client, "MCP_CONNECT_TIMEOUT_S", 1)
+    t0 = _time.monotonic()
+    tools = load_mcp_tools(
+        ["dead"],
+        config={"dead": {"url": dead_http_server, "transport": "streamable_http"}},
+    )
+    elapsed = _time.monotonic() - t0
+    assert tools == []
+    assert elapsed < 15, f"1s 超时应很快返回，实际 {elapsed:.1f}s"
+
+
+def test_load_mcp_tools_timeout_is_isolated(monkeypatch, dead_http_server):
+    """单点失败隔离：同批 server 里假死的那个超时降级，不影响其他 server 加载。"""
+    from skill_engine.execution import mcp_client
+    from skill_engine.execution.mcp_client import load_mcp_tools
+
+    # 注意：不能给 1s——stdio mock 冷启动（spawn 子进程 + JSON-RPC 握手）
+    # 在 Windows 上就要 >1s，会被误掐；8s 对假死 server 也够快。
+    monkeypatch.setattr(mcp_client, "MCP_CONNECT_TIMEOUT_S", 8)
+    config = {
+        "dead": {"url": dead_http_server, "transport": "streamable_http"},
+        "mock": {"command": sys.executable, "args": [str(MOCK_SERVER)], "transport": "stdio"},
+    }
+    tools = load_mcp_tools(["dead", "mock"], config=config)
+    assert tools, "假死 server 超时不应影响 mock stdio server 的工具加载"
+    assert all(t.name for t in tools)
+
+
+def test_load_mcp_tools_timeout_warns(monkeypatch, dead_http_server, caplog):
+    """超时降级必须打 warning（观测口径：silent hang 不可接受）。"""
+    import logging
+    from skill_engine.execution import mcp_client
+    from skill_engine.execution.mcp_client import load_mcp_tools
+
+    monkeypatch.setattr(mcp_client, "MCP_CONNECT_TIMEOUT_S", 1)
+    with caplog.at_level(logging.WARNING, logger="skill_engine.mcp_client"):
+        tools = load_mcp_tools(
+            ["dead"],
+            config={"dead": {"url": dead_http_server, "transport": "streamable_http"}},
+        )
+    assert tools == []
+    assert any("dead" in r.getMessage() for r in caplog.records), \
+        "超时降级应打出含 server 名的 warning"

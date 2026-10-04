@@ -22,6 +22,11 @@ from typing import Optional, Any
 
 logger = logging.getLogger("skill_engine.mcp_client")
 
+# 连接/握手超时（秒）：防止半死 server（端口通、但不响应 MCP 握手）把
+# asyncio.run 挂死。30s 宽松值给 uvx 首次冷启动拉包留余量；
+# 测试可 monkeypatch 本常量缩短（见 tests/test_mcp_integration.py）。
+MCP_CONNECT_TIMEOUT_S = 30
+
 from langchain_core.tools import BaseTool
 
 
@@ -184,6 +189,8 @@ def load_mcp_tools(server_names: list[str], config: Optional[dict] = None) -> li
     Returns:
         合并后的 BaseTool 列表（空列表表示无可用 MCP 工具）。
     """
+
+
     if not server_names:
         return []
     if config is None:
@@ -195,6 +202,8 @@ def load_mcp_tools(server_names: list[str], config: Optional[dict] = None) -> li
 
     # lazy import：仅在真正用到 MCP 时才引入 langchain_mcp_adapters，避免拖慢普通路径
     from langchain_mcp_adapters.client import MultiServerMCPClient
+    async def _get():
+        return await client.get_tools()
 
     tools: list = []
     for name in server_names:
@@ -212,7 +221,8 @@ def load_mcp_tools(server_names: list[str], config: Optional[dict] = None) -> li
         try:
             # 逐个 server 连接：单点失败隔离，不影响其他 server 与后续执行
             client = MultiServerMCPClient({name: conn})
-            server_tools = _run_async(client.get_tools())
+            # 增加超时时间， 防止mcp出现故障忙等
+            server_tools = _run_async(asyncio.wait_for(_get(), timeout=MCP_CONNECT_TIMEOUT_S))
             if server_tools:
                 # 包装为同步可调用工具：MCP 工具原生 async-only，经 _SyncMCPTool
                 # 包装后，tool_dispatch 的通用 .invoke 分支即可直接调用（核心零改动）。
