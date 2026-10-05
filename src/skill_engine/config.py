@@ -143,6 +143,7 @@ _SETTINGS_ENV_MAP = {
     "allowlist": "SKILLS_ENGINE_ALLOWLIST",
     "context_budget": "SKILLS_ENGINE_CONTEXT_BUDGET",
     "llm_call_interval": "SKILLS_ENGINE_LLM_CALL_INTERVAL",
+    "loop_guard_limit": "SKILLS_ENGINE_LOOP_GUARD_LIMIT",
     "mcp_config": "SKILL_ENGINE_MCP_CONFIG",
     "mcp_hub_token": "MCP_HUB_TOKEN",
     "tavily_api_key": "TAVILY_API_KEY",

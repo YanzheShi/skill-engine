@@ -171,7 +171,11 @@ class TestToolDispatchLoop:
         assert "hello" in result["output"]
 
     def test_loop_max_iterations(self, runner):
-        """循环达到最大迭代次数后停止"""
+        """循环达到最大迭代次数后停止
+
+        LLM 交替返回不同参数的 bash 调用（指纹各不相同），loop guard 不触发，
+        烧满 max_iterations 停止。相同参数死循环提前中断见 test_loop_guard_stop。
+        """
         from skill_engine.models import Skill, SkillMetadata, MatchResult
 
         skill = Skill(
@@ -186,17 +190,50 @@ class TestToolDispatchLoop:
             arguments={},
         )
 
-        # LLM 每次都返回 bash tool_call（模拟无限循环）
+        # LLM 每次返回不同参数的 bash tool_call（避免触发 loop guard）
         llm = MockLLMWithTools([
             {"content": "", "tool_calls": [
-                {"id": "call_1", "type": "bash", "input": {"command": "echo 1"}}
-            ]},
-        ] * 10)  # 10 次
+                {"id": f"call_{i}", "type": "bash", "input": {"command": f"echo 1_{i}"}}
+            ]} for i in range(10)
+        ])
 
         result = runner._run_tool_dispatch(match, llm, max_iterations=3)
 
         assert result["iterations"] == 3
         assert result["stopped_by"] == "max_iterations"
+
+    def test_loop_guard_stop(self, runner):
+        """连续相同参数的 tool call → loop guard 提前中断
+
+        同一命令（指纹相同）连续 3 轮 → stopped_by="loop_detected"，
+        不再烧满 max_iterations。
+        """
+        from skill_engine.models import Skill, SkillMetadata, MatchResult
+
+        skill = Skill(
+            metadata=SkillMetadata(name="test", description="测试"),
+            body="测试",
+            directory="/tmp",
+        )
+        match = MatchResult(
+            skill=skill,
+            score=1.0,
+            method="name",
+            arguments={},
+        )
+
+        # LLM 每次都返回完全相同的 bash tool_call（模拟死循环）
+        llm = MockLLMWithTools([
+            {"content": "", "tool_calls": [
+                {"id": f"call_{i}", "type": "bash", "input": {"command": "echo 1"}}
+            ]} for i in range(10)
+        ])
+
+        result = runner._run_tool_dispatch(match, llm, max_iterations=10)
+
+        assert result["stopped_by"] == "loop_detected"
+        assert result["iterations"] == 3
+        assert "死循环" in result["output"]
 
     def test_loop_error_recovery(self, runner):
         """循环中命令执行失败，LLM 继续"""

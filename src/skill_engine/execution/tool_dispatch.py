@@ -56,6 +56,9 @@ from skill_engine.execution.tool_exec.search import (  # noqa: F401
 )
 from skill_engine.execution.tool_exec.verify import _extract_test_failures, _run_verification
 from skill_engine.execution.tool_exec.context import ToolContext, LoopState
+from skill_engine.execution.tool_exec.loop_guard import (
+    LoopGuard, tool_call_fingerprint, loop_feedback_message, loop_stop_message,
+)
 from skill_engine.execution.tool_exec.result import ToolResult
 from skill_engine.execution.tool_exec.io_sched import IoScheduler, _IO_MAX_WORKERS  # noqa: F401
 from skill_engine.execution.tool_exec.registry import build_builtin_handlers
@@ -519,6 +522,8 @@ class ToolDispatchRunner:
             emit_result=self._emit_result,
         )
         scheduler = IoScheduler({n: h for n, h in handlers.items() if h.batchable})
+        # 参数调用指纹环检测（单次 run 内；详见 tool_exec/loop_guard.py）
+        loop_guard = LoopGuard()
 
         result = None
         # 执行开始标题头（语义通道；无 human_io 时静默——Web 端/测试回退默认实现）
@@ -648,6 +653,21 @@ class ToolDispatchRunner:
                             input=truncate(str(tc.get("input", "")), 1000),
                         )
 
+                # 参数调用指纹环检测：连续同指纹轮数超限 → 硬停；接近超限 → 软警告
+                # （软警告消息在轮末工具执行完毕后追加，硬停则本轮工具不执行）
+                guard_action, guard_info = loop_guard.feed_round(
+                    [(tool_call_fingerprint(tc["type"], tc.get("input")), tc["type"])
+                     for tc in tool_calls])
+                if guard_action == "stop":
+                    _gt, _gs = guard_info["tool"], guard_info["streak"]
+                    if self.tracer and self.tracer.enabled():
+                        self.tracer.event("loop_detected", tool=_gt, streak=_gs)
+                    print(f"     LOOP DETECTED → {_gt} 连续 {_gs} 轮相同参数，强制中断")
+                    return self._finish_result(
+                        loop_stop_message(_gt, _gs), "loop_detected",
+                        step_results, files_created,
+                        skill.metadata.name, iterations, messages)
+
                 if not tool_calls:
                     text = resp.get("content", "")
                     messages.append({"role": "assistant", "content": text})
@@ -750,6 +770,17 @@ class ToolDispatchRunner:
                 # 收尾：flush 批内剩余的 IO 结果（工具消息顺序与 tool_calls 对齐）
                 scheduler.flush(tctx, messages, step_results, files_created,
                                 self._apply_result)
+
+                # 软警告：本轮工具已执行完毕，向 messages 追加持久反馈（区别于
+                # _progress_hint 的临时注入——循环警告需要模型下一轮真正看到），
+                # 下一轮 invoke 前 maybe_compress 之前插入，保证不被当轮压缩吞掉。
+                if guard_action == "warn":
+                    _gt, _gs = guard_info["tool"], guard_info["streak"]
+                    messages.append({"role": "user",
+                                     "content": loop_feedback_message(_gt, _gs)})
+                    if self.tracer and self.tracer.enabled():
+                        self.tracer.event("loop_warn", tool=_gt, streak=_gs)
+                    print(f"     LOOP WARNING → {_gt} 已连续 {_gs} 轮相同参数，反馈已注入")
 
                 # 上下文压缩在轮末：本轮全部工具结果已追加完毕、即将进入下一轮
                 # invoke——轮首压缩的旧实现压缩对象滞后一轮，且压缩抢在 LLM

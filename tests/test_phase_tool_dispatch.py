@@ -259,7 +259,11 @@ class TestToolDispatchWithMock:
         assert "done" in result["output"]
 
     def test_mock_max_iterations(self, runner):
-        """Mock：达到最大迭代次数"""
+        """Mock：达到最大迭代次数
+
+        LLM 交替返回不同参数的 bash 调用（指纹各不相同），loop guard 不触发，
+        烧满 max_iterations 停止。相同参数的死循环场景见 test_mock_loop_guard_stop。
+        """
         from skill_engine.models import Skill, SkillMetadata, MatchResult
 
         skill = Skill(
@@ -276,13 +280,44 @@ class TestToolDispatchWithMock:
 
         llm = MockLLMWithToolCalls([
             {"content": "", "tool_calls": [
-                {"id": "call_1", "type": "bash", "input": {"command": "echo loop"}}
-            ]},
-        ] * 10)
+                {"id": f"call_{i}", "type": "bash", "input": {"command": f"echo loop_{i}"}}
+            ]} for i in range(10)
+        ])
 
         result = runner.run(match, tool_dispatch=llm, max_iterations=3)
         assert result["stopped_by"] == "max_iterations"
         assert result["iterations"] == 3
+
+    def test_mock_loop_guard_stop(self, runner):
+        """Mock：连续相同参数的 tool call 触发 loop guard 提前中断
+
+        同一命令（指纹相同）连续 3 轮 → stopped_by="loop_detected"，
+        不再烧满 max_iterations（loop guard 语义变更后的行为）。
+        """
+        from skill_engine.models import Skill, SkillMetadata, MatchResult
+
+        skill = Skill(
+            metadata=SkillMetadata(name="test", description="测试"),
+            body="测试",
+            directory="/tmp",
+        )
+        match = MatchResult(
+            skill=skill,
+            score=1.0,
+            method="name",
+            arguments={},
+        )
+
+        llm = MockLLMWithToolCalls([
+            {"content": "", "tool_calls": [
+                {"id": f"call_{i}", "type": "bash", "input": {"command": "echo loop"}}
+            ]} for i in range(10)
+        ])
+
+        result = runner.run(match, tool_dispatch=llm, max_iterations=10)
+        assert result["stopped_by"] == "loop_detected"
+        assert result["iterations"] == 3
+        assert "死循环" in result["output"]
 
     def test_mock_file_created_tracking(self, runner, tmp_path):
         """Mock：write_file 后 files_created 列表被正确记录"""

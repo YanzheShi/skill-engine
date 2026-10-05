@@ -905,7 +905,7 @@ class Runner:
             stopped = result.get("stopped_by")
             if stopped in ("error", "no_match", "load_failed"):
                 return result
-            if stopped in ("max_iterations", "rate_limited"):
+            if stopped in ("max_iterations", "rate_limited", "loop_detected"):
                 print(f"[session] 本轮因 {stopped} 中断，但会话仍在继续。输入新指令继续，/exit 退出。")
             # session_turn_end / tool_stop / max_iterations / rate_limited → 继续等待下条指令
             continue
