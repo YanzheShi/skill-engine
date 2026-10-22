@@ -24,11 +24,11 @@ def _progress_hint(iterations: int, max_iterations: int, step_results: "list|Non
         if not has_write and iterations >= max_iterations // 3:
             extra = " 你已用尽探索预算却尚未开始编辑任何文件——请立即总结已发现信息、输出改动计划并转入执行阶段；若信息不足，用一句话说明缺什么后做一次定向搜索补全。"
     if remaining <= 3:
-        urgency = "⚠️ 预算即将耗尽：请立即停止发起新工具调用，用当前已有信息输出最终总结或调用 stop。"
+        urgency = "⚠️ 预算即将耗尽：请立即停止发起新工具调用，先把完整结论写进正文，再调用 stop。"
     elif iterations >= max_iterations // 2:
-        urgency = "请尽快收敛：完成判定满足即调用 stop 并给总结，禁止在已完成时继续探索。"
+        urgency = "请尽快收敛：完成判定满足即先写完整结论、再调用 stop，禁止在已完成时继续探索。"
     else:
-        urgency = "请在剩余步数内收敛：完成判定满足即调用 stop 并给总结，避免无关探索。"
+        urgency = "请在剩余步数内收敛：完成判定满足即先写完整结论、再调用 stop，避免无关探索。"
     return (
         f"[进度] 已用 {iterations} / 上限 {max_iterations} 步（剩余 {remaining}，已用 {pct}%）。"
         f"{urgency}{extra}"

@@ -628,7 +628,9 @@ class ToolDispatchRunner:
                 # 两者皆空 → 该模型在调工具时不输出思考（如 DeepSeek-v4-flash），属正常现象，
                 # 无内容可展示。仅在有 tool_calls 时 emit，避免与最终回答（无 tool_calls 的
                 # content）重复打印。
-                thinking = resp.get("reasoning") or resp.get("content", "")
+                # stop 轮的 content 是最终结论（见下方 stop 分支），不能再当思考打一遍。
+                stop_requested = any(tc["type"] == "stop" for tc in tool_calls)
+                thinking = resp.get("reasoning") or ("" if stop_requested else resp.get("content", ""))
                 if thinking and tool_calls:
                     self._emit_thinking(thinking)
 
@@ -732,7 +734,7 @@ class ToolDispatchRunner:
                 })
 
                 tctx.loop = LoopState()  # 每轮重置循环态
-                for tc in tool_calls:
+                for idx, tc in enumerate(tool_calls):
                     # 可并行批工具（read/search）入批；遇到串行工具先 flush，
                     # 保证工具消息严格按 tool_calls 顺序回灌（OpenAI 协议要求）。
                     if scheduler.feed(tc):
@@ -745,9 +747,24 @@ class ToolDispatchRunner:
                     else:
                         t_result = ToolResult.unknown(tc)
                     if t_result.stop:
-                        # stop 工具：原行为不追加任何 tool message，直接终止
+                        # stop 是终止信号：同一轮 assistant 正文才是给用户的最终结论，
+                        # reason 仅在正文为空时兜底。补一条 tool message 回灌，避免
+                        # history 留下悬空 tool_call（session 续轮时会被 API 拒绝）。
+                        self._apply_result(
+                            ToolResult(tool_call_id=tc["id"], name="stop",
+                                       content=t_result.stop_reason),
+                            tctx, messages, step_results, files_created)
+                        # 同轮排在 stop 之后的调用不会再执行，但仍需占位响应，
+                        # 否则那些 tool_call 同样悬空。
+                        for rest in tool_calls[idx + 1:]:
+                            messages.append({
+                                "role": "tool", "tool_call_id": rest["id"],
+                                "name": rest["type"],
+                                "content": "已跳过：本轮已由 stop 终止",
+                            })
+                        final_text = (resp.get("content") or "").strip()
                         return self._finish_result(
-                            t_result.stop_reason, "tool_stop", step_results,
+                            final_text or t_result.stop_reason, "tool_stop", step_results,
                             files_created, skill.metadata.name, iterations, messages)
                     self._apply_result(t_result, tctx, messages, step_results, files_created)
                     if t_result.hard_stop:

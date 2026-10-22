@@ -199,8 +199,13 @@ def stop(reason: str = "finished") -> str:
     Call this when you have finished all work (reading, editing, verifying).
     Do NOT call this if you need to ask the user a question first.
 
+    Write your full final answer in the assistant message content of the SAME
+    turn as this call: stop ends the turn immediately, so there is no next turn
+    in which to deliver it. `reason` is only a one-line summary and is used as
+    the output solely when that content is empty.
+
     Args:
-        reason: Brief description of what was accomplished.
+        reason: One-line summary of what was accomplished.
     """
 
 

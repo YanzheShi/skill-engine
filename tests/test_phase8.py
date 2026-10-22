@@ -348,6 +348,33 @@ class TestToolDispatchLoop:
         assert result["stopped_by"] == "tool_stop"
         assert "任务完成" in result["output"]
 
+    def test_loop_tool_stop_prefers_content_and_backfills_tool_messages(self, runner):
+        """stop 同轮的正文是最终结论；reason 仅兜底，且每个 tool_call 都有配对响应"""
+        from skill_engine.models import Skill, SkillMetadata, MatchResult
+
+        skill = Skill(
+            metadata=SkillMetadata(name="test", description="测试"),
+            body="测试",
+            directory="/tmp",
+        )
+        match = MatchResult(skill=skill, score=1.0, method="name", arguments={})
+
+        llm = MockLLMWithTools([
+            {"content": "三处 API key 泄露：a.py:3、b.py:9、c.py:12。",
+             "tool_calls": [
+                 {"id": "call_1", "type": "stop", "input": {"reason": "排查完成"}},
+                 {"id": "call_2", "type": "read_file", "input": {"path": "a.py"}},
+             ]},
+        ])
+
+        result = runner._run_tool_dispatch(match, llm, max_iterations=5)
+
+        assert result["stopped_by"] == "tool_stop"
+        assert result["output"] == "三处 API key 泄露：a.py:3、b.py:9、c.py:12。"
+        tool_msgs = [m for m in result["history"] if m.get("role") == "tool"]
+        assert [m["tool_call_id"] for m in tool_msgs] == ["call_1", "call_2"]
+        assert all(m["content"] for m in tool_msgs)
+
 
 class TestToolDispatchIntegration:
     """端到端：Runner 调用 tool_dispatch"""

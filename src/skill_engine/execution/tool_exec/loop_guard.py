@@ -153,7 +153,7 @@ def loop_feedback_message(tool: str, streak: int) -> str:
     return (
         f"[loop warning] 检测到你已连续 {streak} 轮以**完全相同的参数**调用 {tool}，"
         f"结果不会因此改变。请立即改变策略：调整参数、换用其它工具，或基于已有结果"
-        f"输出总结/调用 stop。继续原样重试将被强制中断。"
+        f"先写完整结论、再调用 stop。继续原样重试将被强制中断。"
     )
 
 
