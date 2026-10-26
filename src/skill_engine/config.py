@@ -31,7 +31,6 @@ config.yml 结构：
 import os
 import re
 from pathlib import Path
-from typing import Optional
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 
@@ -466,7 +465,7 @@ def _apply_max_tokens(cfg: dict) -> None:
         cfg["max_tokens"] = mt
 
 
-DEFAULT_LLM_TEMPERATURE: Optional[float] = None
+DEFAULT_LLM_TEMPERATURE: float | None = None
 """默认采样温度。None = 不下发该参数（沿用供应商默认）。
 
 只在需要确定性复现（A/B 基准）时才显式设置：settings.llm_temperature /
@@ -474,7 +473,7 @@ SKILLS_ENGINE_LLM_TEMPERATURE=0。生产路径保持 None，避免把对话调�
 """
 
 
-def llm_temperature() -> Optional[float]:
+def llm_temperature() -> float | None:
     """采样温度：环境变量优先；空/非法 → None（不下发）。"""
     raw = os.environ.get("SKILLS_ENGINE_LLM_TEMPERATURE", "").strip()
     if raw == "":

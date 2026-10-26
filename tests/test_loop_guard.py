@@ -5,15 +5,18 @@
 - LoopGuard 状态机：连续计数、缺席清零、软警告一次性、只读放宽、阈值覆盖
 """
 
-import importlib
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from skill_engine.execution.tool_exec.loop_guard import (  # noqa: E402
-    LoopGuard, tool_call_fingerprint, loop_feedback_message, loop_stop_message,
-    _DEFAULT_STOP_LIMIT, _READONLY_STOP_LIMIT,
+from skill_engine.execution.tool_exec.loop_guard import (
+    _DEFAULT_STOP_LIMIT,
+    _READONLY_STOP_LIMIT,
+    LoopGuard,
+    loop_feedback_message,
+    loop_stop_message,
+    tool_call_fingerprint,
 )
 
 
