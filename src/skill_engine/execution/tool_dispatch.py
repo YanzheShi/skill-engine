@@ -286,6 +286,14 @@ class ToolDispatchRunner:
         if self._is_trusted_path(Path(filepath)):
             print(f"     [diff 预览] {op} → {filepath}（工作目录内，自动放行）")
             return True
+        # auto_approve=all 是用户对"不要逐项阻塞确认"的显式声明，与 bash 审批同一个开关。
+        # 此前只有 bash 路径认这个开关，编辑门不认 —— 实测造成 10 次阻塞确认、占墙钟 36%。
+        # 这里仍打印 diff（事后可见），只是不再等待输入。
+        auto_approve = os.environ.get("SKILLS_ENGINE_AUTO_APPROVE", "").strip().lower()
+        if auto_approve == "all":
+            print(f"     [diff 预览] {op} → {filepath}（auto_approve=all，自动放行）")
+            print(diff_text)
+            return True
         if mode == "batch" and filepath in self._file_edit_approvals:
             print(f"     [diff 预览] {op} → {filepath}（本会话已批准该文件，自动放行）")
             print(diff_text)
@@ -447,6 +455,16 @@ class ToolDispatchRunner:
             if not self._model_has_vision:
                 tools = [t for t in tools if t.name not in ("view_image", "shot_web")]
             llm_with_tools = llm.bind_tools(tools)
+
+            # 沙箱准备是一次性成本（实测大根目录下 514s），且发生在第一条沙箱命令的
+            # Executor 超时计时之外。在首轮 LLM 生成之前后台点火，让准备与生成重叠。
+            # 只在本技能真能执行命令时预热：纯文本/只读技能不该在后台付一次 ACL 准备。
+            # 失败静默；真正需要时 _wrap_sandbox 会再 ensure_ready 一次（自带锁）。
+            if any(getattr(t, "name", "") in ("bash", "run_python") for t in tools):
+                try:
+                    self.executor.prewarm_sandbox(base_dir)
+                except Exception as e:  # noqa: BLE001 — 预热只是优化，不能影响主流程
+                    logger.debug("沙箱预热点火失败（忽略）: %s", e)
         else:
             llm_with_tools = llm
 
@@ -598,6 +616,19 @@ class ToolDispatchRunner:
                 # 移除本轮临时预算进度提示，避免残留进 history / 压缩 / 续跑。
                 _pop_progress_hint(messages)
 
+                # 诊断埋点：finish_reason 是"输出被 max_tokens 截断"的唯一可靠信号。
+                # 此前引擎从不读它 —— 1.1 万字符的整文件写入被截断后仍判成功，
+                # 模型只能反复重发（实测 5 次、545s）。这里先落到 trace，供 A/B 度量。
+                _rm = getattr(resp, "response_metadata", None)
+                _rm = _rm if isinstance(_rm, dict) else {}
+                _tu = _rm.get("token_usage") or _rm.get("usage") or {}
+                _tu = _tu if isinstance(_tu, dict) else {}
+                _finish_reason = _rm.get("finish_reason", "")
+                _completion_tokens = (_tu.get("completion_tokens")
+                                      or _tu.get("output_tokens") or 0)
+                _prompt_tokens = (_tu.get("prompt_tokens")
+                                  or _tu.get("input_tokens") or 0)
+
                 # 标准化 LLM 响应为 dict（兼容 LangChain AIMessage）。
                 # 关键：保留推理字段 reasoning_content —— 推理模型（DeepSeek-R1 /
                 # V4-thinking / Qwen-thinking 等）把"思考过程"吐在的独立字段，
@@ -644,6 +675,9 @@ class ToolDispatchRunner:
                         content_len=len(resp.get("content", "") or ""),
                         reasoning_len=len(resp.get("reasoning", "") or ""),
                         tool_calls=[tc.get("type") for tc in tool_calls],
+                        finish_reason=_finish_reason,
+                        completion_tokens=_completion_tokens,
+                        prompt_tokens=_prompt_tokens,
                     )
                 for tc in tool_calls:
                     self._emit_tool(tc['type'], str(tc['input']))

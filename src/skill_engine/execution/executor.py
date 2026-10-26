@@ -36,6 +36,8 @@ import locale
 import shlex
 import signal
 import logging
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -124,6 +126,11 @@ class Executor:
         # （bash 工具按路由传 True 会绕过默认值，导致单测付 10s 会话准备成本）。
         self._sandbox_forced_off = bool(self._sandbox_cfg.get("forced_off_by_test_env"))
         self._sandbox_mgr = None
+        # 会话级沙箱准备的耗时（毫秒）。0 = 还没付过。暴露给 trace 用，
+        # 否则这段时间在日志里完全不可见（实测单次可达 514s，被误读成"命令慢"）。
+        self.sandbox_setup_ms = 0
+        self._sandbox_prewarm_started = False
+        self._sandbox_prewarm_lock = threading.Lock()
         self._sandbox_warned = False
 
     @staticmethod
@@ -425,6 +432,63 @@ class Executor:
 
     # ---------------------------------------------------------------- 沙箱
 
+    def _get_sandbox_mgr(self, cwd):
+        """取（或惰性创建）本会话的 SandboxManager。不触发 ensure_ready。"""
+        from skill_engine.security.sandbox import SandboxManager
+
+        if self._sandbox_mgr is None:
+            self._sandbox_mgr = SandboxManager.get(
+                cwd,
+                deny_read=self._sandbox_cfg.get("deny_read") or [],
+                grant_read=self._sandbox_cfg.get("grant_read") or [],
+                srt_bin=self._sandbox_cfg.get("srt_bin") or None,
+                env_passthrough=self._sandbox_cfg.get("env_passthrough") or [],
+            )
+        return self._sandbox_mgr
+
+    def prewarm_sandbox(self, cwd) -> bool:
+        """在后台线程里预热点火沙箱的会话级准备。
+
+        为什么需要：``SandboxManager.ensure_ready()`` 是惰性的，但它的成本完全
+        落在第一次进沙箱的那条命令上——实测在 ``C:\\Users\\Andre`` 这种大根目录
+        下耗时 514s，而这条命令本身的 Executor 超时只有 30s。命令并没有慢，是
+        准备动作挡住了它。
+
+        预热把它挪到首轮 LLM 生成期间并行跑（``ensure_ready`` 自带锁，真正的
+        首次调用会等同一把锁，不会重复付成本）。失败静默：预热只是优化。
+
+        Returns:
+            True = 本次真的启动了预热线程；False = 未启用/不支持/已预热过。
+        """
+        if not self.sandbox_enabled or self._sandbox_forced_off:
+            return False
+        if os.environ.get("SKILLS_ENGINE_SANDBOX_PREWARM", "").strip().lower() in (
+                "0", "false", "no", "off", "disable"):
+            return False
+        if self.shell not in ("cmd", "bash"):
+            return False  # 该 shell 形态没有 srt 启动路径，预热无意义
+        with self._sandbox_prewarm_lock:
+            if self._sandbox_prewarm_started:
+                return False
+            self._sandbox_prewarm_started = True
+
+        def _run():
+            t0 = time.perf_counter()
+            try:
+                mgr = self._get_sandbox_mgr(cwd)
+                ok = mgr.ensure_ready()
+                self.sandbox_setup_ms = int((time.perf_counter() - t0) * 1000)
+                if ok:
+                    logging.getLogger(__name__).info(
+                        "sandbox prewarm done in %sms", self.sandbox_setup_ms
+                    )
+            except Exception as e:  # noqa: BLE001 — 预热失败绝不影响主流程
+                logging.getLogger(__name__).debug(
+                    "sandbox prewarm failed (ignored): %s", e)
+
+        threading.Thread(target=_run, name="sandbox-prewarm", daemon=True).start()
+        return True
+
     def _wrap_sandbox(self, command: str, cwd: Path, env: dict):
         """把命令包装成 srt 沙箱 argv。
 
@@ -433,8 +497,6 @@ class Executor:
             (None, err)     —— fail-closed：srt 可用但本次包装/准备失败，调用方拒绝执行
             (None, "")      —— 后端整体不可用且 ``on_unavailable=warn``，已告警，按裸跑继续
         """
-        from skill_engine.security.sandbox import SandboxManager
-
         if self.shell not in ("cmd", "bash"):
             # WSL 形态没有对应的 srt 启动路径；属「后端不支持」而非「命令失败」
             reason = f"shell={self.shell!r} 不支持沙箱（srt-win 只能启动 cmd/bash）"
@@ -444,21 +506,15 @@ class Executor:
             return None, ""
 
         try:
-            if self._sandbox_mgr is None:
-                self._sandbox_mgr = SandboxManager.get(
-                    cwd,
-                    deny_read=self._sandbox_cfg.get("deny_read") or [],
-                    grant_read=self._sandbox_cfg.get("grant_read") or [],
-                    srt_bin=self._sandbox_cfg.get("srt_bin") or None,
-                    env_passthrough=self._sandbox_cfg.get("env_passthrough") or [],
-                )
-            mgr = self._sandbox_mgr
+            mgr = self._get_sandbox_mgr(cwd)
             if not mgr.ensure_ready():
+                self.sandbox_setup_ms = int(getattr(mgr, "setup_ms", 0) or 0)
                 reason = mgr.last_error or "沙箱后端不可用"
                 if self.sandbox_on_unavailable == "block":
                     return None, f"[沙箱不可用，已拒绝执行] {reason}"
                 self._warn_unavailable(reason)
                 return None, ""
+            self.sandbox_setup_ms = int(getattr(mgr, "setup_ms", 0) or 0)
             argv = mgr.wrap(command, cwd=cwd, env=env, shell=self.shell)
             if argv is None:
                 # 已 ready 却包装失败 = 运行期错误 → 一律 fail-closed

@@ -11,6 +11,13 @@ from skill_engine.execution.tool_dispatch import ToolDispatchRunner
 from skill_engine.models import Skill, SkillMetadata
 
 
+@pytest.fixture(autouse=True)
+def _no_auto_approve(monkeypatch):
+    """本模块验证「会不会问人」。config.yml 的 auto_approve=all 会在 import 时
+    回填进 os.environ，不显式清掉的话编辑门会直接放行，用例失真。"""
+    monkeypatch.delenv("SKILLS_ENGINE_AUTO_APPROVE", raising=False)
+
+
 def _skill(directory: str) -> Skill:
     return Skill(metadata=SkillMetadata(name="t", description="d"),
                  body="b", directory=directory)

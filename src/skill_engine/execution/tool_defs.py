@@ -77,12 +77,27 @@ def view_image(path: str) -> str:
 
 
 @tool
-def write_file(path: str, content: str) -> str:
+def write_file(path: str, content: str, mode: str = "overwrite") -> str:
     """Write content to a file.
 
     Supports absolute paths, paths relative to the working directory,
     and ~/ expansion. Creates parent directories automatically.
-    For new files only. To modify an existing file, use edit_file.
+
+    Args:
+        path: Target file path.
+        content: Text to write.
+        mode: "overwrite" (default) replaces the whole file.
+              "append" appends to the end of an existing file (equivalent to
+              overwrite when the file does not exist).
+
+              **Use append to recover from a truncated write.** If a previous
+              write was cut off by the output-token limit, the tool result says
+              `complete: NO`. Do NOT re-send the whole file — send only the
+              missing tail with mode="append".
+
+    The result reports the total size, line count, the last ~60 chars, and a
+    completeness verdict for html/json. Trust that verdict instead of running
+    your own `len()` / `endswith()` inspection via bash.
     """
 
 

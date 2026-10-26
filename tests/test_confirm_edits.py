@@ -86,6 +86,16 @@ def _tool_msgs(result, name):
             if m.get("role") == "tool" and m.get("name") == name]
 
 
+@pytest.fixture(autouse=True)
+def _interactive_by_default(monkeypatch):
+    """本模块测的是「会问人」的路径。
+
+    config.yml 的 auto_approve=all 会在 import 时回填进 os.environ；不显式清掉，
+    编辑门会走自动放行分支，用例就失去意义了。
+    """
+    monkeypatch.delenv("SKILLS_ENGINE_AUTO_APPROVE", raising=False)
+
+
 class TestConfirmTrue:
     def test_reject_keeps_file_unchanged(self, tmp_path):
         f = tmp_path / "a.py"
@@ -191,3 +201,35 @@ class TestWriteFileConfirm:
         runner.run(match, llm, max_iterations=4)
         assert (tmp_path / "n.py").read_text(encoding="utf-8") == "hello\n"
         assert any("+hello" in e for e in hio.emitted)
+
+
+class TestAutoApproveBypassesGate:
+    """auto_approve=all 是用户对「不要逐项阻塞」的显式声明，编辑门必须认它。
+
+    修复前只有 bash 审批路径读这个开关，编辑门不读 —— 实测 10 次阻塞确认、
+    占墙钟 36%（1,579s），且其中 9 次是在批准模型自己造的临时脚本。
+    """
+
+    def test_auto_approve_all_skips_prompt(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SKILLS_ENGINE_AUTO_APPROVE", "all")
+        f = tmp_path / "a.py"
+        f.write_text("x = 1\n", encoding="utf-8")
+        hio = _FakeHumanIO([])   # 一旦提问就会读到 "n"（拒绝）
+        runner, match = _make(tmp_path, "true", hio)
+        llm = _ScriptedLLM([_step(1, "edit_file", {"path": "a.py",
+                                  "edits": [{"oldText": "x = 1", "newText": "x = 2"}]})])
+        runner.run(match, llm, max_iterations=4)
+        assert hio.asked == 0
+        assert f.read_text(encoding="utf-8") == "x = 2\n"
+
+    def test_auto_approve_none_still_asks(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SKILLS_ENGINE_AUTO_APPROVE", "none")
+        f = tmp_path / "a.py"
+        f.write_text("x = 1\n", encoding="utf-8")
+        hio = _FakeHumanIO(["n"])
+        runner, match = _make(tmp_path, "true", hio)
+        llm = _ScriptedLLM([_step(1, "edit_file", {"path": "a.py",
+                                  "edits": [{"oldText": "x = 1", "newText": "x = 2"}]})])
+        runner.run(match, llm, max_iterations=4)
+        assert hio.asked == 1
+        assert f.read_text(encoding="utf-8") == "x = 1\n"

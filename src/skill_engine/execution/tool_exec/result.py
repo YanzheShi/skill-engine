@@ -7,6 +7,15 @@
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
+CALL_TRUNCATED_HINT = (
+    "⚠ 本次工具调用缺少必填参数 `{missing}`。\n"
+    "这通常不是你把参数写错了，而是模型的输出在生成途中被 max_tokens 上限截断——"
+    "正文已经生成、参数尾部丢失，上游 JSON 容错解析后仍交付成一个「合法但不完整」的调用。\n"
+    "不要原样重发整份内容（会再次被截断）。请改为：\n"
+    "  1) 用 write_file(path=..., content=..., mode=\"append\") 从断点继续追加；或\n"
+    "  2) 用 edit_file(path=..., edits=[...]) 做局部修改。"
+)
+
 
 @dataclass
 class ToolResult:

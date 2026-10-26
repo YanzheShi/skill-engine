@@ -45,7 +45,14 @@ class BashHandler(BaseHandler):
         # 路由判定：删除类 / 联网类 / 宿主工具类命令必须审批后裸跑（详见模块 docstring）
         route, route_reason = decide_route(cmd)
         if ctx.tracer and ctx.tracer.enabled():
-            ctx.tracer.event("sandbox_route", route=route, reason=route_reason)
+            ctx.tracer.event(
+                "sandbox_route",
+                route=route,
+                reason=route_reason,
+                # 会话级沙箱准备耗时（毫秒）。此前只落在 SandboxManager 属性里，
+                # trace 上看不到，导致 514s 的准备时间被误读成"这条命令跑了 514s"。
+                setup_ms=getattr(ctx.executor, "sandbox_setup_ms", 0),
+            )
         if route == ROUTE_ASK and decision == "SAFE":
             decision = "ATTENTION"
             reason = f"{reason}；{route_reason}" if reason else route_reason

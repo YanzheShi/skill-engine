@@ -4,7 +4,7 @@ from skill_engine.execution.paths import resolve_path
 from skill_engine.execution.tool_exec.context import ToolContext
 from skill_engine.execution.tool_exec.edit_patch import _apply_edits, _render_diff
 from skill_engine.execution.tool_exec.handler import BaseHandler
-from skill_engine.execution.tool_exec.result import ToolResult
+from skill_engine.execution.tool_exec.result import CALL_TRUNCATED_HINT, ToolResult
 
 
 class EditFileHandler(BaseHandler):
@@ -13,6 +13,16 @@ class EditFileHandler(BaseHandler):
     def execute(self, tc: dict, ctx: ToolContext) -> ToolResult:
         filepath = tc["input"].get("path", "")
         edits = tc["input"].get("edits", [])
+
+        # 必须先判空：空 path 会被 resolve_path 解析成 base_dir（目录），
+        # 随后安全门返回「[拒绝] 目标路径是目录」——模型据此完全无法修正
+        # （实测唯一一次 edit_file 调用就死在这句话上，此后全程改用整文件重写）。
+        if not filepath:
+            print("     [SKIP] edit_file 缺少 path 参数，已跳过")
+            return ToolResult(
+                tool_call_id=tc["id"], name="edit_file",
+                content=CALL_TRUNCATED_HINT.format(missing="path"),
+            )
 
         if not edits:
             return ToolResult(tool_call_id=tc["id"], name="edit_file",
