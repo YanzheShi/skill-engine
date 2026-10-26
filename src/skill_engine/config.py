@@ -31,6 +31,7 @@ config.yml 结构：
 import os
 import re
 from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 
@@ -142,6 +143,8 @@ _SETTINGS_ENV_MAP = {
     "auto_approve": "SKILLS_ENGINE_AUTO_APPROVE",
     "allowlist": "SKILLS_ENGINE_ALLOWLIST",
     "context_budget": "SKILLS_ENGINE_CONTEXT_BUDGET",
+    "llm_max_tokens": "SKILLS_ENGINE_LLM_MAX_TOKENS",
+    "llm_temperature": "SKILLS_ENGINE_LLM_TEMPERATURE",
     "llm_call_interval": "SKILLS_ENGINE_LLM_CALL_INTERVAL",
     "loop_guard_limit": "SKILLS_ENGINE_LOOP_GUARD_LIMIT",
     "mcp_config": "SKILL_ENGINE_MCP_CONFIG",
@@ -304,6 +307,11 @@ def _parse_model_entries(raw) -> dict:
             "api_key": api_key,
             "vision": bool(item.get("vision", False)),
         }
+        # 采样参数透传白名单。此前 models: 段只保留上面 5 个键，写了
+        # temperature/seed/max_tokens 会被静默丢弃 —— 想做确定性复现都做不到。
+        for opt in ("temperature", "top_p", "seed", "max_tokens"):
+            if item.get(opt) is not None:
+                out[name][opt] = item[opt]
     return out
 
 
@@ -424,6 +432,68 @@ def _apply_call_timeout(cfg: dict) -> None:
         cfg.setdefault("timeout", LLM_CALL_TIMEOUT)
 
 
+DEFAULT_LLM_MAX_TOKENS = 8192
+"""单次回复的输出 token 上限默认值。
+
+历史问题：全仓从不设置 max_tokens，输出上限完全由供应商决定。实测某网关的
+默认上限约 4k token —— 一份 1.1 万字符的 write_file 参数会在字符串中间被截断，
+而引擎侧毫无感知（参数 JSON 残缺、上游解析器容错后仍返回合法调用），于是模型
+反复"重写整个文件"共 5 次、烧掉 545s LLM 时间。
+
+这里给出显式默认值，优先级：profile 内 max_tokens > settings.llm_max_tokens
+（环境变量 SKILLS_ENGINE_LLM_MAX_TOKENS）> 本默认值。设为 0 表示不下发该参数
+（回到旧行为，交由供应商决定）。
+"""
+
+
+def llm_max_tokens() -> int:
+    """输出 token 上限：环境变量优先，非法值回落默认。0 = 不下发。"""
+    raw = os.environ.get("SKILLS_ENGINE_LLM_MAX_TOKENS", "").strip()
+    if not raw:
+        return DEFAULT_LLM_MAX_TOKENS
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_LLM_MAX_TOKENS
+
+
+def _apply_max_tokens(cfg: dict) -> None:
+    """profile 未显式指定 max_tokens 时注入默认上限。"""
+    if not isinstance(cfg, dict) or "max_tokens" in cfg:
+        return
+    mt = llm_max_tokens()
+    if mt > 0:
+        cfg["max_tokens"] = mt
+
+
+DEFAULT_LLM_TEMPERATURE: Optional[float] = None
+"""默认采样温度。None = 不下发该参数（沿用供应商默认）。
+
+只在需要确定性复现（A/B 基准）时才显式设置：settings.llm_temperature /
+SKILLS_ENGINE_LLM_TEMPERATURE=0。生产路径保持 None，避免把对话调成呆板。
+"""
+
+
+def llm_temperature() -> Optional[float]:
+    """采样温度：环境变量优先；空/非法 → None（不下发）。"""
+    raw = os.environ.get("SKILLS_ENGINE_LLM_TEMPERATURE", "").strip()
+    if raw == "":
+        return DEFAULT_LLM_TEMPERATURE
+    try:
+        return float(raw)
+    except ValueError:
+        return DEFAULT_LLM_TEMPERATURE
+
+
+def _apply_temperature(cfg: dict) -> None:
+    """profile 未指定 temperature 时注入全局默认（None 则不动）。"""
+    if not isinstance(cfg, dict) or "temperature" in cfg:
+        return
+    t = llm_temperature()
+    if t is not None:
+        cfg["temperature"] = t
+
+
 def _mark_model_vision(model, vision: bool) -> None:
     """把 vision 标记挂到模型实例上；实例不容许 setattr 时落注册表。"""
     if not vision:
@@ -477,6 +547,8 @@ def get_llm_by_profile(profile_name: str, **kwargs):
     if not cfg.get("model") or not cfg.get("api_key"):
         raise ValueError(f"模型 profile '{profile_name}' 配置不完整（缺 model 或 api_key）")
     _apply_call_timeout(cfg)   # 显式网络超时，避免 openai 默认 600s 静默等待
+    _apply_max_tokens(cfg)     # 显式输出上限，避免长文件写入在生成途中被供应商截断
+    _apply_temperature(cfg)    # 可选：固定采样温度以复现实验
     model = init_chat_model(**cfg)
     _mark_model_vision(model, vision)
     return model
@@ -549,6 +621,8 @@ def get_llm(purpose: str, **kwargs):
             f"请检查 .env 文件中的环境变量"
         )
 
+    _apply_max_tokens(config)
+    _apply_temperature(config)
     return init_chat_model(**config)
 
 
