@@ -64,7 +64,7 @@ def handle_repl_command(cmd: str, service: MemoryService | None) -> bool:
     if text.startswith("/memory"):
         rest = text[len("/memory"):].strip()
         if not rest or rest in ("help", "-h", "--help"):
-            print("[memory] search <query> | get <id> | forget <id> | stats | off")
+            print("[memory] search <query> | get <id> | forget <id> | review | accept <id> | reject <id> | stats | off")
             return True
         sub, _, arg = rest.partition(" ")
         sub = sub.strip().lower()
@@ -81,6 +81,30 @@ def handle_repl_command(cmd: str, service: MemoryService | None) -> bool:
                 print("[memory] 用法: /memory search <query>")
                 return True
             _print_hits(service.search(arg, top_k=5, include_private=True))
+            return True
+        if sub == "review":
+            pending = service.pending_records()
+            if not pending:
+                print("[memory] INBOX 为空")
+            else:
+                for record in pending:
+                    print(f"  [{record.id}] [{record.type}] {record.title}: {record.summary(120)}")
+                print(f"[memory] 共 {len(pending)} 条待评审；/memory accept <id> 或 reject <id>")
+            return True
+        if sub == "accept":
+            parts = arg.split()
+            if not parts:
+                print("[memory] 用法: /memory accept <id> [--supersede]")
+                return True
+            record = service.review_accept(parts[0], supersede="--supersede" in parts[1:])
+            print(f"[memory] 已接受: {record.id}" if record else f"[memory] 未找到待评审记录: {parts[0]}")
+            return True
+        if sub == "reject":
+            if not arg:
+                print("[memory] 用法: /memory reject <id>")
+                return True
+            ok = service.review_reject(arg.split()[0])
+            print("[memory] 已拒绝" if ok else f"[memory] 未找到待评审记录: {arg.split()[0]}")
             return True
         if sub in ("get", "show"):
             record = service.get(arg, include_private=True)

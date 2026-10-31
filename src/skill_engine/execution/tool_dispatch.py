@@ -110,6 +110,8 @@ class ToolDispatchRunner:
         self.verbose = verbose  # 是否显示引擎内部调试态（迭代/历史条数/LLM 响应）
         self.tracer = tracer  # 可选 DebugTracer；None / 未开启时全程 no-op
         self.memory_service = memory_service  # 可选 MemoryService
+        self._memory_skill_name = ""
+        self._memory_session_id = ""
         # trusted_root：用户显式指定的受信任工作目录（如 MOA -w）。
         # 目录内的文件读写自动放行（免审批/免 diff 确认）；目录外维持原审批。
         self.trusted_root = to_native_path(trusted_root)
@@ -137,6 +139,20 @@ class ToolDispatchRunner:
             )
             self._dbg_stopped_by = stopped_by
         return res
+
+    def _write_episode(self, segment: list[dict]) -> None:
+        """压缩前把待压缩段落到长期记忆；失败静默。"""
+        if self.memory_service is None or not getattr(self.memory_service, "enabled", False):
+            return
+        try:
+            self.memory_service.write_episode(
+                segment,
+                skill_name=self._memory_skill_name,
+                session_id=self._memory_session_id,
+                reason="compaction",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("压缩前 episode 写入失败: %s", e)
 
     def _is_within_root(self, full_path: Path, root) -> bool:
         """路径是否位于 root 内。规范化后前缀匹配，防 .. 逃逸。
@@ -388,6 +404,10 @@ class ToolDispatchRunner:
             执行结果 dict
         """
         skill = match_result.skill
+        self._memory_skill_name = skill.metadata.name
+        self._memory_session_id = Path(
+            state_path or resume_from or skill.metadata.name
+        ).stem
         body_prompt = self.assembler.assemble(
             skill, match_result.arguments, plain_text=self.plain_text)
 
@@ -860,7 +880,7 @@ class ToolDispatchRunner:
                 # 上下文压缩在轮末：本轮全部工具结果已追加完毕、即将进入下一轮
                 # invoke——轮首压缩的旧实现压缩对象滞后一轮，且压缩抢在 LLM
                 # 调用前占热路径。
-                cm.maybe_compress(llm)
+                cm.maybe_compress(llm, episode_writer=self._write_episode)
 
         # 达到最大迭代次数
             result = self._finish_result(

@@ -121,6 +121,7 @@ class MemoryService:
         )
         self._index: MemoryIndex | None = None
         self._dirty = False
+        self._distill_llm = None
 
     # ---- 生命周期/状态 ----
 
@@ -220,6 +221,7 @@ class MemoryService:
         data: dict[str, Any] | None = None,
         status: str = "active",
         record_id: str = "",
+        supersedes: str = "",
     ) -> MemoryRecord:
         if not self.enabled:
             raise RuntimeError("memory is disabled")
@@ -267,6 +269,7 @@ class MemoryService:
             sensitivity=sensitivity,
             source=source,
             pinned=bool(pinned),
+            supersedes=supersedes,
             data=data,
         )
         existing = self._find_by_hash(record.content_hash)
@@ -287,7 +290,8 @@ class MemoryService:
         allowed = {
             "title", "body", "type", "scope", "domain", "tags", "subject",
             "relations", "valid_from", "valid_until", "observed_at", "status",
-            "confidence", "importance", "sensitivity", "source", "pinned", "data",
+            "confidence", "importance", "sensitivity", "source", "pinned",
+            "supersedes", "data",
         }
         for key, value in changes.items():
             if key in allowed and value is not None:
@@ -309,6 +313,247 @@ class MemoryService:
                 self._dirty = True
                 return True
         return False
+
+    # ---- P2：候选评审 / supersede / 蒸馏 / 导入 ----
+
+    def pending_records(self) -> list[MemoryRecord]:
+        return [r for r in self._all_records() if r.status == "pending"]
+
+    def commit_candidate(self, candidate: dict[str, Any], *, auto: bool = False) -> MemoryRecord:
+        """提交一个蒸馏/导入候选；auto=False 时进入 pending。"""
+        type_ = str(candidate.get("type") or "fact").strip().lower()
+        title = str(candidate.get("title") or "").strip()
+        body = str(candidate.get("body") or "").strip()
+        scope = str(candidate.get("scope") or "project").strip().lower()
+        confidence = str(candidate.get("confidence") or "medium").strip().lower()
+        sensitivity = str(
+            candidate.get("sensitivity") or self.config.default_sensitivity
+        ).strip().upper()
+        subject = str(candidate.get("subject") or candidate.get("entity") or "").strip()
+        valid_until = str(candidate.get("valid_until") or "").strip()
+        supersedes = str(candidate.get("supersedes") or "").strip()
+        status = "active" if auto else "pending"
+
+        conflicts = [
+            r for r in self._all_records()
+            if r.status == "active" and r.type == type_
+            and (r.title == title or (subject and r.subject == subject))
+        ]
+        if auto and conflicts:
+            best = max(conflicts, key=lambda r: CONFIDENCE_RANK.get(r.confidence, 2))
+            if CONFIDENCE_RANK.get(confidence, 2) >= CONFIDENCE_RANK.get(best.confidence, 2):
+                supersedes = best.id
+            else:
+                status = "pending"
+        elif not auto and conflicts and not supersedes:
+            supersedes = conflicts[0].id
+
+        try:
+            importance = float(candidate.get("importance") or 0.5)
+        except (TypeError, ValueError):
+            importance = 0.5
+        record = self.add(
+            type=type_,
+            title=title,
+            body=body,
+            scope=scope,
+            domain=candidate.get("domain") or [],
+            tags=candidate.get("tags") or [],
+            subject=subject,
+            valid_from=str(candidate.get("valid_from") or ""),
+            valid_until=valid_until,
+            confidence=confidence,
+            importance=importance,
+            sensitivity=sensitivity,
+            source=str(candidate.get("source") or "distill"),
+            status=status,
+            data=dict(candidate.get("data") or {}),
+            supersedes=supersedes,
+        )
+        if auto and record.status == "pending":
+            # 同一内容已在 INBOX（例如先导入后蒸馏）时，高置信自动提交应直接接受它。
+            record = self.update(record.id, status="active") or record
+        if auto and record.status == "active" and record.supersedes:
+            old = self.get(record.supersedes, include_private=True)
+            if old is not None and old.status == "active":
+                self.update(old.id, status="superseded")
+        return record
+
+    def review_accept(self, record_id: str, *, supersede: bool = False) -> MemoryRecord | None:
+        record = self.get(record_id, include_private=True)
+        if record is None or record.status != "pending":
+            return None
+        target = record.supersedes
+        if supersede:
+            conflicts = [
+                r for r in self._all_records()
+                if r.status == "active" and r.id != record.id and r.type == record.type
+                and (r.title == record.title or (record.subject and r.subject == record.subject))
+            ]
+            for old in conflicts:
+                self.update(old.id, status="superseded")
+            if conflicts:
+                target = conflicts[0].id
+        if target:
+            old = self.get(target, include_private=True)
+            if old is not None and old.status == "active":
+                self.update(old.id, status="superseded")
+        return self.update(record.id, status="active", supersedes=target)
+
+    def review_reject(self, record_id: str) -> bool:
+        record = self.get(record_id, include_private=True)
+        if record is None or record.status != "pending":
+            return False
+        return self.forget(record_id)
+
+    def _get_distill_llm(self):
+        if self._distill_llm is not None:
+            return self._distill_llm or None
+        try:
+            from skill_engine.config import get_llm_by_profile
+
+            self._distill_llm = get_llm_by_profile(self.config.distill_model)
+        except Exception:  # noqa: BLE001 — 模型不可用时退化为规则蒸馏
+            try:
+                from skill_engine.config import get_llm
+
+                self._distill_llm = get_llm(purpose="memory-distill")
+            except Exception:  # noqa: BLE001
+                self._distill_llm = False
+        return self._distill_llm or None
+
+    def _should_auto_commit(self, candidate: dict[str, Any]) -> bool:
+        setting = str(self.config.auto_commit_project or "high").strip().lower()
+        confidence = str(candidate.get("confidence") or "")
+        if setting in ("review", "none", "off", "pending"):
+            return False
+        if setting == "high":
+            required = "high"
+        elif setting == "medium":
+            required = ("high", "medium")
+        else:
+            required = ("high", "medium", "low")
+        return (
+            str(candidate.get("scope") or "project") == "project"
+            and str(candidate.get("type") or "") in ("fact", "decision", "feedback")
+            and confidence in required
+        )
+
+    def write_episode(
+        self,
+        segment: list[dict],
+        *,
+        skill_name: str = "",
+        session_id: str = "",
+        reason: str = "compaction",
+        step_results: list[dict] | None = None,
+    ) -> MemoryRecord | None:
+        """压缩前/会话结束时把执行历史落成可检索 episode。"""
+        if not self.enabled or not segment:
+            return None
+        from .distill import episode_body
+
+        body = episode_body(segment, step_results=step_results)
+        if len(body) < 30:
+            return None
+        prefix = "压缩摘要" if reason == "compaction" else "会话摘要"
+        title = f"{prefix} {skill_name} {session_id}".strip()[:80]
+        return self.add(
+            type="episode",
+            title=title,
+            body=body,
+            scope="project",
+            confidence="medium",
+            importance=0.4,
+            sensitivity="L2",
+            source=f"{reason}:{session_id or skill_name}",
+            data={"session_id": session_id, "skill": skill_name, "reason": reason},
+            status="active",
+        )
+
+    def distill_session(
+        self,
+        messages: list[dict],
+        *,
+        skill_name: str = "",
+        session_id: str = "",
+        step_results: list[dict] | None = None,
+        llm=None,
+        auto_llm: bool = True,
+    ) -> dict[str, Any]:
+        """会话结束蒸馏：规则候选 + 可选 LLM 候选；项目高置信自动，其余进 INBOX。"""
+        empty = {"episode": None, "committed": [], "pending": [], "skipped": 0}
+        if not self.enabled:
+            return empty
+        from .distill import (
+            clean_messages,
+            llm_candidates,
+            merge_candidates,
+            rule_candidates,
+        )
+
+        clean = clean_messages(messages)
+        if len(clean) < 2:
+            return empty
+        episode = self.write_episode(
+            clean, skill_name=skill_name, session_id=session_id,
+            reason="session_end", step_results=step_results,
+        )
+        candidates = rule_candidates(
+            clean, skill_name=skill_name, session_id=session_id,
+            step_results=step_results,
+        )
+        use_llm = llm
+        if use_llm is None and auto_llm and self.config.auto_distill:
+            use_llm = self._get_distill_llm()
+        if use_llm is not None:
+            try:
+                candidates += llm_candidates(
+                    clean, use_llm, skill_name=skill_name, session_id=session_id,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug("LLM 蒸馏失败（忽略）: %s", e)
+        candidates = merge_candidates(candidates)
+        committed: list[str] = []
+        pending: list[str] = []
+        skipped = 0
+        for candidate in candidates:
+            try:
+                record = self.commit_candidate(
+                    candidate, auto=self._should_auto_commit(candidate)
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug("提交蒸馏候选失败: %s", e)
+                skipped += 1
+                continue
+            (committed if record.status == "active" else pending).append(record.id)
+        return {
+            "episode": episode.id if episode else None,
+            "committed": committed,
+            "pending": pending,
+            "skipped": skipped,
+        }
+
+    def import_markdown(self, paths, *, recursive: bool = False, dry_run: bool = True):
+        from .importer import collect_import_candidates
+
+        candidates = collect_import_candidates(paths, recursive=recursive)
+        if dry_run:
+            return candidates
+        saved: list[MemoryRecord] = []
+        for candidate in candidates:
+            try:
+                saved.append(self.commit_candidate(candidate, auto=False))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("导入候选失败: %s", e)
+        return saved
+
+    def export_records(self, *, include_private: bool = False) -> list[dict[str, Any]]:
+        return [
+            record.to_dict()
+            for record in self._all_records()
+            if include_private or record.sensitivity != "L3"
+        ]
 
     # ---- 读取 ----
 
@@ -674,6 +919,7 @@ class MemoryService:
             "user_store": str(self.user_store.root),
             "project_store": str(self.project_store.root),
             "records": len(records),
+            "pending": sum(1 for r in records if r.status == "pending"),
             "by_type": by_type,
             "index": index.stats() if index else {"fts_available": False},
             "config": self.config.to_dict(),

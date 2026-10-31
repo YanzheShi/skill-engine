@@ -37,7 +37,7 @@ HISTORY_TYPES = {"episode"}
 SCOPES = {"user", "project", "skill", "device", "session"}
 SENSITIVITIES = {"L1", "L2", "L3"}
 CONFIDENCES = {"high", "medium", "low"}
-STATUSES = {"active", "stale", "superseded", "archived"}
+STATUSES = {"active", "pending", "stale", "superseded", "archived"}
 
 CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
 

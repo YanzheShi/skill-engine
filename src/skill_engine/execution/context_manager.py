@@ -17,7 +17,7 @@
 import os
 import time
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 
 # L1：超过该字符数的旧工具输出才会被折叠（太小的折叠收益不抵信息损失）
@@ -238,10 +238,12 @@ class ContextManager:
         return changed
 
     # ---- 三级主入口 ----
-    def maybe_compress(self, llm) -> bool:
+    def maybe_compress(self, llm, episode_writer: Optional[Callable[[list[dict]], None]] = None) -> bool:
         """按需压缩。返回是否发生了任何形式的压缩（含 L1 折叠）。
 
         流程：L1 折叠 → 仍超预算则 L2 结构化摘要 → L2 失败则 L3 截断兜底。
+        ``episode_writer`` 是 P2 的压缩前溢出钩子：在 L2 有损摘要之前把
+        待压缩段落到长期记忆，失败也不影响压缩主流程。
         """
         changed = self._micro_compact()
         if self.estimate_tokens() <= self.budget * self.threshold:
@@ -258,6 +260,12 @@ class ContextManager:
             return changed
         if not hasattr(llm, "invoke"):
             return changed
+
+        if episode_writer is not None:
+            try:
+                episode_writer(to_summarize)
+            except Exception as e:  # noqa: BLE001 — 记忆失败不能阻断压缩
+                logging.getLogger(__name__).debug("压缩前 episode 落盘失败: %s", e)
 
         summary = self._summarize(to_summarize, llm)
         if summary:

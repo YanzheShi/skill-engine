@@ -198,7 +198,7 @@
 | `valid_from` | date? | 从何时为真 |
 | `valid_until` | date? | 到何时为止；空表示持续有效 |
 | `observed_at` | datetime? | 观察/采集时间 |
-| `status` | enum | `active` / `stale` / `superseded` / `archived` |
+| `status` | enum | `active` / `pending` / `stale` / `superseded` / `archived` |
 | `confidence` | enum | `high` / `medium` / `low` |
 | `importance` | float | 0–1，视图/检索排序用；默认 0.5 |
 | `sensitivity` | enum | `L1` / `L2` / `L3` |
@@ -784,6 +784,7 @@ P1/P2 支持：
 | 状态 | 含义 | 是否默认注入 |
 |---|---|---|
 | `active` | 当前有效 | 是 |
+| `pending` | INBOX 待评审 | 否 |
 | `superseded` | 被新记录取代 | 否 |
 | `archived` | 阶段/项目结束 | 否 |
 | `stale` | 过期但未确认 | 否；提示更新 |
@@ -810,8 +811,8 @@ P1/P2 支持：
 
 ### 9.5 导出与备份
 
-- `memory export` 生成 Markdown 包，含 records/entities/views。
-- 默认排除 L3 与密钥；`--include-private` 需确认。
+- `memory export` 生成 JSON 备份（P2）；默认排除 L3 与密钥，`--include-private` 需确认。
+- Markdown 包导出（records/entities/views）留在 P3。
 - 用户可把 `~/.skill-engine/memory` 放进私有 git 仓库备份；项目 store 已在 `.gitignore` 中忽略。
 
 ### 9.6 审计
@@ -932,9 +933,12 @@ skill-engine memory resolve "笔记" [--scope]
 skill-engine memory add --type fact --title "..." --body "..." [--scope project]
 skill-engine memory edit <id>
 skill-engine memory forget <id>
-skill-engine memory review        # P2：INBOX 评审
+skill-engine memory review
+skill-engine memory accept <id> [--supersede]
+skill-engine memory reject <id>
+skill-engine memory import <path> [--recursive] [--yes]
 skill-engine memory reindex
-skill-engine memory export        # P2：脱敏导出
+skill-engine memory export [--output FILE] [--include-private]
 
 # 视图
 skill-engine profile show [--verify]
@@ -1196,8 +1200,8 @@ settings:
 
 ## 17. 分阶段计划
 
-> 实现状态（2026-10-31）：P0 + P1 已落地，代码入口为 `src/skill_engine/memory/`；
-> 对应测试见 `tests/test_memory.py`。以下保留原始分期，作为后续验收基线。
+> 实现状态（2026-10-31）：P0 + P1 + P2 已落地，代码入口为 `src/skill_engine/memory/`；
+> 对应测试见 `tests/test_memory.py` 与 `tests/test_memory_p2.py`。以下保留原始分期，作为后续验收基线。
 
 > 以下为单人净开发估算，不含评审、联调、文档更新和真实数据迁移。
 
@@ -1233,7 +1237,7 @@ settings:
 - L3 不出现在默认注入/日志/导出。
 - 跨项目隔离通过测试。
 
-### P2 — 自动化（约 1 周）
+### P2 — 自动化（约 1 周）— 已落地
 
 范围：
 

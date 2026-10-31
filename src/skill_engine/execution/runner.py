@@ -532,8 +532,37 @@ class Runner:
             trusted_root=trusted_root,
             memory_service=memory_service,
         )
-        return td_runner.run(match_result, llm, max_iterations,
-                              state_path=state_path, resume_from=resume_from)
+        result = td_runner.run(match_result, llm, max_iterations,
+                               state_path=state_path, resume_from=resume_from)
+        self._distill_memory(
+            memory_service,
+            getattr(result, "history", []) or [],
+            match_result.skill,
+            Path(state_path or resume_from or match_result.skill.metadata.name).stem,
+            step_results=getattr(result, "ctx", {}).get("steps"),
+            auto_llm=False,
+        )
+        return result
+
+    def _distill_memory(self, memory_service, messages, skill, session_id="", step_results=None,
+                        auto_llm: bool = True) -> None:
+        """会话结束后蒸馏；失败不影响退出。"""
+        if memory_service is None or not getattr(memory_service, "enabled", False):
+            return
+        try:
+            result = memory_service.distill_session(
+                messages,
+                skill_name=skill.metadata.name,
+                session_id=session_id or skill.metadata.name,
+                step_results=step_results,
+                auto_llm=auto_llm,
+            )
+            committed = len(result.get("committed", []) or [])
+            pending = len(result.get("pending", []) or [])
+            if committed or pending:
+                print(f"[memory] 会话蒸馏：{committed} 条已提交，{pending} 条待评审")
+        except Exception as e:  # noqa: BLE001
+            print(f"[memory] 会话蒸馏失败: {e}")
 
     def run_repl(
         self,
@@ -903,6 +932,9 @@ class Runner:
                         continue
                     user_cmd = pasted
                 if user_cmd in ("/exit", "/done"):
+                    self._distill_memory(
+                        memory_service, session.messages, skill, Path(save).stem,
+                    )
                     return session_result(session.skill_name, "user_exit", output=last_output)
                 cmd, paste_paths = resolve_refs(user_cmd)
                 cmd = cmd.strip()
@@ -935,6 +967,9 @@ class Runner:
                 )
             except KeyboardInterrupt:
                 print(f"[session] 已被 Ctrl+C 中断，状态已落盘（{save}），可用 --resume-from 续接。")
+                self._distill_memory(
+                    memory_service, session.messages, skill, Path(save).stem,
+                )
                 return session_result(session.skill_name, "interrupted", output=last_output)
 
             session.messages = result.get("history") or session.messages

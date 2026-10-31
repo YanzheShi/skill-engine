@@ -8,6 +8,7 @@ from pathlib import Path
 import typer
 
 from ..execution.paths import to_native_path
+from .models import now_iso
 from .service import MemoryService
 from .views import plain_view
 
@@ -120,6 +121,105 @@ def memory_search(
             print(_json([h.to_dict() for h in hits]))
         else:
             _print_hits(hits)
+    finally:
+        svc.close()
+
+
+@memory_app.command("review")
+def memory_review(
+    root: str | None = typer.Option(None, "--working-root", "-w"),
+):
+    """列出 INBOX 中待评审的蒸馏/导入候选。"""
+    svc = _service(root)
+    try:
+        pending = svc.pending_records()
+        if not pending:
+            print("[memory] INBOX 为空")
+            return
+        for record in pending:
+            print(f"[{record.id}] [{record.type}/{record.scope}] {record.title}: {record.summary(160)}")
+        print(f"共 {len(pending)} 条待评审；accept/reject 后生效")
+    finally:
+        svc.close()
+
+
+@memory_app.command("accept")
+def memory_accept(
+    record_id: str = typer.Argument(..., help="待评审记录 ID"),
+    supersede: bool = typer.Option(False, "--supersede", help="同时把冲突的旧记录标记为 superseded"),
+    root: str | None = typer.Option(None, "--working-root", "-w"),
+):
+    """接受一条 INBOX 候选。"""
+    svc = _service(root)
+    try:
+        record = svc.review_accept(record_id, supersede=supersede)
+        print(f"[memory] 已接受: {record.id}" if record else f"[memory] 未找到待评审记录: {record_id}")
+        if record is None:
+            raise typer.Exit(code=1)
+    finally:
+        svc.close()
+
+
+@memory_app.command("reject")
+def memory_reject(
+    record_id: str = typer.Argument(..., help="待评审记录 ID"),
+    root: str | None = typer.Option(None, "--working-root", "-w"),
+):
+    """拒绝并删除一条 INBOX 候选。"""
+    svc = _service(root)
+    try:
+        ok = svc.review_reject(record_id)
+        print("[memory] 已拒绝" if ok else f"[memory] 未找到待评审记录: {record_id}")
+        if not ok:
+            raise typer.Exit(code=1)
+    finally:
+        svc.close()
+
+
+@memory_app.command("import")
+def memory_import(
+    path: str = typer.Argument(..., help="Markdown 文件或目录"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="直接写入 INBOX（仍需 review）"),
+    recursive: bool = typer.Option(False, "--recursive", help="递归扫描目录"),
+    root: str | None = typer.Option(None, "--working-root", "-w"),
+):
+    """从旧记忆/工作日志导入候选，默认只预览。"""
+    svc = _service(root)
+    try:
+        candidates = svc.import_markdown(path, recursive=recursive, dry_run=True)
+        if not candidates:
+            print("[memory] 没有可导入的 Markdown 记录")
+            return
+        for c in candidates:
+            print(f"[{c.get('type')}/{c.get('scope')}] {c.get('title')}: {str(c.get('body', ''))[:120]}")
+        print(f"共 {len(candidates)} 条候选")
+        if not yes and not typer.confirm("写入 INBOX？", default=False):
+            print("[memory] 已取消")
+            return
+        saved = svc.import_markdown(path, recursive=recursive, dry_run=False)
+        print(f"[memory] 已写入 INBOX {len(saved)} 条；用 memory review 处理")
+    finally:
+        svc.close()
+
+
+@memory_app.command("export")
+def memory_export(
+    output: str = typer.Option("memory-export.json", "--output", "-o"),
+    include_private: bool = typer.Option(False, "--include-private"),
+    root: str | None = typer.Option(None, "--working-root", "-w"),
+):
+    """导出记忆 JSON；默认排除 L3。"""
+    svc = _service(root)
+    try:
+        records = svc.export_records(include_private=include_private)
+        payload = {
+            "exported_at": now_iso(),
+            "records": records,
+        }
+        p = Path(output)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[memory] 已导出 {len(records)} 条 -> {p}")
     finally:
         svc.close()
 
@@ -264,7 +364,7 @@ def memory_list(
     try:
         records = svc.list_records(scope)
         for record in records:
-            print(f"[{record.id}] [{record.type}/{record.scope}] {record.title}")
+            print(f"[{record.id}] [{record.type}/{record.scope}/{record.status}] {record.title}")
         print(f"共 {len(records)} 条")
     finally:
         svc.close()
