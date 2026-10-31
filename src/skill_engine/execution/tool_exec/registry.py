@@ -18,6 +18,7 @@ from skill_engine.execution.tool_exec.handlers.update_plan import UpdatePlanHand
 from skill_engine.execution.tool_exec.handlers.view_image import ViewImageHandler
 from skill_engine.execution.tool_exec.handlers.web_search import WebSearchHandler
 from skill_engine.execution.tool_exec.handlers.write_file import WriteFileHandler
+from skill_engine.execution.tool_exec.handlers.memory import MEMORY_HANDLERS
 
 
 def build_builtin_handlers(session_mode: bool = False) -> dict:
@@ -42,6 +43,7 @@ def build_builtin_handlers(session_mode: bool = False) -> dict:
             GetCurrentTimeHandler(),
             ShotWebHandler(),
             RestoreFileHandler(),
+            *MEMORY_HANDLERS,
         )
     }
     if session_mode:

@@ -153,6 +153,10 @@ class SkillMetadata(BaseModel):
         default=120,
         description="verify_command 超时（秒）",
     )
+    memory_enabled: bool = Field(
+        default=True,
+        description="是否允许长期记忆注入与 memory_* 工具；false 时本次运行禁用",
+    )
     compact_tool_output: bool = Field(
         default=True,
         description="允许上下文 L1 微压缩：折叠旧轮次的大块工具输出",
@@ -222,6 +226,10 @@ class MergedMeta(BaseModel):
     verify_timeout: int = Field(
         default=120,
         description="verify_command 超时（秒）",
+    )
+    memory_enabled: bool = Field(
+        default=True,
+        description="是否允许长期记忆注入与 memory_* 工具；false 时本次运行禁用",
     )
     compact_tool_output: bool = Field(
         default=True,

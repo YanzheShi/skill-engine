@@ -103,6 +103,7 @@ class SkillSession:
         snapshot=None,
         file_tracker=None,
         strict_file_tracking: bool = False,
+        memory=None,
     ):
         self.skill_name = skill_name
         self.working_root = working_root
@@ -122,6 +123,7 @@ class SkillSession:
             from skill_engine.execution.file_tracker import FileStateTracker
             file_tracker = FileStateTracker(strict=strict_file_tracking)
         self.file_tracker = file_tracker
+        self.memory = memory
 
     def append_user(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})
@@ -510,6 +512,13 @@ class Runner:
             if self.tracer is not None:
                 human_io.set_tracer(self.tracer)
 
+        memory_service = None
+        try:
+            from skill_engine.memory.service import MemoryService
+            memory_service = MemoryService(
+                working_root=working_root or match_result.skill.directory)
+        except Exception:
+            memory_service = None
         td_runner = tool_dispatch.ToolDispatchRunner(
             executor=self.executor,
             assembler=self.assembler,
@@ -521,6 +530,7 @@ class Runner:
             verbose=self.verbose,
             tracer=self.tracer,
             trusted_root=trusted_root,
+            memory_service=memory_service,
         )
         return td_runner.run(match_result, llm, max_iterations,
                               state_path=state_path, resume_from=resume_from)
@@ -537,6 +547,7 @@ class Runner:
         resume_from: Optional[str] = None,
         human_io=None,
         trusted_root: Optional[str] = None,
+        memory_enabled: Optional[bool] = None,
     ) -> dict:
         """多轮会话（Session/REPL）模式：单 skill 持续执行。详见 docs/多轮会话模式-session-repl设计.md。"""
         from skill_engine.execution.human_io import CliHumanIO
@@ -579,8 +590,20 @@ class Runner:
         if not wr_native.is_dir():
             print(f"[ERROR] 工作目录不存在: {working_root}\n        {native_path_hint(working_root)}")
             return _session_result(skill.metadata.name, "invalid_working_root")
+        memory_service = None
+        try:
+            from skill_engine.memory.service import MemoryService
+            from skill_engine.memory.settings import load_memory_config
+            memory_cfg = load_memory_config()
+            if memory_enabled is not None:
+                memory_cfg.enabled = bool(memory_enabled)
+            memory_service = MemoryService(working_root=wr, config=memory_cfg)
+        except Exception:
+            memory_service = None
+
         session = SkillSession(skill_name=skill.metadata.name, working_root=wr, state_path=state_path,
-                               strict_file_tracking=bool(getattr(skill.metadata, "strict_file_tracking", False)))
+                               strict_file_tracking=bool(getattr(skill.metadata, "strict_file_tracking", False)),
+                               memory=memory_service)
 
         # 2. 续接
         resumed = False
@@ -589,6 +612,11 @@ class Runner:
             if loaded is not None:
                 session.messages = list(loaded.get("messages", []))
                 resumed = bool(session.messages)  # 空历史等同全新会话，避免以空 messages 起轮
+                if resumed and memory_service is not None and memory_service.enabled:
+                    msg = memory_service.build_session_memory_message(
+                        skill_name=skill.metadata.name)
+                    if msg:
+                        session.messages.append(msg)
                 print(f"[session] 已从 {resume_from} 续接（{len(session.messages)} 条历史）")
 
         # 3. 构造 runner：session 模式 human_io 始终提供（供 ask_user），turn_policy=None 禁用内部循环
@@ -610,6 +638,7 @@ class Runner:
             plain_text=self.plain_text, verbose=self.verbose,
             tracer=self.tracer,
             trusted_root=trusted_root,
+            memory_service=memory_service,
         )
 
         # 未给初始 query：先打印该 skill 的用法提示（含 ASCII art），再等待用户第一条指令
@@ -622,6 +651,7 @@ class Runner:
             query=query, llm=llm, max_iterations=max_iterations,
             td_runner=td_runner, hio=hio, save=save, resumed=resumed,
             build_match_result=_build_match_result, session_result=_session_result,
+            memory_service=memory_service,
         )
 
     # 空输入（直接回车）时追加的续写指令：明确语义为「基于已有历史继续」，
@@ -832,7 +862,8 @@ class Runner:
         return skill, score, method, None
 
     def _repl_loop(self, session, skill, score, method, query, llm, max_iterations,
-                   td_runner, hio, save, resumed, build_match_result, session_result) -> dict:
+                   td_runner, hio, save, resumed, build_match_result, session_result,
+                   memory_service=None) -> dict:
         """session 主循环：每轮读指令 → 调 run(session_mode=True) → 交还控制权。"""
         iteration = 0
         last_output = ""
@@ -845,6 +876,16 @@ class Runner:
             else:
                 # 无初始 query / 续接首轮 / 后续各轮：等待用户下条指令
                 user_cmd = hio.read(prompt=f"│ {skill.metadata.name} > ")
+                if memory_service is not None:
+                    try:
+                        from skill_engine.memory.repl import handle_repl_command
+                        if handle_repl_command(user_cmd, memory_service):
+                            iteration -= 1
+                            continue
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[memory] 命令处理失败: {e}")
+                        iteration -= 1
+                        continue
                 # 终端无关的元命令：解决 input() 回退时多行粘贴被按行拆分的问题
                 if user_cmd.startswith(":load "):
                     loaded = _load_file_as_paste(user_cmd[6:].strip(),

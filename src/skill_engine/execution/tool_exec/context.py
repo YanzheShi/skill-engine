@@ -44,4 +44,5 @@ class ToolContext:
     truncate_msg: Optional[Callable] = None        # (content, max_chars=...) -> str
     emit_tool: Optional[Callable] = None           # (label, detail="") -> None
     emit_result: Optional[Callable] = None         # (out) -> None
+    memory: Any = None                             # MemoryService（可选）
     loop: LoopState = field(default_factory=LoopState)

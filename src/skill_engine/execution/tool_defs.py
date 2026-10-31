@@ -468,7 +468,116 @@ def _take_screenshot(url: str, width: int = 1280, height: int = 800,
     return _take_fullpage_cdp(edge, target, width, out_abs, out_path)
 
 
-TOOL_DISPATCH_TOOLS = [bash, read_file, write_file, edit_file, search_files, stop, web_search, get_current_time, shot_web, view_image, update_plan, query_db, run_python]
+@tool
+def memory_search(
+    query: str,
+    scope: str = "auto",
+    type: str = "",
+    domain: str = "",
+    as_of: str = "",
+    top_k: int = 3,
+    include_history: bool = False,
+    include_private: bool = False,
+) -> str:
+    """Search the user's long-term memory (preferences, facts, decisions, resources).
+
+    Use this when you need context from earlier sessions: project decisions,
+    user preferences, directory locations, terminology, or current phases.
+    Results are snippets + ids; call memory_get with an id for the full record.
+
+    Args:
+        query: Natural-language or keyword query.
+        scope: auto / user / project / all. auto = current project + user.
+        type: Optional record type filter (fact, preference, resource, ...).
+        domain: Optional domain tag filter (coding, career, health, ...).
+        as_of: Optional ISO date/time; returns records valid at that time.
+        top_k: Number of results (default 3).
+        include_history: Include superseded/archived/stale records.
+        include_private: Include L3 (sensitive) records when authorized.
+    """  # noqa: E501
+    return ""
+
+
+@tool
+def memory_get(id: str, include_private: bool = False) -> str:
+    """Read one long-term memory record by id (full body and metadata).
+
+    Args:
+        id: Record id returned by memory_search.
+        include_private: Include L3 records only when the user explicitly asked.
+    """
+    return ""
+
+
+@tool
+def memory_write(
+    type: str,
+    title: str,
+    body: str,
+    scope: str = "project",
+    domain: str = "",
+    entity: str = "",
+    path: str = "",
+    aliases: str = "",
+    valid_until: str = "",
+    confidence: str = "medium",
+    importance: float = 0.5,
+    sensitivity: str = "L2",
+    confirm: bool = False,
+) -> str:
+    """Write a durable memory record.
+
+    Only store durable facts/decisions/preferences/gotchas. Do not store
+    tool output, secrets, or large documents — write a file and store a pointer.
+
+    Args:
+        type: Record type (fact, preference, decision, resource, term, state, ...).
+        title: One-line title.
+        body: Concise content (<= 2000 chars).
+        scope: user / project / skill. Default project.
+        domain: Comma-separated domain tags (coding, career, health, ...).
+        entity: Optional related entity name/id.
+        path: Optional directory/file path for resource/project records.
+        aliases: Optional comma-separated aliases for entity/resource records.
+        valid_until: Optional ISO date/time for time-bound state/observation.
+        confidence: high / medium / low.
+        importance: 0-1, used by views and ranking.
+        sensitivity: L1 / L2 / L3.
+        confirm: Must be true for scope=user; set only after the user agrees.
+    """  # noqa: E501
+    return ""
+
+
+@tool
+def entity_resolve(name: str) -> str:
+    """Resolve a person/organization/project/resource name or alias to memory entities."""
+    return ""
+
+
+@tool
+def resource_resolve(name: str) -> str:
+    """Resolve a directory/file/service name or alias to a verified path."""
+    return ""
+
+
+@tool
+def memory_forget(id: str, confirm: bool = False) -> str:
+    """Forget a memory record. Requires confirm=true; deletion is audited."""
+    return ""
+
+
+MEMORY_TOOL_NAMES = {
+    "memory_search", "memory_get", "memory_write",
+    "entity_resolve", "resource_resolve", "memory_forget",
+}
+
+TOOL_DISPATCH_TOOLS = [
+    bash, read_file, write_file, edit_file, search_files, stop,
+    web_search, get_current_time, shot_web, view_image, update_plan,
+    query_db, run_python,
+    memory_search, memory_get, memory_write, entity_resolve,
+    resource_resolve, memory_forget,
+]
 
 # 工具注册表：将硬编码列表升级为可扩展注册表（通用引擎核心，不绑定领域语义）。
 # 各 skill 可经 frontmatter 的 extra_tools 注入领域专属工具，核心不感知具体领域。

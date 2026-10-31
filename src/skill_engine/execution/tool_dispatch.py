@@ -28,7 +28,9 @@ from typing import Optional, Callable
 from skill_engine.models import Skill, MatchResult, TurnPolicy, RunResult
 from skill_engine.execution.assembler import Assembler
 from skill_engine.execution.executor import Executor
-from skill_engine.execution.tool_defs import TOOL_REGISTRY, load_skill_tools, load_mcp_tools
+from skill_engine.execution.tool_defs import (
+    MEMORY_TOOL_NAMES, TOOL_REGISTRY, load_mcp_tools, load_skill_tools,
+)
 from skill_engine.execution.context_manager import ContextManager, default_context_budget
 from skill_engine.execution.human_io import HumanIO
 from skill_engine.execution.tracer import DebugTracer, truncate
@@ -95,6 +97,7 @@ class ToolDispatchRunner:
         verbose: bool = False,
         trusted_root: Optional[str] = None,
         tracer: Optional["DebugTracer"] = None,
+        memory_service=None,
     ):
         self.executor = executor
         self.assembler = assembler
@@ -106,6 +109,7 @@ class ToolDispatchRunner:
         self.plain_text = plain_text  # CLI 纯文本终端：禁用 Markdown 输出
         self.verbose = verbose  # 是否显示引擎内部调试态（迭代/历史条数/LLM 响应）
         self.tracer = tracer  # 可选 DebugTracer；None / 未开启时全程 no-op
+        self.memory_service = memory_service  # 可选 MemoryService
         # trusted_root：用户显式指定的受信任工作目录（如 MOA -w）。
         # 目录内的文件读写自动放行（免审批/免 diff 确认）；目录外维持原审批。
         self.trusted_root = to_native_path(trusted_root)
@@ -384,14 +388,31 @@ class ToolDispatchRunner:
             执行结果 dict
         """
         skill = match_result.skill
-        final_prompt = self.assembler.assemble(
+        body_prompt = self.assembler.assemble(
             skill, match_result.arguments, plain_text=self.plain_text)
 
         base_dir = self.working_root or Path(skill.directory)
 
         # 环境头：显式告诉模型 OS / shell / 工作目录 / 路径风格。
         # 缺了这段，模型在 Windows 上会照发 ls/pwd 与 /d/... 路径，空转到迭代上限。
-        final_prompt = build_env_header(base_dir, getattr(self.executor, "shell", "")) + final_prompt
+        env_header = build_env_header(base_dir, getattr(self.executor, "shell", ""))
+        final_prompt = env_header + body_prompt
+
+        # 长期记忆只在新起一轮时注入；session 续轮直接复用历史，
+        # 避免每轮重复膨胀。记忆块在 _save_state 中会被剥离。
+        if (self.memory_service is not None
+                and getattr(self.memory_service, "enabled", False)
+                and getattr(skill.metadata, "memory_enabled", True)
+                and initial_messages is None
+                and not resume_from):
+            try:
+                memory_block = self.memory_service.render_context(
+                    skill_name=skill.metadata.name)
+            except Exception as e:  # noqa: BLE001 — 记忆失败不阻断主流程
+                logger.debug("记忆注入失败（忽略）: %s", e)
+                memory_block = ""
+            if memory_block:
+                final_prompt = env_header + memory_block + "\n" + body_prompt
         # 复用外部快照时，_recorded 集合得以跨轮保留，第 2 轮的首次写入不会
         # 覆盖第 1 轮记录的 .bak（否则只能回滚到本轮起点）。
         self._snapshot = snapshot if snapshot is not None else FileSnapshot(base_dir)
@@ -448,6 +469,8 @@ class ToolDispatchRunner:
                 tools = [t for t in tools if t.name not in disallowed]
             if allowed:
                 tools = [t for t in tools if t.name in allowed]
+            if not getattr(skill.metadata, "memory_enabled", True):
+                tools = [t for t in tools if t.name not in MEMORY_TOOL_NAMES]
             # 按模型能力过滤：文本模型不暴露视觉工具（view_image / shot_web），
             # 从根源杜绝「截图 → 看图 → 被告知无视觉」的无效步骤。
             from skill_engine.config import model_supports_vision
@@ -538,6 +561,7 @@ class ToolDispatchRunner:
             truncate_msg=self._truncate_msg,
             emit_tool=self._emit_tool,
             emit_result=self._emit_result,
+            memory=self.memory_service,
         )
         scheduler = IoScheduler({n: h for n, h in handlers.items() if h.batchable})
         # 参数调用指纹环检测（单次 run 内；详见 tool_exec/loop_guard.py）
@@ -880,10 +904,22 @@ class ToolDispatchRunner:
         try:
             p = Path(path)
             p.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                from skill_engine.memory.redact import strip_memory_from_messages
+                safe_messages = strip_memory_from_messages(messages)
+                safe_final_prompt = strip_memory_from_messages(
+                    [{"role": "user", "content": final_prompt}]
+                )
+                safe_final_prompt = (
+                    safe_final_prompt[0].get("content", "") if safe_final_prompt else ""
+                )
+            except Exception:
+                safe_messages = messages
+                safe_final_prompt = final_prompt
             state = {
                 "type": "snapshot",
-                "final_prompt": final_prompt,
-                "messages": messages,
+                "final_prompt": safe_final_prompt,
+                "messages": safe_messages,
                 "iterations": iterations,
                 "step_results": step_results,
                 "files_created": files_created,

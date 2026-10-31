@@ -80,7 +80,11 @@ class DebugTracer:
         if self._fh is None:
             return
         rec = {"ts": datetime.now().isoformat(timespec="milliseconds"), "kind": kind}
-        rec.update(payload)
+        try:
+            from skill_engine.memory.redact import redact_value
+            rec.update(redact_value(payload))
+        except Exception:
+            rec.update(payload)
         try:
             self._fh.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
         except Exception:
@@ -106,6 +110,14 @@ class DebugTracer:
         ctx_path = context_path or (self._path + ".ctx.json")
         try:
             msgs = list(messages) if hasattr(messages, "__iter__") else messages
+            try:
+                from skill_engine.memory.redact import (
+                    redact_messages_for_trace,
+                    strip_memory_from_messages,
+                )
+                msgs = redact_messages_for_trace(strip_memory_from_messages(msgs))
+            except Exception:
+                pass
             with open(ctx_path, "w", encoding="utf-8") as f:
                 json.dump(
                     {

@@ -24,6 +24,7 @@ from typing import Optional
 
 from .execution.paths import to_native_path, native_path_hint, runtime_dir
 from .execution.tracer import DebugTracer
+from .memory.cli import memory_app, phase_app, profile_app, project_app
 
 # Fix Windows encoding for CLI output
 if sys.platform == "win32":
@@ -38,6 +39,11 @@ app = typer.Typer(
     help="Skills Engine: 独立的 skills 解析和路由工具",
     add_completion=False,
 )
+
+app.add_typer(memory_app, name="memory")
+app.add_typer(profile_app, name="profile")
+app.add_typer(phase_app, name="phase")
+app.add_typer(project_app, name="project")
 
 
 def _resolve_debug_tracer(debug: bool, debug_log: Optional[str], working_root: Optional[str]):
@@ -900,6 +906,7 @@ def session(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="显示引擎调试日志（迭代/历史条数/LLM 响应）"),
     debug: bool = typer.Option(False, "--debug", help="记录调试轨迹（上下文/状态栏/交互流程）到 JSONL 日志"),
     debug_log: Optional[str] = typer.Option(None, "--debug-log", help="调试日志路径；或设环境变量 SKILL_ENGINE_DEBUG_LOG（CI 优先）"),
+    no_memory: bool = typer.Option(False, "--no-memory", help="本次会话关闭长期记忆注入与自动检索"),
 ):
     """进入单 skill 持续会话（REPL 模式）
 
@@ -987,6 +994,7 @@ def session(
         working_root=working_root or str(Path.cwd()),
         state_path=state_path, resume_from=resume_from,
         trusted_root=working_root,
+        memory_enabled=False if no_memory else None,
     )
 
     stopped = result.get("stopped_by")
@@ -1393,6 +1401,18 @@ def _moa_execute(registry, workers: list, commander, query: str,
 
     if tracer is not None:
         tracer.close()
+
+
+@app.command("now")
+def now_command(
+    as_of: Optional[str] = typer.Option(None, "--as-of", help="查看某个时间点的 NOW"),
+    working_root: Optional[str] = typer.Option(None, "--working-root", "-w"),
+    include_private: bool = typer.Option(True, "--include-private/--no-include-private"),
+):
+    """显示当前 active 的阶段/目标/任务/事件。"""
+    from .memory.cli import now_view
+
+    now_view(as_of=as_of, root=working_root, include_private=include_private)
 
 
 def main() -> None:

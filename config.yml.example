@@ -51,6 +51,33 @@ settings:
   debug_log: ""
   debug: false
 
+  # 长期记忆（P0/P1）：user + project 双作用域默认开启。
+  # user_store 为跨项目稳定信息；project_store 相对 working_root，并已被 .gitignore 忽略。
+  # 关闭：SKILLS_ENGINE_MEMORY_ENABLED=0，或在本段设 enabled: false。
+  memory:
+    enabled: true
+    user_store: ~/.skill-engine/memory
+    project_store: .skill-engine/memory
+    inject:
+      profile_budget: 700
+      now_budget: 250
+      project_budget: 250
+      search_budget: 300
+      max_total: 1500
+    status_ttl_days: 7
+    resource_verify_days: 30
+    episode_retention_days: 90
+    auto_distill: true
+    distill_model: secondary
+    auto_commit:
+      project: high
+      user: review
+    sensitivity:
+      default: L2
+      l3_injection: on_demand   # always | on_demand | allowlist
+    export:
+      exclude_private: true
+
   # Windows srt 沙箱（docs/sandbox-integration-design.md §4.7）。
   # 路由：只读白名单裸跑；删除类/联网/宿主工具审批后裸跑；其余一切进沙箱。
   # 环境变量整体开关：SKILLS_ENGINE_SANDBOX=on|off（优先于本段）；
