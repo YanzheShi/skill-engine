@@ -40,7 +40,10 @@ from skill_engine.execution.paths import to_native_path, _resolve_path  # noqa: 
 from skill_engine.security.scanner import should_approve
 from skill_engine.config import llm_call_interval
 
-from skill_engine.execution.tool_exec.budget import _progress_hint, _build_handoff, _pop_progress_hint
+from skill_engine.execution.tool_exec.budget import (
+    FINAL_SUMMARY_PREFIX, _final_summary_prompt, _progress_hint,
+    _build_handoff, _pop_progress_hint,
+)
 from skill_engine.execution.tool_exec.parse import parse_tool_calls
 from skill_engine.execution.tool_exec.bash_util import (  # noqa: F401（向后兼容 re-export）
     _PATH_TOKEN_RE, _extract_cmd_paths, format_observation,
@@ -366,6 +369,94 @@ class ToolDispatchRunner:
         if extra_ctx:
             ctx.update(extra_ctx)
         return self._trace_finish(RunResult(output=output, ctx=ctx, history=messages))
+
+    def _invoke_final_summary(self, llm, messages: list) -> "tuple[str, str, str]":
+        """无工具调用一次，返回 (text, finish_reason, error)。
+
+        故意不复用主循环的重试块：总结失败不应把整个 run 判成 error，
+        调用方会用 handoff 兜底，保证预算耗尽时仍有可交接产物。
+        """
+        if not hasattr(llm, "invoke"):
+            return "", "", "LLM 客户端不支持 invoke"
+
+        last_err = ""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = llm.invoke(messages)
+                finish_reason = ""
+                if isinstance(resp, str):
+                    text = resp
+                elif isinstance(resp, dict):
+                    text = resp.get("content") or ""
+                    finish_reason = str(resp.get("finish_reason") or "")
+                else:
+                    text = getattr(resp, "content", "") or ""
+                    meta = getattr(resp, "response_metadata", None) or {}
+                    if isinstance(meta, dict):
+                        finish_reason = str(meta.get("finish_reason") or "")
+                if not isinstance(text, str):
+                    text = str(text)
+                # 即使响应里仍带 tool_calls，这里也只看正文；调用方不会执行它们。
+                return text.strip(), finish_reason, ""
+            except Exception as e:  # noqa: BLE001 — 总结失败走 handoff，不中断收尾
+                last_err = str(e)
+                low = last_err.lower()
+                retryable = ("429" in last_err or "rate" in low or "quota" in low
+                             or "exhaust" in low or "timeout" in low or "temporar" in low)
+                if not retryable or attempt == max_retries - 1:
+                    break
+                if not os.environ.get("PYTEST_CURRENT_TEST"):
+                    time.sleep(20 * (attempt + 1))
+        return "", "", last_err or "未知错误"
+
+    def _finalize_after_budget(self, llm, messages: list, skill_name: str,
+                               step_results: list, files_created: list,
+                               iterations: int, max_iterations: int) -> "RunResult":
+        """预算耗尽后的收尾：再发一次「无工具」请求，强制模型输出总结。
+
+        - 使用原始 llm（未 bind_tools），从协议层保证本轮不可能执行工具；
+        - 响应里即使出现 tool_calls 也不执行、不写入 history；
+        - 总结失败/为空时回落到规则抽取的 handoff，保证仍有可交接产物。
+        """
+        handoff = _build_handoff(messages, step_results, skill_name)
+        messages.append({
+            "role": "user",
+            "content": _final_summary_prompt(iterations, max_iterations, step_results),
+        })
+        try:
+            text, finish_reason, err = self._invoke_final_summary(llm, messages)
+        finally:
+            if (messages and str(messages[-1].get("content", ""))
+                    .startswith(FINAL_SUMMARY_PREFIX)):
+                messages.pop()
+
+        if err:
+            output = f"[达到最大迭代次数] 自动总结调用失败（{err}）\n\n{handoff}"
+        elif not text:
+            output = f"[达到最大迭代次数] 自动总结未返回可用内容\n\n{handoff}"
+        else:
+            output = f"[达到最大迭代次数 · 自动总结]\n{text}"
+            if finish_reason in ("length", "max_tokens"):
+                output += "\n\n[注意：本次总结可能因输出上限被截断]"
+
+        # 无论成功还是回落，都把最终产物写回 history，保证续跑/审计能看到。
+        messages.append({"role": "assistant", "content": output})
+
+        if self.tracer and self.tracer.enabled():
+            self.tracer.event(
+                "final_summary",
+                iterations=iterations,
+                max=max_iterations,
+                ok=bool(text) and not err,
+                chars=len(text or ""),
+                fallback=bool(err or not text),
+            )
+        return self._finish_result(
+            output, "max_iterations", step_results, files_created,
+            skill_name, iterations, messages,
+            extra_ctx={"handoff_summary": handoff, "final_summary": True},
+        )
 
     def run(
         self,
@@ -882,13 +973,17 @@ class ToolDispatchRunner:
                 # 调用前占热路径。
                 cm.maybe_compress(llm, episode_writer=self._write_episode)
 
-        # 达到最大迭代次数
-            result = self._finish_result(
-                "[达到最大迭代次数]", "max_iterations", step_results, files_created,
-                skill.metadata.name, iterations, messages,
-                # 硬中断结构化移交，供 resume / 人工续跑，避免静默丢失成果
-                extra_ctx={"handoff_summary": _build_handoff(messages, step_results, skill.metadata.name)})
-            return result
+            # 达到最大迭代次数：再发一次无工具请求，强制模型输出可交接总结
+            if max_iterations <= 0:
+                return self._finish_result(
+                    "[达到最大迭代次数]", "max_iterations", step_results, files_created,
+                    skill.metadata.name, iterations, messages,
+                    # 硬中断结构化移交，供 resume / 人工续跑，避免静默丢失成果
+                    extra_ctx={"handoff_summary": _build_handoff(
+                        messages, step_results, skill.metadata.name)})
+            return self._finalize_after_budget(
+                llm, messages, skill.metadata.name, step_results, files_created,
+                iterations, max_iterations)
         finally:
             # 任一退出路径（含提前 stop / error / max_iterations）都落盘，支撑续跑
             if save_path:

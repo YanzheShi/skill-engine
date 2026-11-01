@@ -35,6 +35,34 @@ def _progress_hint(iterations: int, max_iterations: int, step_results: "list|Non
     )
 
 
+# 最后一轮总结提示的前缀：既用于模型识别，也用于调用后从 messages 中 pop。
+FINAL_SUMMARY_PREFIX = "[最后一轮 · 工具已收回]"
+
+
+def _final_summary_prompt(iterations: int, max_iterations: int,
+                          step_results: "list|None" = None) -> str:
+    """预算耗尽后的无工具总结指令。
+
+    这一轮不绑定任何工具，提示词只负责把「可交接的结论」结构定下来；
+    真正的硬约束由调用方使用未绑定工具的 LLM 保证。
+    """
+    steps = [s.get("type") for s in (step_results or [])
+             if isinstance(s, dict) and s.get("type")]
+    executed = f"已执行 {len(steps)} 个工具步骤" if steps else "本轮没有成功执行的工具步骤"
+    return (
+        f"{FINAL_SUMMARY_PREFIX}\n"
+        f"预算已耗尽（已完成 {iterations}/{max_iterations} 轮，{executed}）。"
+        "本轮不再提供任何工具，任何工具调用都不会被执行。\n"
+        "请只基于以上对话与工具结果，输出一份可交接的最终总结，严格按以下结构：\n"
+        "1. 已完成：具体做了什么，涉及哪些文件。\n"
+        "2. 验证结果：跑过哪些命令/测试，退出码或关键输出是什么；没验证就写“未验证”。\n"
+        "3. 未完成/阻塞：还差什么，卡在哪里。\n"
+        "4. 关键文件与命令：列出改动/读取过的路径和可复现命令。\n"
+        "5. 建议下一步：下一位执行者应当先做什么。\n"
+        "要求：不要编造未实际执行的结果；信息缺失就写“未知”；不要输出新的工具调用。"
+    )
+
+
 def _build_handoff(messages: "list[dict]", step_results: "list[dict]", skill_name: str) -> str:
     """硬中断（max_iterations）时的结构化交接摘要。
 

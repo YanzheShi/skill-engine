@@ -55,6 +55,8 @@ class TestFetchScript:
             [sys.executable, str(LEETCODE_SKILL_DIR / "scripts" / "fetch_problem.py"), "49"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
             cwd=str(LEETCODE_SKILL_DIR),
         )
@@ -71,6 +73,8 @@ class TestFetchScript:
             [sys.executable, str(LEETCODE_SKILL_DIR / "scripts" / "fetch_problem.py"), "99999"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
             cwd=str(LEETCODE_SKILL_DIR),
         )
@@ -84,6 +88,8 @@ class TestFetchScript:
             [sys.executable, str(LEETCODE_SKILL_DIR / "scripts" / "fetch_problem.py")],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
             cwd=str(LEETCODE_SKILL_DIR),
         )
@@ -192,6 +198,8 @@ class TestCLIIntegration:
             [sys.executable, "-m", "skill_engine.cli", "list"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
             cwd=str(Path(__file__).parent.parent),
         )

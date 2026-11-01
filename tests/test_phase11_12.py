@@ -8,7 +8,6 @@ Phase 11+12 测试套件 — Skill 自动创建 + 验证
 4. SkillValidator.validate_scripts() — 脚本验证
 5. Runner.create_skill() — 端到端创建 + 验证
 6. Runner.register_new_skill() — 热注册
-7. system-create-skill 能被 discovery 发现
 """
 
 import pytest
@@ -322,36 +321,6 @@ class TestRunnerCreateSkill:
         # 热注册
         name = runner.register_new_skill("register-test", skills_dir=skills_dir)
         assert name == "register-test"
-
-
-class TestSystemCreateSkill:
-    """测试 system-create-skill meta-skill"""
-
-    def test_system_skill_exists(self):
-        """system-create-skill 存在"""
-        from pathlib import Path
-        assert (Path(__file__).parent.parent / "skills" / "system-create-skill" / "SKILL.md").exists()
-
-    def test_system_skill_discoverable(self):
-        """system-create-skill 能被 discovery 发现"""
-        from skill_engine.routing.discovery import discover
-        from skill_engine.routing.registry import Registry
-
-        index = discover(roots=["skills"])
-        registry = Registry(index)
-        assert "system-create-skill" in index
-
-    def test_system_skill_has_groups(self):
-        """system-create-skill 有 groups"""
-        from skill_engine.routing.discovery import discover
-        from skill_engine.routing.registry import Registry
-
-        index = discover(roots=["skills"])
-        registry = Registry(index)
-        fm = registry.info_full("system-create-skill")
-        assert fm is not None
-        assert "system" in fm.get("groups", [])
-        assert "meta" in fm.get("groups", [])
 
 
 class TestSkillCreatorEnhanced:

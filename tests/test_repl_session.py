@@ -280,8 +280,9 @@ def test_max_iterations_does_not_exit_session(tmp_path):
     result, llm, hio = _run_session(
         tmp_path, [loop_resp, loop_resp], io_queue=["/exit"], max_iterations=2)
 
-    # 内层被 max_iterations 限制，只跑了 2 轮工具循环（不会无限循环）
-    assert len(llm.calls) == 2
+    # 内层被 max_iterations 限制：2 轮工具循环 + 1 次预算耗尽后的无工具总结调用
+    assert len(llm.calls) == 3
+    assert "自动总结" in result.get("output", "")
     # 达到 max_iterations 后本轮中断但会话继续，最终由用户 /exit 结束
     # （若旧行为"直接以 max_iterations 退出"，stopped_by 会是 "max_iterations" 而非 "user_exit"）
     assert result.get("stopped_by") == "user_exit"
