@@ -232,6 +232,33 @@ class TestToolDispatchWithMock:
         assert (tmp_path / "output.txt").exists()
         assert (tmp_path / "output.txt").read_text(encoding="utf-8") == "hello world"
 
+    def test_truncated_write_is_refused_by_guard(self, runner, tmp_path):
+        """残缺 write_file（只有 path、无 content）不执行，回灌截断提示。"""
+        from skill_engine.models import Skill, SkillMetadata, MatchResult
+
+        skill = Skill(
+            metadata=SkillMetadata(name="test-guard", description="测试"),
+            body="测试",
+            directory=str(tmp_path),
+        )
+        match = MatchResult(skill=skill, score=1.0, method="name", arguments={})
+
+        llm = MockLLMWithToolCalls([
+            {"content": "", "tool_calls": [
+                {"id": "call_1", "type": "write_file", "input": {"path": "big.html"}}
+            ]},
+            {"content": "已改为分块续写", "tool_calls": []},
+        ])
+
+        result = runner.run(match, tool_dispatch=llm)
+        # 不能留下空文件或半成品
+        assert not (tmp_path / "big.html").exists()
+        assert not (tmp_path / "big.html.partial").exists()
+        guard_steps = [s for s in result["steps"] if s.get("type") == "truncation_guard"]
+        assert len(guard_steps) == 1
+        tool_msgs = [m for m in result["history"] if m.get("role") == "tool"]
+        assert any("max_tokens" in str(m.get("content", "")) for m in tool_msgs)
+
     def test_mock_stop_tool_call(self, runner):
         """Mock：stop 工具提前终止"""
         from skill_engine.models import Skill, SkillMetadata, MatchResult

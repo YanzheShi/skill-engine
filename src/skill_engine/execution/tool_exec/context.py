@@ -37,6 +37,9 @@ class ToolContext:
     tracer: Any = None               # 可选 DebugTracer；None / 未开启时 no-op
     confirm_edits_mode: str = ""
     model_has_vision: bool = True
+    # 本轮输出是否撞到 max_tokens（由 dispatch 每轮写入）：写类 handler 据此
+    # 决定能否把 *.partial 转正——被截断时宁可留在 partial，也不产出坏文件。
+    turn_truncated: bool = False
     image_url_cache: dict = field(default_factory=dict)  # view_image R2 上传缓存（跨轮存活）
     # 安全/确认/截断/展示等跨切面能力由 dispatch 层提供（handler 不重复实现五步仪式）
     check_file_safety: Optional[Callable] = None   # (op, filepath, skill) -> (bool, err)

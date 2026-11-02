@@ -24,6 +24,11 @@ from typing import Callable, Optional
 FOLD_THRESHOLD = 1500
 # L1：折叠时保留的头部预览长度
 FOLD_KEEP_PREVIEW = 200
+# L1：旧轮 tool_call 参数（write_file.content / edit_file.newText）超过该字符数才折叠。
+# 内容已落盘，历史里再留一份纯属每轮重复计费；keep_recent 窗口内的最近写不受影响。
+TC_ARGS_FOLD_THRESHOLD = 2000
+_TC_OMIT_CONTENT = "[content omitted → {path}（已落盘；如需修改请 read_file）]"
+_TC_OMIT_NEWTEXT = "[newText omitted（已落盘；如需修改请 read_file）]"
 # 引擎级默认预算（context_budget=0 时使用），可被环境变量覆盖
 DEFAULT_CONTEXT_BUDGET = 32768
 
@@ -223,6 +228,9 @@ class ContextManager:
                 if content and not (isinstance(content, str) and content.startswith("[已折叠")):
                     m["content"] = "[已折叠: 旧轮思考过程]"
                     changed = True
+                # 扩展：回收旧轮 tool_call 的巨大 args（内容已落盘，仅上下文占位）
+                if self._fold_tool_call_args(m.get("tool_calls") or []):
+                    changed = True
             elif m.get("role") == "user":
                 # 扩展：MOA 黑板/composed 大块（黑板块已由增量注入治理，旧轮折叠）
                 content = m.get("content")
@@ -235,6 +243,39 @@ class ContextManager:
                         f"[头部预览] {content[:FOLD_KEEP_PREVIEW]}"
                     )
                     changed = True
+        return changed
+
+    def _fold_tool_call_args(self, tool_calls: list) -> bool:
+        """回收旧轮写类调用的巨大 args（信息已落盘，只折上下文、不折 trace）。
+
+        只处理 keep_recent 窗口之外的消息（_micro_compact 的切点已保证），
+        因此"最近一次写"仍完整可见，续写/append 不受影响。幂等。
+        """
+        changed = False
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            name = tc.get("name") or tc.get("type")
+            args = tc.get("args")
+            if args is None:
+                args = tc.get("input")
+            if not isinstance(args, dict):
+                continue
+            if name == "write_file":
+                c = args.get("content")
+                if (isinstance(c, str) and len(c) > TC_ARGS_FOLD_THRESHOLD
+                        and not c.startswith("[content omitted")):
+                    args["content"] = _TC_OMIT_CONTENT.format(path=args.get("path", "?"))
+                    changed = True
+            elif name == "edit_file":
+                for e in args.get("edits") or []:
+                    if not isinstance(e, dict):
+                        continue
+                    nt = e.get("newText")
+                    if (isinstance(nt, str) and len(nt) > TC_ARGS_FOLD_THRESHOLD
+                            and not nt.startswith("[newText omitted")):
+                        e["newText"] = _TC_OMIT_NEWTEXT
+                        changed = True
         return changed
 
     # ---- 三级主入口 ----

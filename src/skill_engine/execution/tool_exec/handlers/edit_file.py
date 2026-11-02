@@ -1,9 +1,15 @@
-"""edit_file：定点编辑（安全门 + read-before-write 校验 + 模糊匹配 + diff 预览）。"""
+"""edit_file：定点编辑（安全门 + read-before-write 校验 + 模糊匹配 + diff 预览）。
+
+若目标存在未转正的 ``<name>.partial``（上次写入被截断/尚未填完），
+则优先编辑该 partial；编辑后完整度通过才原子转正为正式文件。
+"""
 
 from skill_engine.execution.paths import resolve_path
+from skill_engine.execution.tool_exec import atomic_write
 from skill_engine.execution.tool_exec.context import ToolContext
 from skill_engine.execution.tool_exec.edit_patch import _apply_edits, _render_diff
 from skill_engine.execution.tool_exec.handler import BaseHandler
+from skill_engine.execution.tool_exec.handlers.write_file import _completeness_note
 from skill_engine.execution.tool_exec.result import CALL_TRUNCATED_HINT, ToolResult
 
 
@@ -35,23 +41,29 @@ class EditFileHandler(BaseHandler):
             return ToolResult(tool_call_id=tc["id"], name="edit_file", content=err_msg)
 
         full_path = resolve_path(filepath, ctx.base_dir)
+        ppath = atomic_write.partial_path(full_path)
+        staging = atomic_write.enabled()
+        # 优先编辑未转正的 partial；否则编辑正式文件
+        work_path = ppath if (staging and ppath.exists()) else full_path
 
-        if not full_path.exists():
+        if not work_path.exists():
             print(f"     FILE NOT FOUND: {filepath}")
             return ToolResult(
                 tool_call_id=tc["id"], name="edit_file",
                 content=f"error: 文件不存在: {filepath}（新文件请用 write_file）",
             )
 
-        # 编辑前一致性校验。软约束（默认）注入提示不阻断；硬约束
-        # （strict_file_tracking）拒绝执行，引导 LLM 重读后重试。
-        track_ok, track_msg = ctx.file_tracker.check_editable(full_path)
-        if not track_ok:
-            print(f"     EDIT BLOCKED (file tracker): {filepath}")
-            return ToolResult(tool_call_id=tc["id"], name="edit_file", content=track_msg)
+        # 编辑前一致性校验。partial 是本引擎暂存的半成品，不参与"已读"校验。
+        if work_path == full_path:
+            track_ok, track_msg = ctx.file_tracker.check_editable(full_path)
+            if not track_ok:
+                print(f"     EDIT BLOCKED (file tracker): {filepath}")
+                return ToolResult(tool_call_id=tc["id"], name="edit_file", content=track_msg)
+        else:
+            track_msg = ""
 
         try:
-            content = full_path.read_text(encoding="utf-8")
+            content = work_path.read_text(encoding="utf-8")
 
             # 校验 + 应用：精确优先，oldText 不存在时走行级宽松模糊匹配
             new_content, err = _apply_edits(content, edits)
@@ -73,12 +85,31 @@ class EditFileHandler(BaseHandler):
                     )
 
             # 写回前记录快照（通用文件检查点，仅首次记录进入前状态）
-            ctx.snapshot.record(full_path, content)
+            ctx.snapshot.record(work_path, content)
+            work_path.write_text(new_content, encoding="utf-8")
 
-            full_path.write_text(new_content, encoding="utf-8")
-            ctx.file_tracker.on_write(full_path)
+            finalized = True
+            verdict = ""
+            if work_path == ppath:
+                verdict = _completeness_note(full_path, new_content)
+                finalized = atomic_write.should_finalize(
+                    verdict, bool(getattr(ctx, "turn_truncated", False)))
+                if finalized:
+                    if full_path.exists():
+                        ctx.snapshot.record(full_path, full_path.read_text(encoding="utf-8"))
+                    atomic_write.finalize(ppath, full_path)
+                    ctx.file_tracker.on_write(full_path)
+                else:
+                    ctx.file_tracker.on_write(ppath)
+            else:
+                ctx.file_tracker.on_write(full_path)
 
-            result_msg = f"applied {len(edits)} edits to {filepath}"
+            if finalized:
+                result_msg = f"applied {len(edits)} edits to {filepath}"
+            else:
+                first = verdict.splitlines()[0] if verdict else "complete: NO"
+                result_msg = (f"applied {len(edits)} edits to {filepath}.partial; "
+                              f"target NOT written → {first}")
             if track_msg:
                 result_msg += f"\n{track_msg}"
             return ToolResult(
@@ -89,9 +120,10 @@ class EditFileHandler(BaseHandler):
                     "type": "edit_file",
                     "path": str(full_path),
                     "edits_count": len(edits),
+                    "staged": not finalized,
                 },
-                files_created=[str(full_path)],
-                round_had_write=True,
+                files_created=[str(full_path)] if finalized else [],
+                round_had_write=finalized,
                 print_line=f"     {result_msg}",
             )
         except Exception as e:

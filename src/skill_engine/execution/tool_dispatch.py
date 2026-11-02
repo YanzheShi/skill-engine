@@ -64,7 +64,8 @@ from skill_engine.execution.tool_exec.context import ToolContext, LoopState
 from skill_engine.execution.tool_exec.loop_guard import (
     LoopGuard, tool_call_fingerprint, loop_feedback_message, loop_stop_message,
 )
-from skill_engine.execution.tool_exec.result import ToolResult
+from skill_engine.execution.tool_exec.result import CALL_TRUNCATED_HINT, ToolResult
+from skill_engine.execution.tool_exec import guard as truncation_guard
 from skill_engine.execution.tool_exec.io_sched import IoScheduler, _IO_MAX_WORKERS  # noqa: F401
 from skill_engine.execution.tool_exec.registry import build_builtin_handlers
 from skill_engine.execution.tool_exec.handlers.bash import BASH_MAX_TIMEOUT  # noqa: F401
@@ -903,7 +904,29 @@ class ToolDispatchRunner:
                 })
 
                 tctx.loop = LoopState()  # 每轮重置循环态
+                # 本轮是否撞到输出上限：写类 handler 用它决定是否允许 partial 转正
+                tctx.turn_truncated = truncation_guard.is_truncated_turn(_finish_reason)
                 for idx, tc in enumerate(tool_calls):
+                    # P0 截断守卫：finish_reason=length / args 结构不完整时，
+                    # 不执行该条写类调用（避免写出坏文件），只拒这一条、其余照常。
+                    if truncation_guard.should_refuse(tc, _finish_reason):
+                        if self.tracer and self.tracer.enabled():
+                            self.tracer.event(
+                                "truncation_guarded",
+                                type=tc.get("type"), finish_reason=_finish_reason,
+                            )
+                        print(f"     TRUNCATION GUARD → 拒绝执行残缺的 {tc['type']} 调用")
+                        self._apply_result(
+                            ToolResult(
+                                tool_call_id=tc["id"], name=tc["type"],
+                                content=CALL_TRUNCATED_HINT.format(missing="content/edits"),
+                                step={"name": f"refused_{tc['id']}",
+                                      "type": "truncation_guard",
+                                      "tool": tc.get("type")},
+                            ),
+                            tctx, messages, step_results, files_created,
+                        )
+                        continue
                     # 可并行批工具（read/search）入批；遇到串行工具先 flush，
                     # 保证工具消息严格按 tool_calls 顺序回灌（OpenAI 协议要求）。
                     if scheduler.feed(tc):

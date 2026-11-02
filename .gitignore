@@ -122,3 +122,6 @@ skills/*/reports/
 skills/*/resume/
 skills/*/state/
 skills/*/session_history.json
+
+# 大文件写入 POC 的运行输出（poc/large_write_poc.py 自建自清）
+.poc_out/

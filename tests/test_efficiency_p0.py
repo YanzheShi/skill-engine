@@ -17,7 +17,9 @@ from skill_engine.config import (
     llm_max_tokens,
     llm_temperature,
 )
+from skill_engine.execution.context_manager import TC_ARGS_FOLD_THRESHOLD, ContextManager
 from skill_engine.execution.executor import Executor
+from skill_engine.execution.tool_exec import guard as truncation_guard
 from skill_engine.execution.tool_exec.handlers.edit_file import EditFileHandler
 from skill_engine.execution.tool_exec.handlers.write_file import WriteFileHandler
 
@@ -29,7 +31,10 @@ def _ctx(tmp_path, confirm_mode=""):
         skill=None,
         confirm_edits_mode=confirm_mode,
         snapshot=SimpleNamespace(record=lambda *a, **k: None),
-        file_tracker=SimpleNamespace(on_write=lambda *a, **k: None),
+        file_tracker=SimpleNamespace(
+            on_write=lambda *a, **k: None,
+            check_editable=lambda *a, **k: (True, ""),
+        ),
         check_file_safety=lambda *a, **k: (True, ""),
         confirm_edit=lambda *a, **k: True,
     )
@@ -230,3 +235,176 @@ class TestSandboxPrewarm:
         ex = Executor(timeout=1, sandbox=True)
         assert ex.prewarm_sandbox(tmp_path) is False
         assert ex.prewarm_sandbox(tmp_path) is False
+
+
+class TestAtomicStaging:
+    """暂存：不完整写不转正；补齐后原子替换。"""
+
+    def test_incomplete_html_stays_partial(self, tmp_path):
+        res = WriteFileHandler().execute(
+            {"id": "c1", "type": "write_file",
+             "input": {"path": "i.html", "content": "<html><body>x"}},
+            _ctx(tmp_path))
+        assert not (tmp_path / "i.html").exists()
+        assert (tmp_path / "i.html.partial").exists()
+        assert "complete: NO" in res.content
+        assert "NOT written" in res.content
+
+    def test_append_completes_and_finalizes(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        WriteFileHandler().execute(
+            {"id": "c1", "type": "write_file",
+             "input": {"path": "i.html", "content": "<html><body>x"}}, ctx)
+        res = WriteFileHandler().execute(
+            {"id": "c2", "type": "write_file",
+             "input": {"path": "i.html", "content": "</body></html>",
+                       "mode": "append"}}, ctx)
+        assert (tmp_path / "i.html").read_text(encoding="utf-8") == \
+            "<html><body>x\n</body></html>"
+        assert not (tmp_path / "i.html.partial").exists()
+        assert "complete: yes" in res.content
+
+    def test_edit_fills_marker_and_finalizes(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        WriteFileHandler().execute(
+            {"id": "c1", "type": "write_file",
+             "input": {"path": "i.html",
+                       "content": "<html><body><!--@C0@--></body></html>"}}, ctx)
+        # 残留 marker → 不转正
+        assert not (tmp_path / "i.html").exists()
+        assert (tmp_path / "i.html.partial").exists()
+        res = EditFileHandler().execute(
+            {"id": "c2", "type": "edit_file",
+             "input": {"path": "i.html",
+                       "edits": [{"oldText": "<!--@C0@-->",
+                                  "newText": "<div>ok</div>"}]}}, ctx)
+        assert (tmp_path / "i.html").read_text(encoding="utf-8") == \
+            "<html><body><div>ok</div></body></html>"
+        assert not (tmp_path / "i.html.partial").exists()
+        assert "applied 1 edits" in res.content
+
+    def test_atomic_write_can_be_disabled(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SKILLS_ENGINE_ATOMIC_WRITE", "0")
+        WriteFileHandler().execute(
+            {"id": "c1", "type": "write_file",
+             "input": {"path": "i.html", "content": "<html><body>x"}},
+            _ctx(tmp_path))
+        assert (tmp_path / "i.html").exists()          # 旧行为：直接写目标
+        assert not (tmp_path / "i.html.partial").exists()
+
+
+class TestTruncationGuard:
+    """守卫只管**参数结构**；内容语义完整性交给暂存层。"""
+
+    def test_short_skeleton_not_refused(self, tmp_path):
+        """线上回归：故意写的小骨架/半成品不能被守卫误杀（否则模型空转）。"""
+        tc = {"id": "t1", "type": "write_file",
+              "input": {"path": "a.html", "content": "A"}}
+        assert not truncation_guard.should_refuse(tc, "length")
+        res = WriteFileHandler().execute(tc, _ctx(tmp_path))
+        assert "complete: NO" in res.content          # 暂存层判定不完整
+        assert not (tmp_path / "a.html").exists()      # 但不转正，也不拒执行
+        assert (tmp_path / "a.html.partial").exists()
+
+    def test_length_does_not_refuse_structurally_ok(self):
+        tc = {"type": "write_file", "input": {"path": "a.txt", "content": "ok"}}
+        assert not truncation_guard.should_refuse(tc, "length")
+        assert truncation_guard.is_truncated_turn("length")
+        assert not truncation_guard.is_truncated_turn("stop")
+
+    def test_missing_content_still_refused(self):
+        assert truncation_guard.should_refuse(
+            {"type": "write_file", "input": {"path": "a.html"}}, "")
+        assert truncation_guard.should_refuse(
+            {"type": "write_file", "input": {"path": "a.html", "content": ""}}, "")
+
+    def test_edit_args_incomplete(self):
+        assert truncation_guard.should_refuse(
+            {"type": "edit_file", "input": {"edits": [{"oldText": "a"}]}}, "")
+        assert not truncation_guard.should_refuse(
+            {"type": "edit_file",
+             "input": {"edits": [{"oldText": "a", "newText": "b"}]}}, "")
+
+    def test_non_dict_args_refused(self):
+        # 某些 provider 的 args 是残缺 JSON 字符串，不能直接 .get
+        assert truncation_guard.should_refuse(
+            {"type": "write_file", "input": '{"path": "a.html", "cont'}, "")
+
+    def test_non_write_tools_not_refused(self):
+        assert not truncation_guard.should_refuse(
+            {"type": "bash", "input": {"command": "ls"}}, "length")
+
+
+class TestTruncatedTurnStaging:
+    """撞上限的那一轮：内容照写进 partial，但不转正（防半截代码成为正式文件）。"""
+
+    def test_unknown_type_not_finalized_when_truncated(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ctx.turn_truncated = True
+        WriteFileHandler().execute(
+            {"id": "c1", "type": "write_file",
+             "input": {"path": "m.py", "content": "def f():\n    return 1"}}, ctx)
+        assert not (tmp_path / "m.py").exists()
+        assert (tmp_path / "m.py.partial").exists()
+
+    def test_unknown_type_finalized_when_not_truncated(self, tmp_path):
+        ctx = _ctx(tmp_path)
+        ctx.turn_truncated = False
+        WriteFileHandler().execute(
+            {"id": "c1", "type": "write_file",
+             "input": {"path": "m.py", "content": "def f():\n    return 1"}}, ctx)
+        assert (tmp_path / "m.py").read_text(encoding="utf-8") == \
+            "def f():\n    return 1"
+
+    def test_closed_html_finalizes_even_if_turn_truncated(self, tmp_path):
+        """可证明完整（含 </html>）时，即使本轮撞上限也允许转正。"""
+        ctx = _ctx(tmp_path)
+        ctx.turn_truncated = True
+        WriteFileHandler().execute(
+            {"id": "c1", "type": "write_file",
+             "input": {"path": "ok.html",
+                       "content": "<html><body>hi</body></html>"}}, ctx)
+        assert (tmp_path / "ok.html").exists()
+
+    def test_paginated_build_survives_truncated_turns(self, tmp_path):
+        """复现线上场景：每一轮都撞 max_tokens，仍靠 partial + append 拼出完整文件。"""
+        ctx = _ctx(tmp_path)
+        ctx.turn_truncated = True
+        chunks = ['<html><head><title>t</title></head><body>\n',
+                  '<div>1</div>\n',
+                  '<div>2</div></body></html>\n']
+        for i, ch in enumerate(chunks):
+            WriteFileHandler().execute(
+                {"id": f"c{i}", "type": "write_file",
+                 "input": {"path": "big.html", "content": ch,
+                           "mode": "overwrite" if i == 0 else "append"}}, ctx)
+            if i < len(chunks) - 1:
+                assert not (tmp_path / "big.html").exists()   # 中途不产出半成品
+        assert (tmp_path / "big.html").read_text(encoding="utf-8") == "".join(chunks)
+        assert not (tmp_path / "big.html.partial").exists()
+
+
+class TestToolCallArgsFold:
+    """上下文回收：旧轮巨型 args 折叠，最近一轮保持完整。"""
+
+    def test_old_args_folded_recent_kept(self):
+        big = "X" * (TC_ARGS_FOLD_THRESHOLD + 10)
+        cm = ContextManager(keep_recent=1, compact_tool_output=True)
+        cm.messages = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"id": "1", "name": "write_file",
+                             "args": {"path": "a.html", "content": big}}]},
+            {"role": "tool", "tool_call_id": "1", "name": "write_file", "content": "ok"},
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"id": "2", "name": "write_file",
+                             "args": {"path": "b.html", "content": big}}]},
+            {"role": "tool", "tool_call_id": "2", "name": "write_file", "content": "ok"},
+        ]
+        assert cm._micro_compact() is True
+        old = cm.messages[2]["tool_calls"][0]["args"]["content"]
+        recent = cm.messages[5]["tool_calls"][0]["args"]["content"]
+        assert old.startswith("[content omitted")
+        assert recent == big                       # keep_recent 窗口内不折

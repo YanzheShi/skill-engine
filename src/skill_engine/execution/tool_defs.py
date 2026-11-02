@@ -98,6 +98,10 @@ def write_file(path: str, content: str, mode: str = "overwrite") -> str:
     The result reports the total size, line count, the last ~60 chars, and a
     completeness verdict for html/json. Trust that verdict instead of running
     your own `len()` / `endswith()` inspection via bash.
+
+    Large files: write in chunks and append. An incomplete write is staged as
+    `<path>.partial` and is NOT visible at `<path>` until completeness passes;
+    the next append/edit continues from that partial automatically.
     """
 
 
