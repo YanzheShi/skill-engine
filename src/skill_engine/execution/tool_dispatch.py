@@ -41,7 +41,8 @@ from skill_engine.security.scanner import should_approve
 from skill_engine.config import llm_call_interval
 
 from skill_engine.execution.tool_exec.budget import (
-    FINAL_SUMMARY_PREFIX, _final_summary_prompt, _progress_hint,
+    FINAL_SUMMARY_PREFIX, STOP_SUMMARY_PREFIX, _change_manifest,
+    _final_summary_prompt, _progress_hint, _stop_summary_prompt,
     _build_handoff, _pop_progress_hint,
 )
 from skill_engine.execution.tool_exec.parse import parse_tool_calls
@@ -955,8 +956,29 @@ class ToolDispatchRunner:
                                 "content": "已跳过：本轮已由 stop 终止",
                             })
                         final_text = (resp.get("content") or "").strip()
+                        manifest = _change_manifest(step_results, base_dir)
+                        if not final_text:
+                            # stop 契约未被满足（正文为空、结论只写在思考里）：补一次
+                            # 无工具收尾说明，而不是把一行 reason 当成最终答复交付。
+                            messages.append({"role": "user", "content": _stop_summary_prompt(
+                                t_result.stop_reason)})
+                            try:
+                                summary, _sfr, _serr = self._invoke_final_summary(llm, messages)
+                            finally:
+                                if (messages and str(messages[-1].get("content", ""))
+                                        .startswith(STOP_SUMMARY_PREFIX)):
+                                    messages.pop()
+                            if summary:
+                                final_text = summary
+                            if self.tracer and self.tracer.enabled():
+                                self.tracer.event("stop_summary", ok=bool(summary),
+                                                  chars=len(summary or ""))
+                        output = final_text or t_result.stop_reason
+                        # 产物清单：让用户一眼看到改了哪个文件、新建还是修改、在哪
+                        if manifest:
+                            output = f"{output}\n\n{manifest}" if output else manifest
                         return self._finish_result(
-                            final_text or t_result.stop_reason, "tool_stop", step_results,
+                            output, "tool_stop", step_results,
                             files_created, skill.metadata.name, iterations, messages)
                     self._apply_result(t_result, tctx, messages, step_results, files_created)
                     if t_result.hard_stop:

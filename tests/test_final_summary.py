@@ -3,7 +3,11 @@
 from skill_engine.execution.assembler import Assembler
 from skill_engine.execution.executor import Executor
 from skill_engine.execution.runner import Runner
-from skill_engine.execution.tool_exec.budget import FINAL_SUMMARY_PREFIX
+from skill_engine.execution.tool_exec.budget import (
+    FINAL_SUMMARY_PREFIX,
+    STOP_SUMMARY_PREFIX,
+    _change_manifest,
+)
 from skill_engine.models import MatchResult, Skill, SkillMetadata
 
 
@@ -127,3 +131,65 @@ def test_normal_completion_does_not_add_summary_call(tmp_path):
     assert result["stopped_by"] == "stop"
     assert len(llm.calls) == 2
     assert result["output"] == "done"
+
+
+def _write_call(path="a.txt", body="hello"):
+    return {"content": "", "tool_calls": [
+        {"id": "w1", "type": "write_file",
+         "input": {"path": path, "content": body}}
+    ]}
+
+
+def _stop_call(reason, content="\n\n"):
+    return {"content": content, "tool_calls": [
+        {"id": "s1", "type": "stop", "input": {"reason": reason}}
+    ]}
+
+
+def test_stop_with_empty_content_gets_closing_summary_and_manifest(tmp_path):
+    """复现线上问题：stop 正文为空时，不能只把一行 reason 当最终答复。"""
+    llm = RecordingLLM(
+        [_write_call(), _stop_call("已核对并小幅更新文档，验证通过")],
+        {"content": "本次修改了 a.txt，并跑过基线校验", "tool_calls": []},
+    )
+    result = _runner().run(_match(tmp_path), tool_dispatch=llm)
+
+    assert result["stopped_by"] == "tool_stop"
+    assert llm.calls[-1]["tools"] is None          # 收尾走无工具通道
+    out = result["output"]
+    assert "本次修改了 a.txt" in out                # 不再是孤零零一行 reason
+    assert "本次文件改动" in out and "新建 a.txt" in out
+    assert STOP_SUMMARY_PREFIX not in str(result["history"])   # 临时提示已 pop
+    _assert_no_dangling_tool_calls(result["history"])
+
+
+def test_stop_with_content_appends_manifest_without_extra_call(tmp_path):
+    """正文非空时不该多花一次 LLM 调用，但仍要附产物清单。"""
+    llm = RecordingLLM(
+        [_write_call(), _stop_call("完成", content="我把 a.txt 写好了")],
+        {"content": "不该被调用", "tool_calls": []},
+    )
+    result = _runner().run(_match(tmp_path), tool_dispatch=llm)
+
+    assert len(llm.calls) == 2
+    out = result["output"]
+    assert out.startswith("我把 a.txt 写好了")
+    assert "本次文件改动" in out and "a.txt" in out
+    assert "不该被调用" not in out
+
+
+def test_change_manifest_groups_and_labels():
+    steps = [
+        {"type": "read_file", "path": "/p/x.py"},
+        {"type": "write_file", "path": "/p/new.py", "bytes": 42, "created": True},
+        {"type": "edit_file", "path": "/p/old.py", "edits_count": 3},
+        {"type": "write_file", "path": "/p/big.html", "bytes": 10,
+         "created": True, "staged": True},
+    ]
+    text = _change_manifest(steps)
+    assert "新建 /p/new.py（42 字节）" in text
+    assert "修改 /p/old.py（3 处编辑）" in text
+    assert "未转正" in text and "big.html" in text
+    assert "read_file" not in text
+    assert "合计 3 个文件" in text
+    assert _change_manifest([{"type": "bash", "path": None}]) == ""

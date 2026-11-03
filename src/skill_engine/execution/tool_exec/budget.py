@@ -5,6 +5,8 @@
 不进 messages 历史（不污染压缩 / 重放 / 续跑）。
 """
 
+import os
+
 
 def _progress_hint(iterations: int, max_iterations: int, step_results: "list|None" = None) -> str:
     """生成本轮迭代的预算进度提示（供模型自我调节收敛用）。
@@ -61,6 +63,83 @@ def _final_summary_prompt(iterations: int, max_iterations: int,
         "5. 建议下一步：下一位执行者应当先做什么。\n"
         "要求：不要编造未实际执行的结果；信息缺失就写“未知”；不要输出新的工具调用。"
     )
+
+
+# stop 收尾补写提示的前缀：同样用于调用后从 messages 中 pop。
+STOP_SUMMARY_PREFIX = "[收尾补写 · 工具已收回]"
+
+
+def _stop_summary_prompt(reason: str) -> str:
+    """stop 正文为空时，补一次面向用户的收尾说明（无工具）。
+
+    stop 的契约要求"完整最终答复写在同一轮正文里"；模型把内容放进 reasoning
+    而正文留空时，引擎不能只把一行 reason 当答复交付给用户。
+    """
+    return (
+        f"{STOP_SUMMARY_PREFIX}\n"
+        "你已调用 stop 结束任务，但本轮正文为空，用户看不到任何结论。\n"
+        "请只基于以上对话与工具结果，输出一份面向用户的收尾说明（不要再调用工具）：\n"
+        "1. 做了什么：每个文件写清「新建」还是「修改」以及完整路径；\n"
+        "2. 结果与验证：跑过哪些检查、结论如何；没验证就写“未验证”；\n"
+        "3. 未尽事项：还差什么、临时产物是否已清理。\n"
+        f"（stop 理由：{reason or '未提供'}）\n"
+        "要求：不要编造未实际执行的结果；信息缺失写“未知”。"
+    )
+
+
+def _change_manifest(step_results: "list|None", base_dir=None) -> str:
+    """把本轮真实发生的写/改汇总成产物清单（纯规则，零 LLM 成本）。
+
+    解决"任务结束了，用户不知道改了哪个文件、是新建还是修改、放在哪"。
+    """
+    merged: dict = {}
+    order: list = []
+    for s in step_results or []:
+        if not isinstance(s, dict):
+            continue
+        t = s.get("type")
+        if t not in ("write_file", "edit_file"):
+            continue
+        path = s.get("path") or "?"
+        if path not in merged:
+            merged[path] = {
+                "act": "修改" if t == "edit_file" else ("新建" if s.get("created") else "修改"),
+                "bytes": None, "edits": 0, "staged": False,
+            }
+            order.append(path)
+        info = merged[path]
+        if t == "edit_file":
+            info["edits"] += int(s.get("edits_count") or 0)
+            info["act"] = "修改" if info["act"] != "新建" else "新建后修改"
+        else:
+            if s.get("bytes") is not None:
+                info["bytes"] = s.get("bytes")
+        info["staged"] = bool(s.get("staged"))
+    if not order:
+        return ""
+
+    lines = ["—— 本次文件改动 ——"]
+    for path in order:
+        info = merged[path]
+        shown = path
+        if base_dir:
+            # 同盘符才显示相对路径（Windows 跨盘符无相对路径可算）
+            same_drive = (os.path.splitdrive(str(path))[0].lower()
+                          == os.path.splitdrive(str(base_dir))[0].lower())
+            if same_drive:
+                rel = os.path.relpath(path, str(base_dir))
+                if not rel.startswith(".."):
+                    shown = rel
+        bits = []
+        if info["bytes"] is not None:
+            bits.append(f"{info['bytes']} 字节")
+        if info["edits"]:
+            bits.append(f"{info['edits']} 处编辑")
+        if info["staged"]:
+            bits.append("未转正：内容不完整，留在 *.partial")
+        lines.append(f"· {info['act']} {shown}" + (f"（{'; '.join(bits)}）" if bits else ""))
+    lines.append(f"合计 {len(order)} 个文件")
+    return "\n".join(lines)
 
 
 def _build_handoff(messages: "list[dict]", step_results: "list[dict]", skill_name: str) -> str:

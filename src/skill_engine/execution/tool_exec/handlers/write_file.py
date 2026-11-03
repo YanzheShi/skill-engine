@@ -160,6 +160,7 @@ class WriteFileHandler(BaseHandler):
                     "path": str(full_path),
                     "mode": mode,
                     "bytes": total,
+                    "created": not existed,
                     "staged": not finalized,
                 },
                 files_created=[str(full_path)] if finalized else [],
