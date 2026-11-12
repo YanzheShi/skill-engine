@@ -63,7 +63,9 @@ class MemoryConfig:
     auto_distill: bool = True
     distill_model: str = "secondary"
     auto_commit_project: str = "high"
-    auto_commit_user: str = "review"
+    # 只对安全类型生效（preference/feedback/environment/decision）；
+    # identity/resource/phase/state/task/term 与 L3 始终进 INBOX。
+    auto_commit_user: str = "high"
 
     default_sensitivity: str = "L2"
     l3_injection: str = "on_demand"  # always | on_demand | allowlist

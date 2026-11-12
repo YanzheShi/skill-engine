@@ -16,7 +16,7 @@
 | 存储 | Markdown 为事实源，SQLite FTS5 为可重建索引 |
 | 作用域 | `user` / `project` 默认开启；预留 `skill` / `device` / `session` |
 | 场景处理 | 场景、阶段、职业方向全部是数据（`type` / `domain` / `entity`），不是表结构 |
-| 写入 | 显式记录 + 项目级自动沉淀 + 用户级候选评审 |
+| 写入 | 显式记录 + 项目级自动沉淀 + 用户级安全类型自动、其余候选评审 |
 | 读取 | PROFILE + NOW + 项目视图常驻；路径/实体精确解析；其余按需检索 |
 | 时间 | 所有记录支持 `valid_from` / `valid_until` / `observed_at`；过期不冒充现在 |
 | 隐私 | 敏感度挂在记录上（L1/L2/L3），L3 默认按需注入，并做日志/导出脱敏 |
@@ -593,7 +593,8 @@ CREATE TABLE memory_events (
   - 同内容 hash 去重。
 - 提交策略：
   - 项目级 `fact` / `decision` / `feedback`：高置信自动提交；
-  - 用户级 `preference` / `feedback`：进入 INBOX，用户确认；
+  - 用户级 `preference` / `feedback` / `environment` / `decision`：高置信且 L1/L2 时自动 active；
+  - 用户级 `identity` / `resource` / `phase` / `state` / `task` / `term` 与所有 L3：进入 INBOX；
   - `identity` / `resource` / `phase` / `state`：必须确认；
   - 低置信全部进 INBOX。
 
@@ -793,7 +794,7 @@ P1/P2 支持：
 
 - INBOX 保存自动候选，展示：类型、标题、摘要、来源、置信度、敏感度、建议 scope。
 - 操作：接受 / 编辑后接受 / 拒绝 / 合并到已有记录。
-- 用户级身份、路径、阶段、状态永远需要评审。
+- 用户级身份、路径、阶段、状态、任务、术语永远需要评审；preference/feedback/environment/decision 的高置信安全项可自动接受。
 - 项目级高置信事实可以自动接受，但保留 7 天可撤销窗口。
 
 ### 9.3 遗忘
@@ -1055,7 +1056,7 @@ settings:
     distill_model: secondary       # 便宜模型
     auto_commit:
       project: high                # 项目级高置信自动提交
-      user: review                 # 用户级一律评审
+      user: high                   # 用户级仅安全类型自动；L3/身份/路径等仍进 INBOX
 
     sensitivity:
       default: L2
@@ -1076,7 +1077,7 @@ settings:
 默认策略：
 
 - user + project 都开启（按用户决定）。
-- 项目级自动沉淀开启；用户级自动沉淀只生成候选。
+- 项目级自动沉淀开启；用户级安全类型自动接受，身份/路径/阶段/状态/任务/术语和 L3 只生成候选。
 - L3 默认按需注入，不常驻。
 - 无配置文件时使用安全默认值；路径不存在时优雅降级为空记忆。
 
@@ -1249,7 +1250,7 @@ settings:
 验收：
 
 - 长会话压缩后仍能找回关键结论。
-- 自动候选精确率可接受；用户级不自动改。
+- 自动候选精确率可接受；用户级安全类型自动、身份/路径/阶段/状态等高风险项仍进 INBOX。
 - 阶段归档/新阶段切换无需改代码。
 
 ### P3 — 个人助手增强（可选）
@@ -1282,7 +1283,7 @@ settings:
 ## 19. 待确认问题
 
 1. **存储主源**：Markdown 为源 + SQLite 索引（本文推荐），还是 SQLite 为主 + Markdown 导出？
-2. **自动蒸馏默认**：项目级自动、用户级评审（本文推荐），还是两者都先评审？
+2. **自动蒸馏默认**：已确认采用“项目级自动 + 用户级安全类型自动、其余进 INBOX”；`auto_commit.user: review` 可整体关闭用户级自动。
 3. **L3 默认注入**：按需/白名单（本文推荐），还是本地会话常驻？
 4. **阶段变更入口**：只允许 CLI/REPL（本文推荐，避免模型擅自改阶段），还是也给 Agent 工具？
 5. **保留期**：episode 90 天、resource 校验 30 天、L3 永久直到用户删除——是否合适？
@@ -1468,7 +1469,7 @@ source: session/2026-10-31
 - 不提取工具输出、临时命令、一次性路径、未验证猜测。
 - 不编造；没有来源就不输出。
 - 每条只写一件事；正文不超过 800 字。
-- 用户级身份/路径/阶段/状态一律标记为需要评审。
+- 用户级 preference/feedback/environment/decision 的高置信安全项可自动；身份/路径/阶段/状态/任务/术语与 L3 标记为需要评审。
 
 ---
 
@@ -1484,6 +1485,6 @@ source: session/2026-10-31
 - [ ] 项目记忆不会进入公开仓库（`.skill-engine/` 已忽略）。
 - [ ] 压缩后仍能通过记忆找回关键结论。
 - [ ] 记忆注入总预算 ≤ 1500 token（可配置）。
-- [ ] 用户级自动候选不直接落库，进入 INBOX。
+- [ ] 用户级安全类型（preference/feedback/environment/decision，high，L1/L2）可自动 active；身份/路径/阶段/状态/任务/术语与 L3 进入 INBOX。
 - [ ] `memory forget` 能删干净并留审计。
 - [ ] CLI/REPL/工具三套入口行为一致。

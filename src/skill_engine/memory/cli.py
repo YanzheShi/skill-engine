@@ -127,18 +127,30 @@ def memory_search(
 
 @memory_app.command("review")
 def memory_review(
+    auto: bool = typer.Option(False, "--auto", help="按安全策略自动评审（默认 dry-run）"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="实际执行自动评审"),
     root: str | None = typer.Option(None, "--working-root", "-w"),
 ):
-    """列出 INBOX 中待评审的蒸馏/导入候选。"""
+    """列出 INBOX；--auto 时先展示接受/合并/保留计划。"""
     svc = _service(root)
     try:
+        if auto:
+            plan = svc.auto_review_pending(dry_run=True)
+            print(_json(plan))
+            if not yes:
+                print("[memory] dry-run：未修改数据；加 --yes 执行")
+                return
+            svc.auto_review_pending(dry_run=False)
+            print(f"[memory] 已自动接受 {len(plan['accept'])} 条，"
+                  f"合并/拒绝 {len(plan['reject'])} 条，保留 {len(plan['keep'])} 条")
+            return
         pending = svc.pending_records()
         if not pending:
             print("[memory] INBOX 为空")
             return
         for record in pending:
             print(f"[{record.id}] [{record.type}/{record.scope}] {record.title}: {record.summary(160)}")
-        print(f"共 {len(pending)} 条待评审；accept/reject 后生效")
+        print(f"共 {len(pending)} 条待评审；accept/reject 后生效；可用 --auto 自动评审")
     finally:
         svc.close()
 

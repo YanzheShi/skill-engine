@@ -98,6 +98,95 @@ def test_rule_distill_auto_commit_and_review(svc):
     assert svc.get(extra.id) is None
 
 
+def test_user_scope_auto_policy(svc):
+    def can(**overrides):
+        candidate = {
+            "scope": "user", "type": "preference",
+            "confidence": "high", "sensitivity": "L1",
+        }
+        candidate.update(overrides)
+        return svc._should_auto_commit(candidate)
+
+    assert can() is True
+    assert can(type="feedback") is True
+    assert can(type="environment") is True
+    assert can(type="decision") is True
+    assert can(type="identity") is False
+    assert can(type="resource") is False
+    assert can(type="phase") is False
+    assert can(type="state") is False
+    assert can(type="task") is False
+    assert can(confidence="medium") is False
+    assert can(sensitivity="L3") is False
+
+    assert svc._should_auto_commit({
+        "scope": "project", "type": "fact", "confidence": "high", "sensitivity": "L1",
+    }) is True
+
+    svc.config.auto_commit_user = "review"
+    assert can() is False
+
+
+def test_auto_review_pending_merges_duplicates(svc):
+    for suffix in ("A", "B", "C"):
+        svc.commit_candidate({
+            "type": "feedback",
+            "title": f"Windows 路径与 Shell 规范 {suffix}",
+            "body": "在 Windows 环境中必须使用原生路径写法，禁止使用 Git Bash 的 /d/... 写法。",
+            "scope": "user", "confidence": "high", "sensitivity": "L1",
+            "source": "test",
+        }, auto=False)
+    svc.commit_candidate({
+        "type": "preference", "title": "汇报偏好",
+        "body": "汇报使用一屏密度和大数字。",
+        "scope": "user", "confidence": "high", "sensitivity": "L1", "source": "test",
+    }, auto=False)
+    svc.commit_candidate({
+        "type": "identity", "title": "身份信息",
+        "body": "这是需要人工确认的身份信息。",
+        "scope": "user", "confidence": "high", "sensitivity": "L2", "source": "test",
+    }, auto=False)
+    svc.commit_candidate({
+        "type": "preference", "title": "HTML 复习笔记",
+        "body": "一次性需求，不应该自动激活。",
+        "scope": "user", "confidence": "medium", "sensitivity": "L1", "source": "test",
+    }, auto=False)
+
+    before = len(svc.pending_records())
+    plan = svc.auto_review_pending(dry_run=True)
+    assert len(plan["accept"]) == 2  # Windows canonical + 汇报偏好
+    assert len(plan["reject"]) == 2  # Windows 两个重复项
+    assert len(plan["keep"]) == 2    # identity + medium preference
+    assert len(svc.pending_records()) == before
+
+    svc.auto_review_pending(dry_run=False)
+    active_titles = {r.title for r in svc.list_records() if r.status == "active"}
+    assert "汇报偏好" in active_titles
+    assert sum(1 for r in svc.list_records() if "Windows 路径与 Shell 规范" in r.title and r.status == "active") == 1
+    assert sum(1 for r in svc.list_records() if "Windows 路径与 Shell 规范" in r.title) == 1
+    assert svc.get(next(r.id for r in svc.list_records() if r.title == "身份信息")).status == "pending"
+
+
+def test_auto_commit_reuses_pending_duplicate(svc):
+    original = svc.commit_candidate({
+        "type": "feedback",
+        "title": "循环调用规范",
+        "body": "相同参数连续两轮应改变策略，不要原样重试。",
+        "scope": "user", "confidence": "high", "sensitivity": "L1", "source": "test",
+    }, auto=False)
+    count_before = len(svc.list_records())
+
+    reused = svc.commit_candidate({
+        "type": "feedback",
+        "title": "循环调用警告处理",
+        "body": "相同参数连续两轮必须改变策略，不能原样重试。",
+        "scope": "user", "confidence": "high", "sensitivity": "L1", "source": "test",
+    }, auto=True)
+    assert reused.id == original.id
+    assert reused.status == "active"
+    assert len(svc.list_records()) == count_before
+
+
 def test_llm_distill_candidates(tmp_path):
     class FakeLLM:
         def invoke(self, prompt):

@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .consolidate import group_records, pick_canonical, similarity
 from .index import MemoryIndex
 from .models import (
     CONFIDENCE_RANK,
@@ -348,6 +349,14 @@ class MemoryService:
         elif not auto and conflicts and not supersedes:
             supersedes = conflicts[0].id
 
+        if auto and scope in ("user", "skill"):
+            # 先做主题去重：同一规则被多次蒸馏时，不重复激活/创建新文件。
+            similar = self._find_similar_candidate(type_, title, body, scope)
+            if similar is not None:
+                if similar.status == "pending":
+                    return self.update(similar.id, status="active") or similar
+                return similar
+
         try:
             importance = float(candidate.get("importance") or 0.5)
         except (TypeError, ValueError):
@@ -422,11 +431,35 @@ class MemoryService:
                 self._distill_llm = False
         return self._distill_llm or None
 
+    def _find_similar_candidate(self, type_: str, title: str, body: str, scope: str):
+        store = self.user_store if scope in ("user", "skill") else self.project_store
+        text = f"{title} {body}"
+        for record in store.list_records():
+            if record.status not in ("active", "pending"):
+                continue
+            if record.type != type_ and {record.type, type_} != {"preference", "feedback"}:
+                continue
+            if similarity(text, f"{record.title} {record.body}") >= 0.24:
+                return record
+        return None
+
     def _should_auto_commit(self, candidate: dict[str, Any]) -> bool:
-        setting = str(self.config.auto_commit_project or "high").strip().lower()
-        confidence = str(candidate.get("confidence") or "")
+        scope = str(candidate.get("scope") or "project").strip().lower()
+        if scope in ("user", "skill"):
+            setting = str(self.config.auto_commit_user or "high").strip().lower()
+            # 身份/路径/阶段/状态/任务/术语永远需要评审；fact 在用户级也可能
+            # 是易变环境事实，先不自动激活。
+            allowed_types = {"preference", "feedback", "environment", "decision"}
+        elif scope == "project":
+            setting = str(self.config.auto_commit_project or "high").strip().lower()
+            allowed_types = {"fact", "decision", "feedback"}
+        else:
+            return False
         if setting in ("review", "none", "off", "pending"):
             return False
+        if str(candidate.get("sensitivity") or "L2").upper() == "L3":
+            return False
+        confidence = str(candidate.get("confidence") or "")
         if setting == "high":
             required = "high"
         elif setting == "medium":
@@ -434,10 +467,39 @@ class MemoryService:
         else:
             required = ("high", "medium", "low")
         return (
-            str(candidate.get("scope") or "project") == "project"
-            and str(candidate.get("type") or "") in ("fact", "decision", "feedback")
+            str(candidate.get("type") or "") in allowed_types
             and confidence in required
         )
+
+    def auto_review_pending(self, *, dry_run: bool = True) -> dict[str, Any]:
+        """按安全策略自动接受 canonical，合并/拒绝重复 pending 记录。"""
+        pending = self.pending_records()
+        groups = group_records(pending, threshold=0.24, same_type_only=False)
+        plan: dict[str, Any] = {
+            "accept": [], "reject": [], "keep": [], "groups": [],
+        }
+        for group in groups:
+            canonical = pick_canonical(group)
+            eligible = self._should_auto_commit(canonical.to_dict())
+            ids = [r.id for r in group]
+            plan["groups"].append({
+                "ids": ids,
+                "canonical": canonical.id,
+                "type": canonical.type,
+                "title": canonical.title,
+                "eligible": eligible,
+            })
+            if eligible:
+                plan["accept"].append(canonical.id)
+                plan["reject"].extend(r.id for r in group if r.id != canonical.id)
+            else:
+                plan["keep"].extend(ids)
+        if not dry_run:
+            for record_id in plan["accept"]:
+                self.review_accept(record_id)
+            for record_id in plan["reject"]:
+                self.review_reject(record_id)
+        return plan
 
     def write_episode(
         self,
